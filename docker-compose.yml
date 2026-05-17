@@ -9,9 +9,9 @@ services:
       - "8080:8080"
     volumes:
       - ./config/roles.yaml:/etc/aga/roles.yaml:ro
-      - ./config/keys:/etc/aga/keys:ro
       - ./data/trace.db:/var/lib/aga/trace.db
       - ./data/work:/var/lib/aga/work
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - RUST_LOG=info
       - AGA_CONFIG_PATH=/etc/aga/roles.yaml
@@ -19,19 +19,8 @@ services:
       - AGA_WORK_BASE=/var/lib/aga/work
       - LLM_API_URL=${LLM_API_URL:-http://ollama:11434/v1}
       - LLM_API_KEY=${LLM_API_KEY:-}
-    read_only: true
-    tmpfs:
-      - /tmp:noexec,nosuid,size=64m
-      - /run:noexec,nosuid,size=16m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pid_limit: 50
-    cpus: "2.0"
-    memory: "1g"
-    working_dir: /app
-    user: "1000:1000"
+    command: ["./aga"]
+    depends_on: []
     networks:
       - aga-net
 

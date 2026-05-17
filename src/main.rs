@@ -3,7 +3,6 @@ mod trace;
 mod llm;
 mod agent;
 mod server;
-mod ssh_wrapper;
 
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
