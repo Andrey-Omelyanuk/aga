@@ -1,69 +1,68 @@
-```
 # Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+dist/
+build/
 target/
+.gradle/
 
-# Logs and temp files
-*.log
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 *.tmp
 
-# Environment
+# System
+.DS_Store
+Thumbs.db
 .env
 .env.local
 *.env.*
 
-# Editors
-.vscode/
-.idea/
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
-.venv/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
+# Logs
 *.log
-.git*
-!Makefile
-!README*
-!readme*
-!CHANGES*
-!changelog*
 
-# Rust specific
-Cargo.lock
-*.rs.bk
-**/*.d
-**/*.o
-**/*.a
-**/*.dylib
-**/*.so
-**/*.dll
-**/*.exe
-**/*~
-**/.*~
+# Coverage
+coverage/
+htmlcov/
+.coverage
 
-# Docker
-.dockerenv
-.dockerinit
+# Compiled
+*.pyc
+*.class
+*.o
+*.exe
+*.dll
+*.so
+*.a
+*.obj
+*.out
 
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-```
+# Compressed
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.xz
+*.7z
+*.rar
+*.zst
+*.lz4
+*.lzh
+*.cab
+*.arj
+*.rpm
+*.deb
+*.Z
+*.lz
+*.lzo
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
