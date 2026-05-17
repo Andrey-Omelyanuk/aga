@@ -9,7 +9,7 @@ authors = ["aga team"]
 # HTTP сервер
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 reqwest = { version = "0.11", features = ["json"] }
 
 # Сериализация

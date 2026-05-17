@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio::sync::mpsc;
 use futures_util::stream::{self, Stream};
+use tower_http::services::ServeDir;
 
 use crate::config::Config;
 use crate::trace::TraceStore;
@@ -52,6 +53,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/trace/:task_id", get(get_trace))
         .route("/human/pending", get(pending_human_requests))
         .route("/human/answer/:id", post(answer_human_request))
+        .nest_service("/", ServeDir::new("static"))
         .with_state(state)
 }
 
