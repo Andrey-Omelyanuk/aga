@@ -1,0 +1,25 @@
+version: "3.8"
+services:
+  aga:
+    build: .
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    tmpfs: [/tmp:noexec,nosuid,size=64M]
+    volumes:
+      - ./config/roles.yaml:/etc/aga/roles.yaml:ro
+      - ./config/keys:/etc/aga/keys:ro
+      - ./data/trace.db:/var/aga/trace.db
+      - ./data/work:/work
+    environment:
+      - RUST_LOG=aga=info
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://host.docker.internal:11434}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5-coder:7b}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - DATABASE_URL=sqlite:///var/aga/trace.db
+    ports: ["8080:8080"]
+    cpus: 4.0
+    mem_limit: 4g
+    pids_limit: 256
+    restart: unless-stopped
