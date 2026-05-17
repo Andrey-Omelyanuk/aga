@@ -2,6 +2,7 @@ use regex::Regex;
 use crate::config::RoleConfig;
 use crate::trace::TraceStore;
 use crate::llm::LlmClient;
+use tokio::process::Command;
 
 pub struct Agent {
     role_config: RoleConfig,
@@ -55,7 +56,6 @@ impl Agent {
                     
                     self.trace_store.add_entry(task_id, step, "human_request", &question_text, Some(&request_id)).await?;
                     
-                    // Ждём ответа (в реальной реализации будет ожидание через API)
                     return Ok(format!("[WAITING_FOR_HUMAN] Request ID: {}", request_id));
                 }
             }
@@ -69,28 +69,20 @@ impl Agent {
                 break;
             }
 
-            // Выполняем команды (если есть target)
-            if let Some(_target) = &self.role_config.target {
-                for cmd in commands {
-                    if !self.is_command_allowed(&cmd) {
-                        let error = format!("Command '{}' is not allowed", cmd);
-                        self.trace_store.add_entry(task_id, step, "error", &error, None).await?;
-                        return Err(error.into());
-                    }
-
-                    // В полной версии здесь будет SSH выполнение
-                    // Для демо просто логируем
-                    self.trace_store.add_entry(task_id, step, "command", &cmd, None).await?;
-                    
-                    // Симуляция выполнения (удалить при реализации SSH)
-                    let output = format!("[SIMULATED] Executed: {}", cmd);
-                    self.trace_store.add_entry(task_id, step, "command_output", &output, None).await?;
-                    history.push(format!("$ {}\n{}", cmd, output));
+            // Выполняем команды через docker compose exec
+            for cmd in commands {
+                if !self.is_command_allowed(&cmd) {
+                    let error = format!("Command '{}' is not allowed", cmd);
+                    self.trace_store.add_entry(task_id, step, "error", &error, None).await?;
+                    return Err(error.into());
                 }
-            } else {
-                // Demo режим без SSH
-                result = response.clone();
-                break;
+
+                self.trace_store.add_entry(task_id, step, "command", &cmd, None).await?;
+                
+                // Выполняем команду через docker compose exec
+                let output = self.execute_command(&cmd).await?;
+                self.trace_store.add_entry(task_id, step, "command_output", &output, None).await?;
+                history.push(format!("$ {}\n{}", cmd, output));
             }
         }
 
@@ -107,6 +99,25 @@ impl Agent {
         }
 
         Ok(result)
+    }
+
+    async fn execute_command(&self, command: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Для локального запуска выполняем команды напрямую в shell
+        // В production можно заменить на docker compose exec
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        
+        if output.status.success() {
+            Ok(stdout)
+        } else {
+            Err(format!("Command failed: {}\n{}", stderr, stdout).into())
+        }
     }
 
     fn extract_commands(&self, text: &str) -> Vec<String> {

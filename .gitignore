@@ -1,7 +1,6 @@
 ```
 # Dependencies
 target/
-Cargo.lock
 
 # Logs and temp files
 *.log
@@ -16,15 +15,55 @@ Cargo.lock
 .vscode/
 .idea/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Coverage
-coverage/
-htmlcov/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
 .coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git*
+!Makefile
+!README*
+!readme*
+!CHANGES*
+!changelog*
 
-# Rust-specific
-**/*.rs.bk
+# Rust specific
+Cargo.lock
+*.rs.bk
+**/*.d
+**/*.o
+**/*.a
+**/*.dylib
+**/*.so
+**/*.dll
+**/*.exe
+**/*~
+**/.*~
+
+# Docker
+.dockerenv
+.dockerinit
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 ```
