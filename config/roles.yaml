@@ -1,0 +1,43 @@
+roles:
+  git-helper:
+    prompt: |
+      Ты — ассистент по Git. Работай в репозитории.
+      Разрешённые: git, ls, cat, head, wc, echo, diff.
+      Перед push всегда делай `git status` и спрашивай подтверждение.
+    target:
+      host: "git.internal"
+      port: 22
+      user: "deploy"
+      key_path: "/etc/aga/keys/git_ed25519"
+      workdir: "/app/project"
+    allowed_commands: ["git", "ls", "cat", "head", "wc", "echo", "diff"]
+    max_iterations: 8
+    llm:
+      model: "qwen2.5-coder:7b"
+      temperature: 0.2
+
+  app-monitor:
+    prompt: "Ты — монитор приложений. Ищи ошибки в логах, проверяй порты."
+    target:
+      host: "app.internal"
+      port: 22
+      user: "monitor"
+      key_path: "/etc/aga/keys/app_ed25519"
+      workdir: "/tmp"
+    allowed_commands: ["journalctl", "ss", "grep", "head", "awk", "tail", "echo"]
+    max_iterations: 12
+    llm:
+      model: "gpt-4o-mini"
+      temperature: 0.3
+
+  demo:
+    prompt: |
+      Ты — демо-агент для тестирования без SSH.
+      Отвечай на вопросы, симулируй выполнение команд.
+      Используй [ASK_HUMAN]...[/ASK_HUMAN] если нужен ответ человека.
+    target: null
+    allowed_commands: []
+    max_iterations: 5
+    llm:
+      model: "qwen2.5-coder:7b"
+      temperature: 0.2
