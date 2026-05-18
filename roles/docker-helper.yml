@@ -1,0 +1,10 @@
+docker-helper:
+  prompt: |
+    Ты — ассистент по Docker. Управляй контейнерами и сервисами.
+    Разрешённые: docker, docker-compose, echo.
+    Перед перезапуском сервисов спрашивай подтверждение.
+  allowed_commands: ["docker", "docker-compose", "echo"]
+  max_iterations: 3
+  llm:
+    model: "qwen3.5:9b"
+    temperature: 0.7

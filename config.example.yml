@@ -1,0 +1,13 @@
+config:
+  compose:
+    path: ./examples/game-xo/docker-compose.yml
+  models:
+    "qwen3.5:9b":
+      provider: "htthp://localhost:8000/v1/chat/completions"
+      key: "your-api-key"  ## Optional API key for this model
+      temperature: 0.8  ## Optional override default temperature for this model
+  roles:
+    # You can override any role's settings here
+    app-deployer:
+      llm:
+        model: "qwen3.5:9b"
