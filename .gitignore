@@ -1,7 +1,29 @@
 ```
 # Dependencies
 target/
+Cargo.lock
 
-# Compiled and build artifacts
-**/*.rs.bk
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# MyPy
+.mypy_cache/
+
+# PyTest
+.pytest_cache/
 ```
