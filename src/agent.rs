@@ -1,8 +1,21 @@
-use regex::Regex;
 use crate::config::RoleConfig;
-use crate::trace::TraceStore;
 use crate::llm::LlmClient;
+use crate::trace::TraceStore;
+use regex::Regex;
 use tokio::process::Command;
+
+/// Способ исполнения команд.
+#[derive(Debug, Clone, Default)]
+pub enum Executor {
+    /// Локальное исполнение `sh -c` (dev-режим).
+    #[default]
+    Sh,
+    /// Исполнение внутри контейнера через `docker compose exec`.
+    DockerCompose {
+        compose_path: String,
+        service: String,
+    },
+}
 
 pub struct Agent {
     role_config: RoleConfig,
@@ -10,41 +23,70 @@ pub struct Agent {
     trace_store: TraceStore,
     command_regex: Regex,
     ask_human_regex: Regex,
+    executor: Executor,
 }
 
 impl Agent {
     pub fn new(role_config: RoleConfig, llm_client: LlmClient, trace_store: TraceStore) -> Self {
+        Self::with_executor(role_config, llm_client, trace_store, Executor::Sh)
+    }
+
+    pub fn with_executor(
+        role_config: RoleConfig,
+        llm_client: LlmClient,
+        trace_store: TraceStore,
+        executor: Executor,
+    ) -> Self {
         let command_regex = Regex::new(r"```(?:bash|sh)?\n(.*?)\n```").unwrap();
         let ask_human_regex = Regex::new(r"\[ASK_HUMAN\](.*?)\[/ASK_HUMAN\]").unwrap();
-        
+
         Self {
             role_config,
             llm_client,
             trace_store,
             command_regex,
             ask_human_regex,
+            executor,
         }
     }
 
-    pub async fn run(&self, task_id: &str, task: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.trace_store.create_task(task_id, &self.role_config.prompt.split_whitespace().next().unwrap_or("unknown")).await?;
-        
+    pub async fn run(
+        &self,
+        task_id: &str,
+        task: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.trace_store
+            .create_task(
+                task_id,
+                self.role_config
+                    .prompt
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("unknown"),
+            )
+            .await?;
+
         let mut history: Vec<String> = Vec::new();
         let mut step = 0;
         let mut result = String::new();
 
         while step < self.role_config.max_iterations as i32 {
             step += 1;
-            
-            // Запрос к LLM
-            let response = self.llm_client.chat(
-                &self.role_config.llm,
-                &self.role_config.prompt,
-                task,
-                &history,
-            ).await?;
 
-            self.trace_store.add_entry(task_id, step, "llm_response", &response, None).await?;
+            // Запрос к LLM
+            let response = self
+                .llm_client
+                .chat(
+                    &self.role_config.llm,
+                    &self.role_config.prompt,
+                    task,
+                    &history,
+                )
+                .await?;
+
+            self.trace_store
+                .add_entry(task_id, step, "llm_response", &response, None)
+                .await?;
             history.push(task.to_string());
             history.push(response.clone());
 
@@ -52,17 +94,28 @@ impl Agent {
             if let Some(captures) = self.ask_human_regex.captures(&response) {
                 if let Some(question) = captures.get(1) {
                     let question_text = question.as_str().trim().to_string();
-                    let request_id = self.trace_store.create_human_request(task_id, &question_text).await?;
-                    
-                    self.trace_store.add_entry(task_id, step, "human_request", &question_text, Some(&request_id)).await?;
-                    
+                    let request_id = self
+                        .trace_store
+                        .create_human_request(task_id, &question_text)
+                        .await?;
+
+                    self.trace_store
+                        .add_entry(
+                            task_id,
+                            step,
+                            "human_request",
+                            &question_text,
+                            Some(&request_id),
+                        )
+                        .await?;
+
                     return Ok(format!("[WAITING_FOR_HUMAN] Request ID: {}", request_id));
                 }
             }
 
             // Извлекаем команды из ответа
             let commands = self.extract_commands(&response);
-            
+
             if commands.is_empty() {
                 // Если нет команд, считаем что это финальный ответ
                 result = response.clone();
@@ -73,15 +126,21 @@ impl Agent {
             for cmd in commands {
                 if !self.is_command_allowed(&cmd) {
                     let error = format!("Command '{}' is not allowed", cmd);
-                    self.trace_store.add_entry(task_id, step, "error", &error, None).await?;
+                    self.trace_store
+                        .add_entry(task_id, step, "error", &error, None)
+                        .await?;
                     return Err(error.into());
                 }
 
-                self.trace_store.add_entry(task_id, step, "command", &cmd, None).await?;
-                
+                self.trace_store
+                    .add_entry(task_id, step, "command", &cmd, None)
+                    .await?;
+
                 // Выполняем команду через docker compose exec
                 let output = self.execute_command(&cmd).await?;
-                self.trace_store.add_entry(task_id, step, "command_output", &output, None).await?;
+                self.trace_store
+                    .add_entry(task_id, step, "command_output", &output, None)
+                    .await?;
                 history.push(format!("$ {}\n{}", cmd, output));
             }
         }
@@ -93,7 +152,7 @@ impl Agent {
         };
 
         self.trace_store.complete_task(task_id, status).await?;
-        
+
         if result.is_empty() {
             result = "Task completed. Check trace for details.".to_string();
         }
@@ -101,18 +160,39 @@ impl Agent {
         Ok(result)
     }
 
-    async fn execute_command(&self, command: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Для локального запуска выполняем команды напрямую в shell
-        // В production можно заменить на docker compose exec
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .await?;
+    async fn execute_command(
+        &self,
+        command: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        match &self.executor {
+            Executor::Sh => {
+                let output = Command::new("sh").arg("-c").arg(command).output().await?;
+                Self::collect(output)
+            }
+            Executor::DockerCompose {
+                compose_path,
+                service,
+            } => {
+                let output = Command::new("docker")
+                    .args(["compose", "-f"])
+                    .arg(compose_path)
+                    .args(["exec", "-T"])
+                    .arg(service)
+                    .args(["sh", "-c"])
+                    .arg(command)
+                    .output()
+                    .await?;
+                Self::collect(output)
+            }
+        }
+    }
 
+    fn collect(
+        output: std::process::Output,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        
+
         if output.status.success() {
             Ok(stdout)
         } else {
@@ -140,14 +220,20 @@ impl Agent {
     fn is_command_allowed(&self, command: &str) -> bool {
         // Извлекаем первую часть команды (до пробелов и аргументов)
         let base_cmd = command.split_whitespace().next().unwrap_or("");
-        
+
         // Проверка на опасные конструкции
-        if command.contains('|') || command.contains('>') || command.contains('<') || command.contains(';') || command.contains('&') {
+        if command.contains('|')
+            || command.contains('>')
+            || command.contains('<')
+            || command.contains(';')
+            || command.contains('&')
+        {
             return false;
         }
 
-        self.role_config.allowed_commands.iter().any(|allowed| {
-            base_cmd == allowed || base_cmd.starts_with(&format!("{}-", allowed))
-        })
+        self.role_config
+            .allowed_commands
+            .iter()
+            .any(|allowed| base_cmd == allowed || base_cmd.starts_with(&format!("{}-", allowed)))
     }
 }

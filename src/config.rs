@@ -4,6 +4,18 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub roles: HashMap<String, RoleConfig>,
+    #[serde(default)]
+    pub sso: Option<SsoConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SsoConfig {
+    /// Если включено — API принимает Bearer-токены и сопоставляет `sub` с chat_user.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Проверка подписи JWT против JWKS (пока не реализована).
+    #[serde(default)]
+    pub jwks_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

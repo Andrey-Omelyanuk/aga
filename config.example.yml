@@ -1,13 +1,27 @@
-config:
-  compose:
-    path: ./examples/game-xo/docker-compose.yml
-  models:
-    "qwen3.5:9b":
-      provider: "htthp://localhost:8000/v1/chat/completions"
-      key: "your-api-key"  ## Optional API key for this model
-      temperature: 0.8  ## Optional override default temperature for this model
-  roles:
-    # You can override any role's settings here
-    app-deployer:
-      llm:
-        model: "qwen3.5:9b"
+# Пример runtime-конфига для локального запуска.
+# Копируется в config/roles.yaml через `make init`.
+# Пресеты ролей — в roles/; можно ссылаться на них или переопределять.
+roles:
+  app-deployer:
+    prompt: |
+      Ты — деплоер приложений. Поднимай новые сервисы через docker-compose.
+    allowed_commands: ["docker-compose", "docker", "echo"]
+    max_iterations: 3
+    llm:
+      model: "qwen3.5:9b"
+      temperature: 0.7
+  docker-helper:
+    prompt: |
+      Ты — ассистент по Docker. Управляй контейнерами и сервисами.
+      Разрешённые: docker, docker-compose, echo.
+      Перед перезапуском сервисов спрашивай подтверждение.
+    allowed_commands: ["docker", "docker-compose", "echo"]
+    max_iterations: 3
+    llm:
+      model: "qwen3.5:9b"
+      temperature: 0.7
+
+# SSO (опционально). Выключен — все запросы под аноним-суперпользователем.
+sso:
+  enabled: false
+  jwks_url: null

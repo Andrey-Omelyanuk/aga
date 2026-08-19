@@ -2,18 +2,20 @@ version: "3.8"
 
 services:
   aga:
-    build: .
+    build:
+      context: ..
+      dockerfile: ../Dockerfile
     container_name: aga
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${PORT:-8080}:8080"
     volumes:
-      - ./config/roles.yaml:/etc/aga/roles.yaml:ro
-      - ./data/trace.db:/var/lib/aga/trace.db
-      - ./data/work:/var/lib/aga/work
+      - ../config/roles.yaml:/etc/aga/roles.yaml:ro
+      - ../data/trace.db:/var/lib/aga/trace.db
+      - ../data/work:/var/lib/aga/work
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=${RUST_LOG:-info}
       - AGA_CONFIG_PATH=/etc/aga/roles.yaml
       - AGA_DB_PATH=/var/lib/aga/trace.db
       - AGA_WORK_BASE=/var/lib/aga/work

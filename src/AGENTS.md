@@ -13,35 +13,42 @@
 ## Architecture
 ```
 src/
-├── main.rs    # Точка входа: env, init Config, TraceStore, LlmClient → AppState
-├── config.rs  # Config, RoleConfig, LlmConfig — загрузка из YAML
-├── llm.rs     # LlmClient — OpenAI-compatible HTTP-клиент
-├── agent.rs   # Agent — основной цикл: LLM → extract → exec → trace
-├── trace.rs   # TraceStore — SQLite: tasks, trace_entries, human_requests, projects, project_roles
-└── server.rs  # Axum Router + хендлеры API + SSE для human-запросов
+├── main.rs       # Точка входа: env, init Config, TraceStore, ChatStore, LlmClient→AppState
+├── config.rs     # Config, RoleConfig, LlmConfig, SsoConfig — загрузка из YAML
+├── llm.rs        # LlmClient — OpenAI-compatible HTTP-клиент
+├── agent.rs      # Agent — цикл LLM → extract → exec → trace; Executor (Sh / DockerCompose)
+├── trace.rs      # TraceStore — SQLite: tasks, trace_entries, human_requests, projects, project_roles
+├── chat.rs       # ChatStore — модель чата: chat_users, chats, participants, messages, artifacts, workstations
+├── workstation.rs# executor_for_workstation: resolve docker compose exec из compose-файла
+├── reactive.rs   # ReactiveRunner: реактивные агенты по @Agent.<role>, очередь на воркстейшн
+├── auth.rs       # resolve_user: аноним-суперюзер или Bearer JWT `sub` → chat_user
+└── server.rs     # Axum Router + хендлеры API + SSE для human-запросов
 ```
 
 ## Patterns
-- **Изоляция модулей:** `agent` зависит от `config`, `llm`, `trace`; `server` зависит от всех; `main` инициализирует и связывает.
-- **Состояние:** `AppState { config, trace_store, llm_client }` передаётся через Axum State.
+- **Изоляция модулей:** `agent` зависит от `config`, `llm`, `trace`; `chat`/`workstation`/`reactive`/`auth` зависят друг от друга и от `trace`; `server` зависит от всех; `main` инициализирует и связывает.
+- **Состояние:** `AppState { config, trace_store, chat_store, llm_client, reactive }` передаётся через Axum State.
 - **Ошибки:** `thiserror` для типизированных ошибок; `Box<dyn Error + Send + Sync>` в agent-цикле (потенциально разные типы ошибок).
 - **LLM-клиент:** один `LlmClient` на все роли; модель и температура из `RoleConfig`.
-- **SQLite:** CREATE TABLE IF NOT EXISTS при старте в `TraceStore::new`; WAL-режим; raw-запросы.
+- **SQLite:** CREATE TABLE IF NOT EXISTS при старте; WAL-режим; raw-запросы. Обязательно `SqliteConnectOptions::create_if_missing(true)` — `SqlitePool::connect` файл НЕ создаёт.
 - **SSE:** `/human/pending` — SSE-стрим для получения pending-запросов в реальном времени.
 
 ## Non-Obvious Rules
-- **TraceStore шире трассировки:** в нём же живут `projects` и `project_roles`. Это осознанное упрощение ради одного соединения с БД и одной точки миграции.
+- **TraceStore шире трассировки:** в нём же живут `projects` и `project_roles`. ChatStore — отдельный модуль с таблицами модели чата, БД одна (тот же файл).
 - **Безопасность команд:** `is_command_allowed()` банит пайпы (`|`), редиректы (`>`, `<`) и конкатенацию (`;`, `&`) на уровне строки — это поверх проверки `allowed_commands`.
-- **Agent per task:** Agent создаётся на каждый вызов `POST /tasks/:role`, не хранит state между вызовами.
-- **История в LLM-запросах:** чередование user/assistant (чётные — user, нечётные — assistant). Это упрощение для слабых LLM, не использующих multi-turn корректно.
+- **Agent per task / per reactive-сообщение:** Agent создаётся на каждую задачу и каждый реактивный запуск; state не хранится между вызовами.
 - **Команды из LLM:** извлекаются из markdown-блоков <code>```bash</code>. Код-блок может содержать несколько команд (построчно). Пустые строки и комментарии (`#`) игнорируются.
+- **Команды чата** (`#invite`/`#kick`/`#start`/`#end`/`#share`) — это обычные сообщения с дополнительной реакцией; разбираются в `chat::parse_command`, исполняются в server.rs.
+- **Реактивные агенты:** `@Agent.<role>` в сообщении триггерит ReactiveRunner.enqueue; очередь сериализуется per-workstation (ключ 0 = локальный хост). Ответ пишется сообщением от учётки агента + артефакт.
+- **Текущий пользователь:** без SSO — аноним-суперюзер; если SSO включён и есть Bearer JWT — `sub` → chat_user (создаётся при необходимости). Подпись токена пока не проверяется (минимально).
 - **Error handling в API:** большинство хендлеров при ошибке возвращают `500 INTERNAL_SERVER_ERROR` без деталей. Детали — в логах (tracing) и в БД (trace_entries с entry_type = "error").
 
 ## Verification
-- `cargo test` — unit-тесты для: `extract_commands`, `is_command_allowed`, `Config::load`, парсинга ответов.
-- `cargo clippy` — статический анализ без предупреждений.
-- **Критерий готовности:** все unit-тесты проходят; публичные API компилируются без ошибок.
+- `make test` (cargo test) — unit-тесты для: `extract_commands`, `is_command_allowed`, `Config::load`, `parse_command`, `mentioned_roles`, `first_service`, JWT-субъекта, открытия БД (`chatstore_opens_db`).
+- `make lint` (cargo clippy --all-targets) — статический анализ без предупреждений.
+- **Составные тесты:** `chatstore_opens_db` проверяет открытие TraceStore+ChatStore на временной БД.
+- **Критерий готовности:** все unit-тесты проходят; публичные API компилируются без ошибок; сервер отвечает на `/users`, `/chats`, `/chats/:id/messages`.
 
 ## Dependencies
 - Стандартная библиотека Rust
-- Внешние крейты: axum, tokio, tower-http, reqwest, serde, serde_yaml, serde_json, sqlx (sqlite + uuid), uuid, chrono, tracing, thiserror, regex, futures, futures-util, bytes
+- Внешние крейты: axum, tokio, tower-http, reqwest (rustls-tls), serde, serde_yaml, serde_json, sqlx (sqlite + uuid + chrono), uuid, chrono, tracing, thiserror, regex, base64, futures, futures-util, bytes

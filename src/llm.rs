@@ -1,6 +1,6 @@
+use crate::config::LlmConfig;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use crate::config::LlmConfig;
 
 #[derive(Debug, Serialize)]
 struct LlmRequest {
@@ -26,6 +26,7 @@ struct Choice {
     message: ChatMessage,
 }
 
+#[derive(Debug, Clone)]
 pub struct LlmClient {
     client: Client,
     api_url: String,
@@ -48,12 +49,10 @@ impl LlmClient {
         user_message: &str,
         history: &[String],
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let mut messages = vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: system_prompt.to_string(),
-            },
-        ];
+        let mut messages = vec![ChatMessage {
+            role: "system".to_string(),
+            content: system_prompt.to_string(),
+        }];
 
         // Добавляем историю диалога
         for (i, msg) in history.iter().enumerate() {
@@ -77,8 +76,9 @@ impl LlmClient {
             max_tokens: Some(2048),
         };
 
-        let mut req = self.client
-            .post(&format!("{}/chat/completions", self.api_url))
+        let mut req = self
+            .client
+            .post(format!("{}/chat/completions", self.api_url))
             .json(&request)
             .header("Content-Type", "application/json");
 
@@ -87,7 +87,7 @@ impl LlmClient {
         }
 
         let response = req.send().await?;
-        
+
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -95,7 +95,7 @@ impl LlmClient {
         }
 
         let llm_response: LlmResponse = response.json().await?;
-        
+
         llm_response
             .choices
             .first()

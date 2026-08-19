@@ -10,7 +10,7 @@ authors = ["aga team"]
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 
 # Сериализация
 serde = { version = "1", features = ["derive"] }
@@ -20,7 +20,7 @@ serde_yaml = "0.9"
 
 
 # База данных
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "uuid"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "uuid", "chrono"] }
 
 # Утилиты
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -29,6 +29,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 regex = "1"
+base64 = "0.21"
 futures = "0.3"
 bytes = "1"
 futures-util = "0.3"

@@ -1,9 +1,9 @@
-use sqlx::{SqlitePool, Row};
-use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, Row, SqlitePool};
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TraceEntry {
     pub id: String,
     pub task_id: String,
@@ -31,6 +31,7 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ProjectRole {
     pub project_id: i64,
     pub role_name: String,
@@ -41,10 +42,21 @@ pub struct TraceStore {
     pool: SqlitePool,
 }
 
+impl Clone for TraceStore {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+        }
+    }
+}
+
 impl TraceStore {
     pub async fn new(db_path: &str) -> Result<Self, sqlx::Error> {
-        let pool = SqlitePool::connect(db_path).await?;
-        
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let options = SqliteConnectOptions::from_str(db_path)?.create_if_missing(true);
+        let pool = SqlitePoolOptions::new().connect_with(options).await?;
+
         // Создаём таблицы
         sqlx::query(
             r#"
@@ -124,9 +136,11 @@ impl TraceStore {
         .await?;
 
         // Индексы для ускорения поиска
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_project_roles_project ON project_roles(project_id)")
-            .execute(&pool)
-            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_project_roles_project ON project_roles(project_id)",
+        )
+        .execute(&pool)
+        .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_project_roles_active ON project_roles(project_id, is_active)")
             .execute(&pool)
             .await?;
@@ -224,11 +238,7 @@ impl TraceStore {
         Ok(id)
     }
 
-    pub async fn answer_human_request(
-        &self,
-        id: &str,
-        answer: &str,
-    ) -> Result<bool, sqlx::Error> {
+    pub async fn answer_human_request(&self, id: &str, answer: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("UPDATE human_requests SET answer = ?, status = 'answered', answered_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'")
             .bind(answer)
             .bind(id)
@@ -237,12 +247,14 @@ impl TraceStore {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn get_pending_human_requests(&self) -> Result<Vec<(String, String, String)>, sqlx::Error> {
+    pub async fn get_pending_human_requests(
+        &self,
+    ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
         // Возвращает (id, task_id, question)
         let rows = sqlx::query("SELECT id, task_id, question FROM human_requests WHERE status = 'pending' ORDER BY created_at")
             .fetch_all(&self.pool)
             .await?;
-        
+
         let result: Vec<(String, String, String)> = rows
             .into_iter()
             .map(|row| {
@@ -252,7 +264,7 @@ impl TraceStore {
                 (id, task_id, question)
             })
             .collect();
-        
+
         Ok(result)
     }
 
@@ -286,10 +298,12 @@ impl TraceStore {
 
     /// Получить проект по ID
     pub async fn get_project(&self, project_id: i64) -> Result<Option<Project>, sqlx::Error> {
-        let row = sqlx::query("SELECT id, compose_path, created_at, updated_at FROM projects WHERE id = ?")
-            .bind(project_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            "SELECT id, compose_path, created_at, updated_at FROM projects WHERE id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
 
         match row {
             Some(r) => {
@@ -309,11 +323,17 @@ impl TraceStore {
     }
 
     /// Получить проект по пути к docker-compose
-    pub async fn get_project_by_path(&self, compose_path: &str) -> Result<Option<Project>, sqlx::Error> {
-        let row = sqlx::query("SELECT id, compose_path, created_at, updated_at FROM projects WHERE compose_path = ?")
-            .bind(compose_path)
-            .fetch_optional(&self.pool)
-            .await?;
+    #[allow(dead_code)]
+    pub async fn get_project_by_path(
+        &self,
+        compose_path: &str,
+    ) -> Result<Option<Project>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, compose_path, created_at, updated_at FROM projects WHERE compose_path = ?",
+        )
+        .bind(compose_path)
+        .fetch_optional(&self.pool)
+        .await?;
 
         match row {
             Some(r) => {
@@ -334,9 +354,11 @@ impl TraceStore {
 
     /// Получить все проекты
     pub async fn get_all_projects(&self) -> Result<Vec<Project>, sqlx::Error> {
-        let rows = sqlx::query("SELECT id, compose_path, created_at, updated_at FROM projects ORDER BY created_at")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT id, compose_path, created_at, updated_at FROM projects ORDER BY created_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         let mut projects = Vec::new();
         for row in rows {
@@ -366,10 +388,15 @@ impl TraceStore {
     // === Методы для управления ролями проектов ===
 
     /// Активировать роль для проекта
-    pub async fn activate_project_role(&self, project_id: i64, role_name: &str) -> Result<(), sqlx::Error> {
+    #[allow(dead_code)]
+    pub async fn activate_project_role(
+        &self,
+        project_id: i64,
+        role_name: &str,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO project_roles (project_id, role_name, is_active) VALUES (?, ?, 1)
-             ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 1"
+             ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 1",
         )
         .bind(project_id)
         .bind(role_name)
@@ -379,10 +406,15 @@ impl TraceStore {
     }
 
     /// Деактивировать роль для проекта
-    pub async fn deactivate_project_role(&self, project_id: i64, role_name: &str) -> Result<(), sqlx::Error> {
+    #[allow(dead_code)]
+    pub async fn deactivate_project_role(
+        &self,
+        project_id: i64,
+        role_name: &str,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO project_roles (project_id, role_name, is_active) VALUES (?, ?, 0)
-             ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 0"
+             ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 0",
         )
         .bind(project_id)
         .bind(role_name)
@@ -392,22 +424,33 @@ impl TraceStore {
     }
 
     /// Получить все активные роли для проекта
-    pub async fn get_active_project_roles(&self, project_id: i64) -> Result<Vec<String>, sqlx::Error> {
-        let rows = sqlx::query("SELECT role_name FROM project_roles WHERE project_id = ? AND is_active = 1")
-            .bind(project_id)
-            .fetch_all(&self.pool)
-            .await?;
+    pub async fn get_active_project_roles(
+        &self,
+        project_id: i64,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT role_name FROM project_roles WHERE project_id = ? AND is_active = 1",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
 
         let roles: Vec<String> = rows.into_iter().map(|r| r.get("role_name")).collect();
         Ok(roles)
     }
 
     /// Получить все роли для проекта (активные и неактивные)
-    pub async fn get_all_project_roles(&self, project_id: i64) -> Result<Vec<ProjectRole>, sqlx::Error> {
-        let rows = sqlx::query("SELECT project_id, role_name, is_active FROM project_roles WHERE project_id = ?")
-            .bind(project_id)
-            .fetch_all(&self.pool)
-            .await?;
+    #[allow(dead_code)]
+    pub async fn get_all_project_roles(
+        &self,
+        project_id: i64,
+    ) -> Result<Vec<ProjectRole>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT project_id, role_name, is_active FROM project_roles WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
 
         let roles: Vec<ProjectRole> = rows
             .into_iter()
@@ -426,12 +469,19 @@ impl TraceStore {
     }
 
     /// Проверить, активна ли роль для проекта
-    pub async fn is_project_role_active(&self, project_id: i64, role_name: &str) -> Result<bool, sqlx::Error> {
-        let row = sqlx::query("SELECT is_active FROM project_roles WHERE project_id = ? AND role_name = ?")
-            .bind(project_id)
-            .bind(role_name)
-            .fetch_optional(&self.pool)
-            .await?;
+    #[allow(dead_code)]
+    pub async fn is_project_role_active(
+        &self,
+        project_id: i64,
+        role_name: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT is_active FROM project_roles WHERE project_id = ? AND role_name = ?",
+        )
+        .bind(project_id)
+        .bind(role_name)
+        .fetch_optional(&self.pool)
+        .await?;
 
         match row {
             Some(r) => {
@@ -443,7 +493,11 @@ impl TraceStore {
     }
 
     /// Установить набор активных ролей для проекта
-    pub async fn set_project_roles(&self, project_id: i64, active_roles: &[&str]) -> Result<(), sqlx::Error> {
+    pub async fn set_project_roles(
+        &self,
+        project_id: i64,
+        active_roles: &[&str],
+    ) -> Result<(), sqlx::Error> {
         // Начинаем транзакцию
         let mut tx = self.pool.begin().await?;
 
@@ -457,7 +511,7 @@ impl TraceStore {
         for role in active_roles {
             sqlx::query(
                 "INSERT INTO project_roles (project_id, role_name, is_active) VALUES (?, ?, 1)
-                 ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 1"
+                 ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 1",
             )
             .bind(project_id)
             .bind(role)

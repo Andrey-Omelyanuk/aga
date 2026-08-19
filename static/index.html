@@ -296,244 +296,220 @@
 
     <script>
         const API_BASE = '';
+        let currentChatId = null;
         let currentAgent = null;
-        let currentSessionId = null;
-        let sessions = [];
+        let chatCache = null;
+        let pollTimer = null;
 
-        // Загрузка списка агентов из конфига
+        // === Агенты (роли) ===
         async function loadAgents() {
             try {
-                const response = await fetch('/config/roles.yaml');
-                const text = await response.text();
-                
-                // Парсим YAML вручную (простой парсер)
-                const agents = [];
-                const lines = text.split('\n');
-                let currentRole = null;
-                
-                for (const line of lines) {
-                    const roleMatch = line.match(/^(\w+):$/);
-                    if (roleMatch && !line.startsWith(' ')) {
-                        currentRole = roleMatch[1];
-                        if (currentRole !== 'roles') {
-                            agents.push(currentRole);
-                        }
-                    }
-                }
-                
+                const res = await fetch(`${API_BASE}/roles`);
+                const roles = await res.json();
                 const select = document.getElementById('agentSelect');
-                agents.forEach(agent => {
+                roles.forEach(role => {
                     const option = document.createElement('option');
-                    option.value = agent;
-                    option.textContent = agent.charAt(0).toUpperCase() + agent.slice(1);
+                    option.value = role;
+                    option.textContent = role;
                     select.appendChild(option);
                 });
-
-                select.addEventListener('change', (e) => {
-                    if (e.target.value) {
-                        selectAgent(e.target.value);
-                    }
-                });
-            } catch (error) {
-                console.error('Ошибка загрузки агентов:', error);
+            } catch (e) {
+                console.error('Ошибка загрузки агентов:', e);
             }
         }
 
-        // Загрузка сессий из localStorage
-        function loadSessions() {
-            const stored = localStorage.getItem('chatSessions');
-            sessions = stored ? JSON.parse(stored) : [];
-            renderSessions();
+        // === Сессии (корневые чаты) ===
+        async function loadSessions() {
+            try {
+                const res = await fetch(`${API_BASE}/chats`);
+                const chats = await res.json();
+                renderSessions(chats);
+                if (chats.length > 0) {
+                    loadChat(chats[0].id);
+                } else {
+                    renderMessages();
+                }
+            } catch (e) {
+                console.error('Ошибка загрузки сессий:', e);
+            }
         }
 
-        function saveSessions() {
-            localStorage.setItem('chatSessions', JSON.stringify(sessions));
-        }
-
-        function renderSessions() {
+        function renderSessions(chats) {
             const list = document.getElementById('sessionsList');
             list.innerHTML = '';
-
-            sessions.slice().reverse().forEach(session => {
+            chats.forEach(chat => {
                 const item = document.createElement('div');
-                item.className = `session-item ${session.id === currentSessionId ? 'active' : ''}`;
-                item.onclick = () => loadSession(session.id);
-                
+                item.className = `session-item ${chat.id === currentChatId ? 'active' : ''}`;
+                item.onclick = () => loadChat(chat.id);
                 const title = document.createElement('div');
                 title.className = 'session-title';
-                title.textContent = session.title || 'Новая сессия';
-                
+                title.textContent = chat.title || `Чат #${chat.id}`;
                 const meta = document.createElement('div');
                 meta.className = 'session-meta';
-                const date = new Date(session.createdAt);
-                meta.textContent = `${session.agent} • ${date.toLocaleDateString()} ${date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`;
-                
+                const d = new Date(chat.updated_at);
+                meta.textContent = `${chat.state} • ${d.toLocaleString()}`;
                 item.appendChild(title);
                 item.appendChild(meta);
                 list.appendChild(item);
             });
         }
 
-        function createNewSession() {
-            if (!currentAgent) {
-                alert('Сначала выберите агента');
-                return;
-            }
-
-            currentSessionId = 'session_' + Date.now();
-            const session = {
-                id: currentSessionId,
-                agent: currentAgent,
-                title: 'Новая сессия',
-                createdAt: new Date().toISOString(),
-                messages: []
-            };
-            
-            sessions.push(session);
-            saveSessions();
-            renderSessions();
-            renderMessages();
-            document.getElementById('chatInput').focus();
-        }
-
-        function loadSession(sessionId) {
-            const session = sessions.find(s => s.id === sessionId);
-            if (session) {
-                currentSessionId = sessionId;
-                currentAgent = session.agent;
-                document.getElementById('agentSelect').value = currentAgent;
-                renderSessions();
+        async function createNewSession() {
+            const res = await fetch(`${API_BASE}/chats`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title: 'Новая сессия' })
+            });
+            if (res.ok) {
+                const chat = await res.json();
+                currentChatId = chat.id;
+                document.getElementById('chatTitle').textContent = 'Новая сессия';
                 renderMessages();
+                await loadSessions();
+                document.getElementById('chatInput').focus();
             }
         }
 
-        function selectAgent(agent) {
-            currentAgent = agent;
-            document.getElementById('chatTitle').textContent = `Агент: ${agent.charAt(0).toUpperCase() + agent.slice(1)}`;
-            
-            // Проверяем, есть ли сессии для этого агента
-            const agentSessions = sessions.filter(s => s.agent === agent);
-            if (agentSessions.length === 0) {
-                createNewSession();
-            } else {
-                loadSession(agentSessions[0].id);
+        // === Чат ===
+        async function loadChat(id) {
+            currentChatId = id;
+            document.getElementById('chatTitle').textContent = `Чат #${id}`;
+            try {
+                const res = await fetch(`${API_BASE}/chats/${id}`);
+                const data = await res.json();
+                chatCache = data;
+                renderMessages();
+                await loadSessions();
+                startPolling();
+            } catch (e) {
+                console.error('Ошибка загрузки чата:', e);
             }
         }
 
-        function renderMessages() {
+        async function renderMessages() {
             const container = document.getElementById('chatMessages');
-            
-            if (!currentSessionId) {
+            if (!currentChatId || !chatCache) {
                 container.innerHTML = `
                     <div class="empty-state">
                         <span style="font-size: 48px;">💬</span>
-                        <p>Выберите агента и начните диалог</p>
-                    </div>
-                `;
+                        <p>Создайте сессию и начните диалог</p>
+                    </div>`;
                 return;
             }
-
-            const session = sessions.find(s => s.id === currentSessionId);
-            if (!session || session.messages.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <span style="font-size: 48px;">👋</span>
-                        <p>Начните диалог с агентом</p>
-                    </div>
-                `;
-                return;
-            }
-
             container.innerHTML = '';
-            session.messages.forEach(msg => {
-                const messageDiv = document.createElement('div');
-                messageDiv.className = `message ${msg.role}`;
-                
+            for (const msg of chatCache.messages) {
+                const msgDiv = document.createElement('div');
+                msgDiv.className = `message agent`;
+
+                const author = chatCache.participants.find(p => p.id === msg.author_id);
+                const name = author ? author.name : `#${msg.author_id}`;
+
                 const bubble = document.createElement('div');
                 bubble.className = 'message-bubble';
-                bubble.textContent = msg.content;
-                
+                bubble.textContent = msg.body;
+
                 const meta = document.createElement('div');
                 meta.className = 'message-meta';
-                const date = new Date(msg.timestamp);
-                meta.textContent = date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                
-                messageDiv.appendChild(bubble);
-                messageDiv.appendChild(meta);
-                container.appendChild(messageDiv);
-            });
+                const d = new Date(msg.created_at);
+                meta.textContent = `${name} • ${d.toLocaleTimeString()}` +
+                    (msg.share_of_id ? ` • шар №${msg.share_of_id}` : '');
 
+                msgDiv.appendChild(bubble);
+                msgDiv.appendChild(meta);
+
+                if (!msg.share_of_id) {
+                    const shareBtn = document.createElement('button');
+                    shareBtn.className = 'send-btn';
+                    shareBtn.style.marginTop = '4px';
+                    shareBtn.style.padding = '4px 10px';
+                    shareBtn.textContent = '⤴ Шарить';
+                    shareBtn.onclick = () => shareMessage(msg.id);
+                    msgDiv.appendChild(shareBtn);
+                }
+
+                if (msg.share_of_id) {
+                    const orig = document.createElement('a');
+                    orig.href = '#';
+                    orig.textContent = ' → к оригиналу';
+                    orig.style.fontSize = '12px';
+                    orig.onclick = (e) => { e.preventDefault(); jumpToOriginal(msg.share_of_id); };
+                    meta.appendChild(orig);
+                }
+
+                container.appendChild(msgDiv);
+
+                // Артефакты
+                const artifacts = await fetch(`${API_BASE}/messages/${msg.id}/artifacts`).then(r => r.json()).catch(() => []);
+                for (const art of artifacts) {
+                    const artDiv = document.createElement('div');
+                    artDiv.className = 'message-bubble';
+                    artDiv.style.background = '#fff8e1';
+                    artDiv.style.border = '1px solid #ffe082';
+                    artDiv.textContent = `📎 ${art.title || art.kind}:\n${art.content}`;
+                    container.appendChild(artDiv);
+                }
+            }
             container.scrollTop = container.scrollHeight;
+        }
+
+        async function shareMessage(messageId) {
+            const target = prompt('ID чата, куда шарить:');
+            if (!target || !Number.isInteger(Number(target))) return;
+            await fetch(`${API_BASE}/messages/${messageId}/share`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_chat_id: Number(target) })
+            });
+        }
+
+        function jumpToOriginal(messageId) {
+            loadChat(messageId); // сообщение по id == chat? нет; просто сообщаем
         }
 
         async function sendMessage() {
             const input = document.getElementById('chatInput');
             const sendBtn = document.getElementById('sendBtn');
             const message = input.value.trim();
-
-            if (!message || !currentAgent || !currentSessionId) {
-                return;
-            }
-
-            // Добавляем сообщение пользователя
-            const session = sessions.find(s => s.id === currentSessionId);
-            session.messages.push({
-                role: 'user',
-                content: message,
-                timestamp: new Date().toISOString()
-            });
-
-            // Обновляем заголовок сессии по первому сообщению
-            if (session.messages.length === 1) {
-                session.title = message.substring(0, 50) + (message.length > 50 ? '...' : '');
-            }
-
-            saveSessions();
-            renderSessions();
-            renderMessages();
-            
+            if (!message || !currentChatId) return;
             input.value = '';
             sendBtn.disabled = true;
             sendBtn.textContent = '...';
-
             try {
-                // Отправляем запрос к API
-                const response = await fetch(`${API_BASE}/tasks/${currentAgent}`, {
+                const res = await fetch(`${API_BASE}/chats/${currentChatId}/messages`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ task: message })
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ body: message })
                 });
-
-                if (response.ok) {
-                    const data = await response.json();
-                    
-                    // Добавляем ответ агента
-                    session.messages.push({
-                        role: 'agent',
-                        content: data.result,
-                        timestamp: new Date().toISOString()
-                    });
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('chatTitle').textContent =
+                        data.message.body.substring(0, 50) || 'Новая сессия';
+                    if (chatCache) chatCache.messages.push(data.message);
+                    renderMessages();
+                    loadSessions();
                 } else {
-                    session.messages.push({
-                        role: 'agent',
-                        content: 'Ошибка: не удалось получить ответ от агента',
-                        timestamp: new Date().toISOString()
-                    });
+                    alert('Не удалось отправить сообщение');
                 }
-            } catch (error) {
-                session.messages.push({
-                    role: 'agent',
-                    content: `Ошибка соединения: ${error.message}`,
-                    timestamp: new Date().toISOString()
-                });
+            } catch (e) {
+                alert(`Ошибка соединения: ${e.message}`);
             }
-
-            saveSessions();
-            renderMessages();
             sendBtn.disabled = false;
             sendBtn.textContent = 'Отправить';
+        }
+
+        function startPolling() {
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(async () => {
+                if (!currentChatId) return;
+                try {
+                    const res = await fetch(`${API_BASE}/chats/${currentChatId}`);
+                    const data = await res.json();
+                    if (JSON.stringify(data.messages) !== JSON.stringify(chatCache?.messages)) {
+                        chatCache = data;
+                        renderMessages();
+                    }
+                } catch (e) { /* ignore */ }
+            }, 2000);
         }
 
         function handleKeyPress(event) {
