@@ -13,9 +13,21 @@ pub struct SsoConfig {
     /// Если включено — API принимает Bearer-токены и сопоставляет `sub` с chat_user.
     #[serde(default)]
     pub enabled: bool,
-    /// Проверка подписи JWT против JWKS (пока не реализована).
+    /// Проверка подписи JWT против JWKS (Keycloak `/protocol/openid-connect/certs`).
     #[serde(default)]
     pub jwks_url: Option<String>,
+    /// Адрес authorize-эндпоинта Keycloak (для `/auth/login`).
+    #[serde(default)]
+    pub authorize_url: Option<String>,
+    /// Адрес token-эндпоинта Keycloak (для `/auth/callback`).
+    #[serde(default)]
+    pub token_url: Option<String>,
+    /// Идентификатор клиента aga в Keycloak.
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Секрет клиента aga в Keycloak.
+    #[serde(default)]
+    pub client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

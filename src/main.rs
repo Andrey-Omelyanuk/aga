@@ -12,6 +12,11 @@ mod workstation;
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Скачать JWKS-документ по URL (тело — JSON).
+async fn fetch_jwks(url: &str) -> Result<String, reqwest::Error> {
+    reqwest::get(url).await?.text().await
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Инициализация логирования
@@ -48,6 +53,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Верификатор JWT против JWKS. Включён только когда SSO включён и задан
+    // jwks_url; иначе запросы работают под аноним-суперпользователем.
+    let sso_verifier = match config.sso.as_ref().filter(|s| s.enabled) {
+        Some(sso) => match sso.jwks_url.as_deref() {
+            Some(url) => {
+                tracing::info!("Загрузка JWKS из {}", url);
+                match fetch_jwks(url).await {
+                    Ok(jwks) => Some(
+                        auth::JwtVerifier::from_jwks_json(&jwks)
+                            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+                    ),
+                    Err(e) => {
+                        tracing::error!("Не удалось загрузить JWKS из {url}: {e}");
+                        None
+                    }
+                }
+            }
+            None => {
+                tracing::warn!("SSO включён, но jwks_url не задан — работаем без SSO");
+                None
+            }
+        },
+        None => None,
+    };
+
     tracing::info!("Подключение к LLM API: {}", llm_api_url);
     let llm_client = llm::LlmClient::new(&llm_api_url, llm_api_key);
 
@@ -76,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         chat_store,
         reactive,
         cluster,
+        sso_verifier,
     };
 
     // Создаём роутер

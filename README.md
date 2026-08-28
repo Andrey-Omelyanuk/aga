@@ -60,9 +60,19 @@
 Отредактируйте `config/roles.yaml` (пример ниже).
 
 ### 2. Запуск
+Локальная разработка (без кластера):
 ```bash
-docker compose up --build -d
-docker compose logs -f
+make run
+```
+
+Тестовый стенд — в Kubernetes (minikube), ядро и Keycloak поднимаются в кластере:
+```bash
+make k8s-up     # minikube start
+make k8s-build  # сборка образов ядра и воркстейшна
+make k8s-load   # загрузка образов в кластер
+make k8s-deploy # стенд: ядро + Keycloak + воркстейшны
+make k8s-wait   # дождаться Ready пода ядра
+make k8s-web    # открыть веб-клиент
 ```
 
 ### 3. Тест
@@ -113,11 +123,13 @@ roles:
 
 ```
 aga/
-├── docker-compose.yml
+├── makefile
 ├── Cargo.toml
 ├── Dockerfile
 ├── config/
 │   └── roles.yaml
+├── infra/
+│   └── k8s/                 # стенд (ядро + Keycloak) и воркстейшны
 ├── data/                    # создаётся при первом запуске
 │   ├── trace.db
 │   └── work/

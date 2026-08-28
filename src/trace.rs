@@ -607,4 +607,40 @@ mod tests {
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
     }
+
+    #[tokio::test]
+    async fn participant_sees_all_projects() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        store
+            .upsert_project("https://example.com/one.git")
+            .await
+            .unwrap();
+        store
+            .upsert_project("https://example.com/two.git")
+            .await
+            .unwrap();
+        let projects = store.get_all_projects().await.unwrap();
+        assert_eq!(projects.len(), 2);
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn created_project_visible_to_all_participants() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let id = store
+            .upsert_project("https://example.com/new.git")
+            .await
+            .unwrap();
+        // Список проектов не фильтруется по пользователю: созданный проект
+        // виден сразу всем участникам.
+        let projects = store.get_all_projects().await.unwrap();
+        assert!(projects.iter().any(|p| p.id == id));
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
 }

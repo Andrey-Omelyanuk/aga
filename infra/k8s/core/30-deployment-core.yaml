@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aga-core
+  namespace: aga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aga-core
+  template:
+    metadata:
+      labels:
+        app: aga-core
+    spec:
+      serviceAccountName: aga-core
+      securityContext:
+        # USER aga (uid 1000) из образа; fsGroup даёт запись в PVC и emptyDir.
+        fsGroup: 1000
+      initContainers:
+        # Детерминированный in-cluster доступ kubectl: рендерим kubeconfig из
+        # токена и CA ServiceAccount'а ядра. Без него kubectl в поде никуда
+        # не применит RBAC.
+        - name: kubectl-context
+          image: aga-core:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - >
+              if [ ! -f /etc/aga/kube/kubeconfig ]; then
+                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) &&
+                CA=$(base64 < /var/run/secrets/kubernetes.io/serviceaccount/ca.crt | tr -d '\n') &&
+                printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: incluster\n  cluster:\n    server: https://kubernetes.default.svc\n    certificate-authority-data: %s\ncontexts:\n- name: incluster\n  context:\n    cluster: incluster\n    user: sa\ncurrent-context: incluster\nusers:\n- name: sa\n  user:\n    token: %s\n' "$CA" "$TOKEN" > /etc/aga/kube/kubeconfig;
+              fi
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /etc/aga/kube
+        # Ядро при старте тянет JWKS из Keycloak; если Keycloak ещё не готов —
+        # работает без SSO. Поэтому ждём realm, пока Keycloak не ответит.
+        - name: wait-keycloak
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - until wget -q -O /dev/null http://keycloak:8080/realms/aga; do sleep 2; done
+      containers:
+        - name: aga
+          image: aga-core:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/app/aga"]
+          env:
+            - name: AGA_CONFIG_PATH
+              value: /etc/aga/roles.yaml
+            - name: AGA_DB_PATH
+              value: /var/lib/aga/trace.db
+            - name: AGA_K8S_NAMESPACE
+              value: aga
+            - name: AGA_K8S_IMAGE
+              value: aga-workstation:latest
+            - name: AGA_K8S_KUBECTL
+              value: kubectl
+            - name: KUBECONFIG
+              value: /etc/aga/kube/kubeconfig
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef:
+                  name: aga-env
+                  key: RUST_LOG
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: aga-env
+                  key: PORT
+            - name: LLM_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: aga-env
+                  key: LLM_API_URL
+            - name: LLM_API_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: aga-env
+                  key: LLM_API_KEY
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            # runAsUser 1000 берётся из USER aga в образе; права на тома даёт fsGroup.
+            runAsUser: 1000
+            runAsGroup: 65534
+          volumeMounts:
+            - name: roles
+              mountPath: /etc/aga/roles.yaml
+              subPath: roles.yaml
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/aga
+            - name: kubeconfig
+              mountPath: /etc/aga/kube
+      volumes:
+        - name: roles
+          configMap:
+            name: aga-roles
+        - name: data
+          persistentVolumeClaim:
+            claimName: aga-data
+        - name: kubeconfig
+          emptyDir: {}

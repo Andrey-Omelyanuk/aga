@@ -1,57 +1,89 @@
-# infra/k8s — Воркстейшны как поды Kubernetes
+# infra/k8s — Стенд и воркстейшны как поды Kubernetes
 
 ## Overview
-Уровень описывает, как ядро превращает воркстейшн в под Kubernetes: шаблон
-пода, образ машины-воркстейшна и интеграционную проверку локального запуска
-(minikube и подобные).
+Уровень описывает тестовый стенд целиком в Kubernetes: ядро и Keycloak
+поднимаются в кластере (minikube), воркстейшны — поды рядом. Ядро на хосте
+не запускается; docker compose в проекте нет.
 
 ## Boundaries
-- **Делает:** определяет манифест воркстейшн-пода; образ воркстейшна
-  (DinD + git); скрипт интеграционной проверки; make-таргеты для локального
-  кластера.
+- **Делает:** манифесты стенда (`core/`): ядро, Keycloak, RBAC, PVC, сервисы,
+  тестовый realm; образ машины-воркстейшна (DinD + git); шаблон воркстейшн-пода;
+  скрипт развёртывания (`core/deploy.sh`) и интеграционную проверку (`verify.sh`).
 - **Не делает:** не содержит логики ядра (это `src/`, модуль `cluster.rs`);
-  не описывает запуск самого сервиса aga (это `infra/compose.yml`); не строит
-  образ ядра (`Dockerfile` в корне).
+  не собирает образ ядра (`Dockerfile` в корне).
 
 ## Tech Stack
-- Kubernetes, kubectl, minikube (локальный кластер), Docker (сборка образа).
+- Kubernetes, kubectl, minikube (локальный кластер), Docker (сборка образов).
 
 ## Architecture
 ```
 infra/k8s/
 ├── AGENTS.md                 # этот файл
 ├── workstation-pod.yaml      # шаблон пода воркстейшна (рендерит ядро)
-├── workstation-image/        # образ машины-воркстейшна
-│   ├── Dockerfile            # docker:dind + git + entrypoint
-│   └── entrypoint.sh         # свой dockerd, клон проекта, своя ветка
+├── workstation-image/        # образ машины-воркстейшна (DinD + git)
+│   ├── Dockerfile
+│   └── entrypoint.sh
+├── core/                     # стенд: ядро + Keycloak
+│   ├── deploy.sh             # собирает конфиги и применяет манифесты
+│   ├── 00-namespace.yaml     # ns aga
+│   ├── 10-rbac.yaml          # SA + Role/RoleBinding ядра
+│   ├── 20-pvc.yaml           # БД ядра (trace.db) — на PVC
+│   ├── 30-deployment-core.yaml
+│   ├── 40-service-core.yaml  # NodePort 30080 (веб-клиент/API)
+│   ├── 50-deployment-keycloak.yaml
+│   ├── 60-service-keycloak.yaml  # NodePort 30081 (вход в браузере)
+│   └── keycloak-realm.json   # тестовый realm (участники alice/bob)
 └── verify.sh                 # интеграционная проверка (make k8s-verify)
 ```
 
 ## Patterns
-- Шаблон пода рендерит ядро (`src/cluster.rs`) подстановкой `{{POD_NAME}}`,
-  `{{GIT_URL}}`, `{{BRANCH}}`, `{{IMAGE}}`. Встроенный в модуль дефолт
-  совпадает с этим файлом — ядро работает даже без файла рядом с бинарником.
+- Шаблон воркстейшн-пода рендерит ядро (`src/cluster.rs`) подстановкой
+  `{{POD_NAME}}`, `{{GIT_URL}}`, `{{BRANCH}}`, `{{IMAGE}}`. Встроенный в модуль
+  дефолт совпадает с этим файлом — ядро работает даже без файла рядом.
 - Образ воркстейшна — машина разработчика: свой Docker-демон (DinD) и клон
   проекта; про кластер под ничего не знает.
+- Конфиги стенда не лежат в git: `deploy.sh` собирает их на лету — roles.yaml
+  из `config/roles.yaml` (sso-блок заменяется на стендовый), env ядра из `.env`
+  (через `AGA_K8S_*`), realm из `keycloak-realm.json` (тестовый, не секрет).
 
 ## Non-Obvious Rules
-- Воркстейшн-под **привилегированный** (`privileged: true`) — без этого
-  DinD внутри пода не заведётся. При этом доступа к k8s API у пода нет:
-  `automountServiceAccountToken: false`, ServiceAccount не назначается.
-- У образа `imagePullPolicy: IfNotPresent` и тег `latest`: иначе kubelet всегда
-  тянет образ из реестра и игнорирует локально загруженный (`minikube image load`).
-- `verify.sh` поднимает ядро на `PORT` (по умолчанию 18080), чтобы не
-  конфликтовать с рабочим сервером; порт сервер читает из переменной `PORT`.
-- Образ `aga-workstation:latest` должен попасть в кластер до создания
-  воркстейшнов: minikube — `minikube image load`, другие кластеры — registry.
+- Ядро в поде управляет кластером через kubectl: в образе ядра лежит `kubectl`,
+  а `kubectl-context` initContainer рендерит kubeconfig из токена и CA своего
+  ServiceAccount'а в emptyDir (`KUBECONFIG=/etc/aga/kube/kubeconfig`). Без
+  явного kubeconfig RBAC к ядру не применится. initContainer ходит под root —
+  SA-токен недоступен пользователю aga (uid 1000).
+- RBAC ядра — минимум в namespace `aga`: `pods` (get/list/create/delete) и
+  `pods/exec` (create). Воркстейшн-поды остаются без SA
+  (`automountServiceAccountToken: false`, привилегированные — DinD).
+- Ядро при старте тянет JWKS из Keycloak; `wait-keycloak` initContainer ждёт
+  готовности realm, иначе ядро поднялось бы без SSO.
+- БД ядра — PVC с `fsGroup: 1000` (пользователь aga из образа пишет в том).
+  Данные переживают перезапуск пода.
+- Keycloak — `start-dev --import-realm`, realm из configmap. `KC_HOSTNAME_STRICT:
+  false`, `sslRequired: none` — работает по NodePort/IP. Клиент `aga` c
+  `redirectUris: ["*"]` и `directAccessGrantsEnabled` (парольный grant для тестов).
+- authorize_url для браузера — внешний (NodePort `minikube ip:30081`); jwks_url и
+  token_url — ClusterIP `keycloak:8080` (их дергает только ядро).
+- Воркстейшн-поды используют локально загруженные образы (`IfNotPresent` +
+  тег `latest` + `minikube image load`), иначе kubelet тянет из реестра.
+  `minikube image load` не обновляет уже существующий тег — после пересборки
+  образа его нужно перезагружать (удалить тег в кластере и загрузить заново,
+  либо импортировать через `docker save | docker exec -i minikube docker load`).
+- `verify.sh` форвардит порты ядра (18080) и Keycloak (18081), чтобы не
+  конфликтовать с рабочим сервером. Стенд после проверки остаётся поднятым.
+- `minikube service aga -n aga` — адрес веб-клиента; страница входа Keycloak —
+  `http://$(minikube ip):30081/realms/aga`.
 
 ## Verification
 - Интеграционный тест: `make k8s-verify` (или `bash infra/k8s/verify.sh`) —
-  требует kubectl-контекст на кластер и docker на хосте. Проверяет пункты
-  истории: под поднят с git-копией и Docker; проект по git-URL; своя ветка;
-  отдельный под на воркстейшн; нет доступа к k8s API; удаление убирает под.
+  требует kubectl-контекст на кластер и docker на хосте. Поднимает стенд,
+  проверяет пункты истории `2026-08-28-test-stand-in-k8s`: под ядра Ready и
+  API отвечает; воркстейшн по git-URL поднимает под рядом; команды агента идут
+  в под из пода ядра; данные переживают рестарт (PVC); Keycloak и вход через
+  него; токены (недействительный отклоняется, участник работает); внешний
+  доступ; compose удалён.
 - Критерий готовности: скрипт завершается с `==> OK`.
 
 ## Dependencies
 - Ядро aga (`src/cluster.rs`) — рендерит шаблон и управляет подами.
-- kubectl, docker, jq на хосте проверки.
+- kubectl, docker, jq на хосте проверки; minikube для локального кластера.

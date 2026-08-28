@@ -3,13 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agent Chat</title>
+    <title>aga — агенты и воркстейшны</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -19,280 +15,206 @@
             flex-direction: column;
         }
 
-        /* Project Selector */
-        .project-selector {
-            padding: 15px 20px;
+        header {
             background: #fff;
             border-bottom: 1px solid #e0e0e0;
+            padding: 10px 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
         }
 
-        .project-selector label {
-            display: block;
-            font-size: 12px;
-            color: #666;
-            margin-bottom: 5px;
-        }
+        header .brand { font-weight: 600; color: #333; font-size: 16px; }
 
-        .project-select {
-            width: 100%;
-            padding: 10px;
+        .tabs { display: flex; gap: 4px; }
+        .tab {
+            padding: 8px 16px;
+            border: none;
+            background: transparent;
+            border-radius: 6px;
+            font-size: 14px;
+            color: #555;
+            cursor: pointer;
+        }
+        .tab:hover { background: #f0f0f0; }
+        .tab.active { background: #e3f2fd; color: #1565c0; font-weight: 600; }
+
+        main { flex: 1; overflow: auto; }
+        .view { display: none; padding: 20px; }
+        .view.active { display: block; }
+
+        .card {
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 14px 16px;
+            margin-bottom: 10px;
+        }
+        .card h4 { font-size: 14px; color: #333; margin-bottom: 4px; }
+        .card .meta { font-size: 12px; color: #888; }
+
+        .btn {
+            padding: 6px 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            background: #2196F3;
+            color: #fff;
+        }
+        .btn:hover { background: #1976D2; }
+        .btn.green { background: #4CAF50; }
+        .btn.green:hover { background: #45a049; }
+        .btn.gray { background: #eee; color: #333; }
+        .btn.gray:hover { background: #ddd; }
+        .btn.small { padding: 3px 10px; font-size: 12px; }
+        .btn:disabled { background: #ccc; cursor: not-allowed; }
+
+        .form-row { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+        .form-row input, .form-row select {
+            padding: 8px 10px;
             border: 1px solid #ddd;
             border-radius: 6px;
             font-size: 14px;
-            background: #fff;
-            cursor: pointer;
         }
+        .form-row input[type="text"] { flex: 1; }
 
-        .project-select:focus {
-            outline: none;
-            border-color: #2196F3;
+        .pill {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            background: #e8f5e9;
+            color: #2e7d32;
+            margin-right: 4px;
         }
+        .pill.warn { background: #fff3e0; color: #e65100; }
+        .pill.blue { background: #e3f2fd; color: #1565c0; }
 
-        /* Sidebar */
+        .list-title { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: .5px; margin: 18px 0 8px; }
+
+        /* Чат */
+        .chat-layout { display: flex; height: calc(100vh - 60px); }
         .sidebar {
             width: 280px;
             background: #fff;
             border-right: 1px solid #e0e0e0;
             display: flex;
             flex-direction: column;
-            flex-direction: column;
         }
-
-        .sidebar-header {
-            padding: 20px;
-            border-bottom: 1px solid #e0e0e0;
-        }
-
-        .sidebar-header h2 {
-            font-size: 18px;
-            color: #333;
-        }
-
-        .agent-select {
-            width: 100%;
+        .sidebar-header { padding: 16px; border-bottom: 1px solid #e0e0e0; }
+        .sidebar-header select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 6px; }
+        .sessions-list { flex: 1; overflow-y: auto; padding: 8px; }
+        .session-item { padding: 10px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; }
+        .session-item:hover { background: #f0f0f0; }
+        .session-item.active { background: #e3f2fd; }
+        .session-item .t { font-size: 13px; color: #333; }
+        .session-item .m { font-size: 11px; color: #999; }
+        .chat-container { flex: 1; display: flex; flex-direction: column; background: #fff; }
+        .chat-header { padding: 14px 20px; border-bottom: 1px solid #e0e0e0; font-weight: 600; color: #333; }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 20px; }
+        .chat-input-area { padding: 14px 20px; border-top: 1px solid #e0e0e0; }
+        .chat-input-area .row { display: flex; gap: 8px; }
+        .chat-input-area textarea {
+            flex: 1;
             padding: 10px;
-            margin-top: 10px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 14px;
-        }
-
-        .sessions-list {
-            flex: 1;
-            overflow-y: auto;
-            padding: 10px;
-        }
-
-        .session-item {
-            padding: 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            margin-bottom: 5px;
-            transition: background 0.2s;
-        }
-
-        .session-item:hover {
-            background: #f0f0f0;
-        }
-
-        .session-item.active {
-            background: #e3f2fd;
-        }
-
-        .session-title {
-            font-size: 14px;
-            color: #333;
-            margin-bottom: 4px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .session-meta {
-            font-size: 12px;
-            color: #999;
-        }
-
-        /* Main Chat Area */
-        .chat-container {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            flex-direction: column;
-            background: #fff;
-        }
-
-        .chat-header {
-            padding: 20px;
-            border-bottom: 1px solid #e0e0e0;
-            background: #fafafa;
-        }
-
-        .chat-header h3 {
-            font-size: 16px;
-            color: #333;
-        }
-
-        .chat-messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 20px;
-        }
-
-        .message {
-            margin-bottom: 15px;
-            display: flex;
-            flex-direction: column;
-            flex-direction: column;
-        }
-
-        .message.user {
-            align-items: flex-end;
-        }
-
-        .message.agent {
-            align-items: flex-start;
-        }
-
-        .message-bubble {
-            max-width: 70%;
-            padding: 12px 16px;
-            border-radius: 12px;
-            font-size: 14px;
-            line-height: 1.5;
-        }
-
-        .message.user .message-bubble {
-            background: #2196F3;
-            color: #fff;
-            border-bottom-right-radius: 4px;
-        }
-
-        .message.agent .message-bubble {
-            background: #f0f0f0;
-            color: #333;
-            border-bottom-left-radius: 4px;
-        }
-
-        .message-meta {
-            font-size: 11px;
-            color: #999;
-            margin-top: 4px;
-        }
-
-        .chat-input-area {
-            padding: 20px;
-            border-top: 1px solid #e0e0e0;
-            background: #fafafa;
-        }
-
-        .input-wrapper {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
-        .chat-input {
-            flex: 1;
-            padding: 12px 16px;
             border: 1px solid #ddd;
             border-radius: 8px;
             font-size: 14px;
             resize: none;
+            min-height: 44px;
         }
-
-        .chat-input:focus {
-            outline: none;
-            border-color: #2196F3;
-        }
-
-        .send-btn {
-            padding: 12px 24px;
-            background: #2196F3;
-            color: #fff;
-            border: none;
-            border-radius: 8px;
+        .message { margin-bottom: 12px; }
+        .message .bubble {
+            max-width: 70%;
+            padding: 10px 14px;
+            border-radius: 12px;
             font-size: 14px;
-            cursor: pointer;
-            transition: background 0.2s;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-break: break-word;
         }
-
-        .send-btn:hover {
-            background: #1976D2;
-        }
-
-        .send-btn:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-        }
-
-        .new-session-btn {
-            padding: 10px 15px;
-            background: #4CAF50;
-            color: #fff;
-            border: none;
-            border-radius: 6px;
-            font-size: 13px;
-            cursor: pointer;
-            margin: 10px;
-        }
-
-        .new-session-btn:hover {
-            background: #45a049;
-        }
-
-        .empty-state {
-            display: flex;
-            flex-direction: column;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            color: #999;
-        }
-
-        .empty-state p {
-            margin-top: 10px;
-        }
+        .message.user { display: flex; justify-content: flex-end; }
+        .message.user .bubble { background: #2196F3; color: #fff; }
+        .message.agent .bubble { background: #f0f0f0; color: #333; }
+        .message .meta { font-size: 11px; color: #999; margin-top: 3px; }
+        .empty-state { text-align: center; color: #999; padding: 60px 20px; }
     </style>
 </head>
 <body>
-    <div class="project-selector">
-        <label for="projectSelect">Проект:</label>
-        <select id="projectSelect" class="project-select">
-            <option value="">Выберите проект...</option>
-        </select>
-    </div>
+    <header>
+        <span class="brand">aga</span>
+        <nav class="tabs">
+            <button class="tab active" data-view="projects">Проекты</button>
+            <button class="tab" data-view="workstations">Воркстейшны</button>
+            <button class="tab" data-view="sessions">Сессии</button>
+            <button class="tab" data-view="personnel">Персонал</button>
+            <button class="tab" data-view="chat">Чат</button>
+        </nav>
+        <span style="flex:1"></span>
+        <a href="/auth/login" class="btn gray" id="loginBtn" style="text-decoration:none;display:none">Войти через SSO</a>
+    </header>
 
-    <div class="main-content">
-    <div class="sidebar">
-        <div class="sidebar-header">
-            <h2>🤖 Агенты</h2>
-            <select id="agentSelect" class="agent-select">
-                <option value="">Выберите агента...</option>
-            </select>
-        </div>
-        <button class="new-session-btn" onclick="createNewSession()">+ Новая сессия</button>
-        <div id="sessionsList" class="sessions-list"></div>
-    </div>
+    <main>
+        <!-- Проекты -->
+        <section class="view active" id="view-projects">
+            <div class="form-row">
+                <input type="text" id="newProjectUrl" placeholder="git-URL проекта">
+                <button class="btn green" onclick="createProject()">Добавить проект</button>
+            </div>
+            <div id="projectsList"></div>
+        </section>
 
-    <div class="chat-container">
-        <div class="chat-header">
-            <h3 id="chatTitle">Выберите агента для начала общения</h3>
-        </div>
-        <div id="chatMessages" class="chat-messages">
-            <div class="empty-state">
-                <span style="font-size: 48px;">💬</span>
-                <p>Выберите агента и начните диалог</p>
+        <!-- Воркстейшны: видно и состояние, управление не предлагается -->
+        <section class="view" id="view-workstations">
+            <div id="workstationsList"></div>
+        </section>
+
+        <!-- Сессии -->
+        <section class="view" id="view-sessions">
+            <div class="form-row">
+                <select id="sessionWorkstation">
+                    <option value="">Выберите воркстейшн...</option>
+                </select>
+                <input type="text" id="newSessionTitle" placeholder="Название сессии" style="flex:1">
+                <button class="btn green" onclick="openSession()">Открыть сессию</button>
             </div>
-        </div>
-        <div class="chat-input-area">
-            <div class="input-wrapper">
-                <textarea id="chatInput" class="chat-input" rows="1" placeholder="Введите сообщение..." onkeypress="handleKeyPress(event)"></textarea>
-                <button id="sendBtn" class="send-btn" onclick="sendMessage()">Отправить</button>
+            <div id="sessionsList"></div>
+        </section>
+
+        <!-- Персонал: список участников из SSO, правка — вне aga -->
+        <section class="view" id="view-personnel">
+            <div id="personnelList"></div>
+        </section>
+
+        <!-- Чат -->
+        <section class="view" id="view-chat">
+            <div class="chat-layout">
+                <div class="sidebar">
+                    <div class="sidebar-header">
+                        <select id="agentSelect"><option value="">Выберите агента...</option></select>
+                    </div>
+                    <button class="btn gray" style="margin:10px" onclick="createNewSession()">+ Новая сессия</button>
+                    <div id="sessionsList2" class="sessions-list"></div>
+                </div>
+                <div class="chat-container">
+                    <div class="chat-header" id="chatTitle">Выберите сессию</div>
+                    <div id="chatMessages" class="chat-messages">
+                        <div class="empty-state">
+                            <div style="font-size:40px">💬</div>
+                            <p>Выберите сессию или откройте новую</p>
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <div class="row">
+                            <textarea id="chatInput" rows="1" placeholder="Введите сообщение..." onkeypress="handleKeyPress(event)"></textarea>
+                            <button class="btn" onclick="sendMessage()">Отправить</button>
+                        </div>
+                    </div>
+                </div>
             </div>
-        </div>
-    </div>
+        </section>
+    </main>
 
     <script>
         const API_BASE = '';
@@ -301,10 +223,194 @@
         let chatCache = null;
         let pollTimer = null;
 
+        // === SSO: при 401 показываем кнопку входа через Keycloak ===
+        async function api(path, options) {
+            const res = await fetch(`${API_BASE}${path}`, options);
+            if (res.status === 401) {
+                document.getElementById('loginBtn').style.display = 'inline-block';
+            }
+            return res;
+        }
+
+        // === Табы ===
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById('view-' + tab.dataset.view).classList.add('active');
+                if (tab.dataset.view === 'workstations') loadWorkstations();
+                if (tab.dataset.view === 'sessions') { loadSessions(); loadWorkstationSelect(); }
+                if (tab.dataset.view === 'personnel') loadPersonnel();
+                if (tab.dataset.view === 'projects') loadProjects();
+            });
+        });
+
+        // === Проекты ===
+        async function loadProjects() {
+            try {
+                const res = await api('/projects');
+                if (!res.ok) return;
+                const projects = await res.json();
+                const list = document.getElementById('projectsList');
+                list.innerHTML = '';
+                projects.forEach(p => {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    card.innerHTML = `
+                        <h4>${escapeHtml(p.git_url)}</h4>
+                        <div class="meta">Проект #${p.id}</div>
+                        <div style="margin-top:6px">
+                            ${(p.active_roles || []).map(r => `<span class="pill blue">${escapeHtml(r)}</span>`).join('')}
+                        </div>
+                        <div style="margin-top:8px">
+                            <button class="btn gray small" onclick="deleteProject(${p.id})">Удалить</button>
+                        </div>`;
+                    list.appendChild(card);
+                });
+            } catch (e) { console.error('Проекты:', e); }
+        }
+
+        async function createProject() {
+            const url = document.getElementById('newProjectUrl').value.trim();
+            if (!url) return;
+            const res = await fetch(`${API_BASE}/projects`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ git_url: url })
+            });
+            if (res.ok) {
+                document.getElementById('newProjectUrl').value = '';
+                loadProjects();
+            }
+        }
+
+        async function deleteProject(id) {
+            await fetch(`${API_BASE}/projects/${id}`, { method: 'DELETE' });
+            loadProjects();
+        }
+
+        // === Воркстейшны: только просмотр ===
+        async function loadWorkstations() {
+            try {
+                const res = await api('/workstations');
+                if (!res.ok) return;
+                const workstations = await res.json();
+                const list = document.getElementById('workstationsList');
+                list.innerHTML = '';
+                if (!workstations.length) {
+                    list.innerHTML = '<div class="empty-state">Воркстейшнов пока нет</div>';
+                    return;
+                }
+                workstations.forEach(ws => {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    card.innerHTML = `
+                        <h4>${escapeHtml(ws.name)} <span class="pill ${ws.state === 'ready' ? '' : 'warn'}">${escapeHtml(ws.state)}</span></h4>
+                        <div class="meta">Проект #${ws.project_id}</div>`;
+                    list.appendChild(card);
+                });
+            } catch (e) { console.error('Воркстейшны:', e); }
+        }
+
+        // === Сессии ===
+        async function loadWorkstationSelect() {
+            const select = document.getElementById('sessionWorkstation');
+            select.innerHTML = '<option value="">Выберите воркстейшн...</option>';
+            try {
+                const res = await api('/workstations');
+                const workstations = await res.json();
+                workstations.forEach(ws => {
+                    const option = document.createElement('option');
+                    option.value = ws.id;
+                    option.textContent = `${ws.name} (${ws.state})`;
+                    option.disabled = ws.state !== 'ready';
+                    select.appendChild(option);
+                });
+            } catch (e) { console.error('Выбор воркстейшна:', e); }
+        }
+
+        async function openSession() {
+            const wsId = document.getElementById('sessionWorkstation').value;
+            const title = document.getElementById('newSessionTitle').value.trim();
+            if (!wsId) { alert('Выберите готовый воркстейшн'); return; }
+            const res = await fetch(`${API_BASE}/workstations/${wsId}/session`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title: title || 'Новая сессия' })
+            });
+            if (res.ok) {
+                document.getElementById('newSessionTitle').value = '';
+                loadSessions();
+            } else if (res.status === 409) {
+                alert('На этом воркстейшне уже открыта сессия');
+            } else {
+                alert('Не удалось открыть сессию');
+            }
+        }
+
+        async function loadSessions() {
+            try {
+                const res = await api('/chats');
+                if (!res.ok) return;
+                const chats = await res.json();
+                renderSessionsList(document.getElementById('sessionsList'), chats);
+                renderSessionsList(document.getElementById('sessionsList2'), chats);
+            } catch (e) { console.error('Сессии:', e); }
+        }
+
+        function renderSessionsList(container, chats) {
+            container.innerHTML = '';
+            chats.forEach(chat => {
+                const item = document.createElement('div');
+                item.className = 'card';
+                const state = chat.state === 'OPEN' ? '' : 'warn';
+                item.innerHTML = `
+                    <h4>${escapeHtml(chat.title || 'Сессия #' + chat.id)} <span class="pill ${state}">${escapeHtml(chat.state)}</span></h4>
+                    <div class="meta">Воркстейшн #${chat.workstation_id ?? '—'} · создана #${chat.created_by_id}</div>
+                    <div style="margin-top:6px">
+                        <button class="btn gray small" onclick="openChat(${chat.id})">Открыть в чате</button>
+                        ${chat.state === 'OPEN' ? `<button class="btn gray small" onclick="closeSession(${chat.id})">Закрыть</button>` : ''}
+                    </div>`;
+                container.appendChild(item);
+            });
+        }
+
+        async function closeSession(id) {
+            const res = await fetch(`${API_BASE}/chats/${id}/close`, { method: 'POST' });
+            if (res.ok) { loadSessions(); } else if (res.status === 403) {
+                alert('Закрыть сессию может только тот, кто её открыл');
+            }
+        }
+
+        function openChat(id) {
+            document.querySelector('.tab[data-view="chat"]').click();
+            loadChat(id);
+        }
+
+        // === Персонал ===
+        async function loadPersonnel() {
+            try {
+                const res = await api('/users');
+                if (!res.ok) return;
+                const users = await res.json();
+                const list = document.getElementById('personnelList');
+                list.innerHTML = '';
+                users.forEach(u => {
+                    const card = document.createElement('div');
+                    card.className = 'card';
+                    card.innerHTML = `
+                        <h4>${escapeHtml(u.name)} <span class="pill ${u.kind === 'agent' ? 'blue' : ''}">${escapeHtml(u.kind)}</span></h4>
+                        <div class="meta">${u.is_super_user ? 'суперпользователь' : 'участник'}</div>`;
+                    list.appendChild(card);
+                });
+            } catch (e) { console.error('Персонал:', e); }
+        }
+
         // === Агенты (роли) ===
         async function loadAgents() {
             try {
-                const res = await fetch(`${API_BASE}/roles`);
+                const res = await api('/roles');
                 const roles = await res.json();
                 const select = document.getElementById('agentSelect');
                 roles.forEach(role => {
@@ -313,45 +419,7 @@
                     option.textContent = role;
                     select.appendChild(option);
                 });
-            } catch (e) {
-                console.error('Ошибка загрузки агентов:', e);
-            }
-        }
-
-        // === Сессии (корневые чаты) ===
-        async function loadSessions() {
-            try {
-                const res = await fetch(`${API_BASE}/chats`);
-                const chats = await res.json();
-                renderSessions(chats);
-                if (chats.length > 0) {
-                    loadChat(chats[0].id);
-                } else {
-                    renderMessages();
-                }
-            } catch (e) {
-                console.error('Ошибка загрузки сессий:', e);
-            }
-        }
-
-        function renderSessions(chats) {
-            const list = document.getElementById('sessionsList');
-            list.innerHTML = '';
-            chats.forEach(chat => {
-                const item = document.createElement('div');
-                item.className = `session-item ${chat.id === currentChatId ? 'active' : ''}`;
-                item.onclick = () => loadChat(chat.id);
-                const title = document.createElement('div');
-                title.className = 'session-title';
-                title.textContent = chat.title || `Чат #${chat.id}`;
-                const meta = document.createElement('div');
-                meta.className = 'session-meta';
-                const d = new Date(chat.updated_at);
-                meta.textContent = `${chat.state} • ${d.toLocaleString()}`;
-                item.appendChild(title);
-                item.appendChild(meta);
-                list.appendChild(item);
-            });
+            } catch (e) { console.error('Агенты:', e); }
         }
 
         async function createNewSession() {
@@ -365,7 +433,7 @@
                 currentChatId = chat.id;
                 document.getElementById('chatTitle').textContent = 'Новая сессия';
                 renderMessages();
-                await loadSessions();
+                loadSessions();
                 document.getElementById('chatInput').focus();
             }
         }
@@ -373,107 +441,55 @@
         // === Чат ===
         async function loadChat(id) {
             currentChatId = id;
-            document.getElementById('chatTitle').textContent = `Чат #${id}`;
+            document.getElementById('chatTitle').textContent = `Сессия #${id}`;
             try {
                 const res = await fetch(`${API_BASE}/chats/${id}`);
+                if (!res.ok) return;
                 const data = await res.json();
                 chatCache = data;
                 renderMessages();
-                await loadSessions();
                 startPolling();
-            } catch (e) {
-                console.error('Ошибка загрузки чата:', e);
-            }
+            } catch (e) { console.error('Чат:', e); }
         }
 
         async function renderMessages() {
             const container = document.getElementById('chatMessages');
             if (!currentChatId || !chatCache) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <span style="font-size: 48px;">💬</span>
-                        <p>Создайте сессию и начните диалог</p>
-                    </div>`;
+                container.innerHTML = '<div class="empty-state"><p>Выберите сессию</p></div>';
                 return;
             }
             container.innerHTML = '';
             for (const msg of chatCache.messages) {
-                const msgDiv = document.createElement('div');
-                msgDiv.className = `message agent`;
-
-                const author = chatCache.participants.find(p => p.id === msg.author_id);
+                const author = (chatCache.participants || []).find(p => p.id === msg.author_id);
                 const name = author ? author.name : `#${msg.author_id}`;
-
+                const div = document.createElement('div');
+                div.className = `message ${msg.author_id === currentChatId ? 'user' : 'agent'}`;
                 const bubble = document.createElement('div');
-                bubble.className = 'message-bubble';
+                bubble.className = 'bubble';
                 bubble.textContent = msg.body;
-
                 const meta = document.createElement('div');
-                meta.className = 'message-meta';
-                const d = new Date(msg.created_at);
-                meta.textContent = `${name} • ${d.toLocaleTimeString()}` +
-                    (msg.share_of_id ? ` • шар №${msg.share_of_id}` : '');
-
-                msgDiv.appendChild(bubble);
-                msgDiv.appendChild(meta);
-
-                if (!msg.share_of_id) {
-                    const shareBtn = document.createElement('button');
-                    shareBtn.className = 'send-btn';
-                    shareBtn.style.marginTop = '4px';
-                    shareBtn.style.padding = '4px 10px';
-                    shareBtn.textContent = '⤴ Шарить';
-                    shareBtn.onclick = () => shareMessage(msg.id);
-                    msgDiv.appendChild(shareBtn);
-                }
-
-                if (msg.share_of_id) {
-                    const orig = document.createElement('a');
-                    orig.href = '#';
-                    orig.textContent = ' → к оригиналу';
-                    orig.style.fontSize = '12px';
-                    orig.onclick = (e) => { e.preventDefault(); jumpToOriginal(msg.share_of_id); };
-                    meta.appendChild(orig);
-                }
-
-                container.appendChild(msgDiv);
-
-                // Артефакты
+                meta.className = 'meta';
+                meta.textContent = `${name} · ${new Date(msg.created_at).toLocaleTimeString()}` +
+                    (msg.share_of_id ? ` · шар №${msg.share_of_id}` : '');
+                div.appendChild(bubble);
+                div.appendChild(meta);
+                container.appendChild(div);
                 const artifacts = await fetch(`${API_BASE}/messages/${msg.id}/artifacts`).then(r => r.json()).catch(() => []);
                 for (const art of artifacts) {
                     const artDiv = document.createElement('div');
-                    artDiv.className = 'message-bubble';
-                    artDiv.style.background = '#fff8e1';
-                    artDiv.style.border = '1px solid #ffe082';
-                    artDiv.textContent = `📎 ${art.title || art.kind}:\n${art.content}`;
+                    artDiv.className = 'message agent';
+                    artDiv.innerHTML = `<div class="bubble" style="background:#fff8e1;border:1px solid #ffe082">📎 ${escapeHtml(art.title || art.kind)}:\n${escapeHtml(art.content)}</div>`;
                     container.appendChild(artDiv);
                 }
             }
             container.scrollTop = container.scrollHeight;
         }
 
-        async function shareMessage(messageId) {
-            const target = prompt('ID чата, куда шарить:');
-            if (!target || !Number.isInteger(Number(target))) return;
-            await fetch(`${API_BASE}/messages/${messageId}/share`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ target_chat_id: Number(target) })
-            });
-        }
-
-        function jumpToOriginal(messageId) {
-            loadChat(messageId); // сообщение по id == chat? нет; просто сообщаем
-        }
-
         async function sendMessage() {
             const input = document.getElementById('chatInput');
-            const sendBtn = document.getElementById('sendBtn');
             const message = input.value.trim();
             if (!message || !currentChatId) return;
             input.value = '';
-            sendBtn.disabled = true;
-            sendBtn.textContent = '...';
             try {
                 const res = await fetch(`${API_BASE}/chats/${currentChatId}/messages`, {
                     method: 'POST',
@@ -482,19 +498,11 @@
                 });
                 if (res.ok) {
                     const data = await res.json();
-                    document.getElementById('chatTitle').textContent =
-                        data.message.body.substring(0, 50) || 'Новая сессия';
                     if (chatCache) chatCache.messages.push(data.message);
                     renderMessages();
                     loadSessions();
-                } else {
-                    alert('Не удалось отправить сообщение');
                 }
-            } catch (e) {
-                alert(`Ошибка соединения: ${e.message}`);
-            }
-            sendBtn.disabled = false;
-            sendBtn.textContent = 'Отправить';
+            } catch (e) { console.error('Отправка:', e); }
         }
 
         function startPolling() {
@@ -503,6 +511,7 @@
                 if (!currentChatId) return;
                 try {
                     const res = await fetch(`${API_BASE}/chats/${currentChatId}`);
+                    if (!res.ok) return;
                     const data = await res.json();
                     if (JSON.stringify(data.messages) !== JSON.stringify(chatCache?.messages)) {
                         chatCache = data;
@@ -519,9 +528,13 @@
             }
         }
 
+        function escapeHtml(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
         // Инициализация
         loadAgents();
-        loadSessions();
+        loadProjects();
     </script>
 </body>
 </html>
