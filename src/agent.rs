@@ -10,6 +10,22 @@ pub enum Executor {
     /// Локальное исполнение `sh -c` (dev-режим, без воркстейшна).
     #[default]
     Sh,
+    /// Исполнение внутри пода воркстейшна через `kubectl exec`.
+    KubectlExec { namespace: String, pod: String },
+}
+
+/// Аргументы для `kubectl exec` в под воркстейшна.
+pub fn kubectl_exec_args(namespace: &str, pod: &str, command: &str) -> Vec<String> {
+    vec![
+        "exec".to_string(),
+        "-n".to_string(),
+        namespace.to_string(),
+        pod.to_string(),
+        "--".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        command.to_string(),
+    ]
 }
 
 pub struct Agent {
@@ -164,6 +180,13 @@ impl Agent {
                 let output = Command::new("sh").arg("-c").arg(command).output().await?;
                 Self::collect(output)
             }
+            Executor::KubectlExec { namespace, pod } => {
+                let output = Command::new("kubectl")
+                    .args(kubectl_exec_args(namespace, pod, command))
+                    .output()
+                    .await?;
+                Self::collect(output)
+            }
         }
     }
 
@@ -215,5 +238,18 @@ impl Agent {
             .allowed_commands
             .iter()
             .any(|allowed| base_cmd == allowed || base_cmd.starts_with(&format!("{}-", allowed)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_commands_run_in_workstation_pod() {
+        assert_eq!(
+            kubectl_exec_args("aga", "ws-7", "ls -la"),
+            vec!["exec", "-n", "aga", "ws-7", "--", "sh", "-c", "ls -la"]
+        );
     }
 }

@@ -14,6 +14,7 @@ use tower_http::services::ServeDir;
 use crate::agent::Agent;
 use crate::auth;
 use crate::chat::{parse_command, Chat, ChatCommand, ChatStore, Message};
+use crate::cluster::Cluster;
 use crate::config::Config;
 use crate::llm::LlmClient;
 use crate::reactive::ReactiveRunner;
@@ -26,6 +27,7 @@ pub struct AppState {
     pub llm_client: LlmClient,
     pub chat_store: ChatStore,
     pub reactive: ReactiveRunner,
+    pub cluster: Cluster,
 }
 
 fn sso_enabled(state: &AppState) -> bool {
@@ -63,13 +65,13 @@ pub struct HumanAnswerRequest {
 #[derive(Serialize)]
 pub struct ProjectInfo {
     pub id: i64,
-    pub compose_path: String,
+    pub git_url: String,
     pub active_roles: Vec<String>,
 }
 
 #[derive(Deserialize)]
 pub struct CreateProjectRequest {
-    pub compose_path: String,
+    pub git_url: String,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +112,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/workstations",
             get(list_workstations).post(create_workstation),
+        )
+        .route(
+            "/workstations/:id",
+            axum::routing::delete(delete_workstation),
         )
         .nest_service("/", ServeDir::new("static"))
         .with_state(state)
@@ -212,7 +218,7 @@ async fn list_projects(
                     .unwrap_or_default();
                 result.push(ProjectInfo {
                     id: project.id,
-                    compose_path: project.compose_path,
+                    git_url: project.git_url,
                     active_roles,
                 });
             }
@@ -226,11 +232,7 @@ async fn create_project(
     State(state): State<AppState>,
     Json(payload): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectInfo>, StatusCode> {
-    match state
-        .trace_store
-        .upsert_project(&payload.compose_path)
-        .await
-    {
+    match state.trace_store.upsert_project(&payload.git_url).await {
         Ok(project_id) => {
             let active_roles = state
                 .trace_store
@@ -239,7 +241,7 @@ async fn create_project(
                 .unwrap_or_default();
             Ok(Json(ProjectInfo {
                 id: project_id,
-                compose_path: payload.compose_path,
+                git_url: payload.git_url,
                 active_roles,
             }))
         }
@@ -260,7 +262,7 @@ async fn get_project(
                 .unwrap_or_default();
             Ok(Json(ProjectInfo {
                 id: project.id,
-                compose_path: project.compose_path,
+                git_url: project.git_url,
                 active_roles,
             }))
         }
@@ -710,12 +712,65 @@ async fn create_workstation(
     Json(payload): Json<CreateWorkstationRequest>,
 ) -> Result<Json<crate::chat::Workstation>, StatusCode> {
     let name = payload.name.unwrap_or_else(|| "ws".to_string());
-    match state
+
+    // Воркстейшн — под в Kubernetes: сначала запись, потом сам под.
+    let ws = state
         .chat_store
         .create_workstation(payload.project_id, &name)
         .await
-    {
-        Ok(ws) => Ok(Json(ws)),
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let git_url = match state.trace_store.get_project(payload.project_id).await {
+        Ok(Some(p)) => p.git_url,
+        _ => {
+            let _ = state
+                .chat_store
+                .set_workstation_state(ws.id, "failed")
+                .await;
+            return Err(StatusCode::NOT_FOUND);
+        }
+    };
+
+    let pod_name = Cluster::pod_name(ws.id);
+    let branch = Cluster::branch_name(ws.id);
+
+    if let Err(e) = state.cluster.create_pod(&pod_name, &git_url, &branch).await {
+        tracing::error!("failed to create workstation pod {pod_name}: {e}");
+        let _ = state
+            .chat_store
+            .set_workstation_state(ws.id, "failed")
+            .await;
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // Под уже создан; готовность (Running) подтягиваем ожиданием — под
+    // тянет образ и клонирует проект, это занимает время.
+    if state.cluster.wait_ready(&pod_name).await.unwrap_or(false) {
+        let _ = state.chat_store.set_workstation_state(ws.id, "ready").await;
+    }
+
+    state
+        .chat_store
+        .get_workstation(ws.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        .map(Json)
+}
+
+async fn delete_workstation(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, StatusCode> {
+    // Сначала под, потом запись: если кластер не отдал под — состояние не
+    // трогаем, пользователь повторит.
+    if let Err(e) = state.cluster.delete_pod(&Cluster::pod_name(id)).await {
+        tracing::error!("failed to delete workstation pod ws-{id}: {e}");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    match state.chat_store.delete_workstation(id).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

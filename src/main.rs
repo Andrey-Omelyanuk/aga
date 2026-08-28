@@ -1,6 +1,7 @@
 mod agent;
 mod auth;
 mod chat;
+mod cluster;
 mod config;
 mod llm;
 mod reactive;
@@ -50,11 +51,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Подключение к LLM API: {}", llm_api_url);
     let llm_client = llm::LlmClient::new(&llm_api_url, llm_api_key);
 
+    let cluster = cluster::Cluster::from_env();
+    tracing::info!(
+        "Kubernetes: kubectl={} namespace={} template={} image={}",
+        cluster.kubectl,
+        cluster.namespace,
+        cluster.template,
+        cluster.image
+    );
+
     let reactive = reactive::ReactiveRunner::new(
         config.clone(),
         llm_client.clone(),
         trace_store.clone(),
         chat_store.clone(),
+        cluster.clone(),
     );
 
     // Создаём состояние приложения
@@ -64,13 +75,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         llm_client,
         chat_store,
         reactive,
+        cluster,
     };
 
     // Создаём роутер
     let app = server::create_router(state);
 
     // Запускаем сервер
-    let addr = "0.0.0.0:8080";
+    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("0.0.0.0:{port}");
     tracing::info!("Запуск HTTP сервера на {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

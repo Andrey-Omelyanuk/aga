@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::agent::Agent;
 use crate::chat::ChatStore;
+use crate::cluster::Cluster;
 use crate::config::Config;
 use crate::llm::LlmClient;
 use crate::trace::TraceStore;
@@ -17,6 +18,7 @@ pub struct ReactiveRunner {
     llm_client: LlmClient,
     trace_store: TraceStore,
     chat_store: ChatStore,
+    cluster: Cluster,
     locks: Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>,
 }
 
@@ -26,12 +28,14 @@ impl ReactiveRunner {
         llm_client: LlmClient,
         trace_store: TraceStore,
         chat_store: ChatStore,
+        cluster: Cluster,
     ) -> Self {
         Self {
             config,
             llm_client,
             trace_store,
             chat_store,
+            cluster,
             locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -76,7 +80,7 @@ impl ReactiveRunner {
             return;
         };
 
-        let executor = executor_for_workstation(&self.chat_store, &self.trace_store, ws_id).await;
+        let executor = executor_for_workstation(ws_id, &self.cluster.namespace);
         let agent = Agent::with_executor(
             role_config,
             self.llm_client.clone(),

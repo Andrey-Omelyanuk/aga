@@ -25,7 +25,7 @@ pub struct TaskTrace {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: i64,
-    pub compose_path: String,
+    pub git_url: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -106,12 +106,12 @@ impl TraceStore {
         .execute(&pool)
         .await?;
 
-        // Таблица проектов - ключ это путь к docker compose файлу
+        // Таблица проектов - ключ это git-репозиторий проекта
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS projects (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                compose_path TEXT NOT NULL UNIQUE,
+                git_url TEXT NOT NULL UNIQUE,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
@@ -119,6 +119,10 @@ impl TraceStore {
         )
         .execute(&pool)
         .await?;
+
+        // Миграция: проект раньше задавался путём к docker-compose на хосте;
+        // теперь он задаётся git-URL, который воркстейшн клонирует в свой под.
+        migrate_projects_git_url(&pool).await?;
 
         // Таблица активных ролей для проектов
         sqlx::query(
@@ -270,11 +274,11 @@ impl TraceStore {
 
     // === Методы для управления проектами ===
 
-    /// Создать или получить проект по пути к docker-compose файлу
-    pub async fn upsert_project(&self, compose_path: &str) -> Result<i64, sqlx::Error> {
+    /// Создать или получить проект по git-URL.
+    pub async fn upsert_project(&self, git_url: &str) -> Result<i64, sqlx::Error> {
         // Пробуем найти существующий проект
-        let existing = sqlx::query("SELECT id FROM projects WHERE compose_path = ?")
-            .bind(compose_path)
+        let existing = sqlx::query("SELECT id FROM projects WHERE git_url = ?")
+            .bind(git_url)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -288,8 +292,8 @@ impl TraceStore {
             Ok(id)
         } else {
             // Создаём новый проект
-            let result = sqlx::query("INSERT INTO projects (compose_path) VALUES (?)")
-                .bind(compose_path)
+            let result = sqlx::query("INSERT INTO projects (git_url) VALUES (?)")
+                .bind(git_url)
                 .execute(&self.pool)
                 .await?;
             Ok(result.last_insert_rowid())
@@ -298,22 +302,21 @@ impl TraceStore {
 
     /// Получить проект по ID
     pub async fn get_project(&self, project_id: i64) -> Result<Option<Project>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT id, compose_path, created_at, updated_at FROM projects WHERE id = ?",
-        )
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT id, git_url, created_at, updated_at FROM projects WHERE id = ?")
+                .bind(project_id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         match row {
             Some(r) => {
                 let id: i64 = r.get("id");
-                let compose_path: String = r.get("compose_path");
+                let git_url: String = r.get("git_url");
                 let created_at: DateTime<Utc> = r.get("created_at");
                 let updated_at: DateTime<Utc> = r.get("updated_at");
                 Ok(Some(Project {
                     id,
-                    compose_path,
+                    git_url,
                     created_at,
                     updated_at,
                 }))
@@ -322,28 +325,25 @@ impl TraceStore {
         }
     }
 
-    /// Получить проект по пути к docker-compose
+    /// Получить проект по git-URL
     #[allow(dead_code)]
-    pub async fn get_project_by_path(
-        &self,
-        compose_path: &str,
-    ) -> Result<Option<Project>, sqlx::Error> {
+    pub async fn get_project_by_url(&self, git_url: &str) -> Result<Option<Project>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, compose_path, created_at, updated_at FROM projects WHERE compose_path = ?",
+            "SELECT id, git_url, created_at, updated_at FROM projects WHERE git_url = ?",
         )
-        .bind(compose_path)
+        .bind(git_url)
         .fetch_optional(&self.pool)
         .await?;
 
         match row {
             Some(r) => {
                 let id: i64 = r.get("id");
-                let compose_path: String = r.get("compose_path");
+                let git_url: String = r.get("git_url");
                 let created_at: DateTime<Utc> = r.get("created_at");
                 let updated_at: DateTime<Utc> = r.get("updated_at");
                 Ok(Some(Project {
                     id,
-                    compose_path,
+                    git_url,
                     created_at,
                     updated_at,
                 }))
@@ -355,7 +355,7 @@ impl TraceStore {
     /// Получить все проекты
     pub async fn get_all_projects(&self) -> Result<Vec<Project>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, compose_path, created_at, updated_at FROM projects ORDER BY created_at",
+            "SELECT id, git_url, created_at, updated_at FROM projects ORDER BY created_at",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -363,12 +363,12 @@ impl TraceStore {
         let mut projects = Vec::new();
         for row in rows {
             let id: i64 = row.get("id");
-            let compose_path: String = row.get("compose_path");
+            let git_url: String = row.get("git_url");
             let created_at: DateTime<Utc> = row.get("created_at");
             let updated_at: DateTime<Utc> = row.get("updated_at");
             projects.push(Project {
                 id,
-                compose_path,
+                git_url,
                 created_at,
                 updated_at,
             });
@@ -521,5 +521,90 @@ impl TraceStore {
 
         tx.commit().await?;
         Ok(())
+    }
+}
+
+/// Переименовать `projects.compose_path` в `git_url` у старых БД.
+/// SQLite не поддерживает `IF EXISTS` для ALTER, поэтому столбец проверяется
+/// через `PRAGMA table_info`.
+async fn migrate_projects_git_url(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let cols: Vec<String> = sqlx::query("PRAGMA table_info(projects)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    let has_compose = cols.iter().any(|c| c == "compose_path");
+    let has_git = cols.iter().any(|c| c == "git_url");
+    if has_compose && !has_git {
+        sqlx::query("ALTER TABLE projects RENAME COLUMN compose_path TO git_url")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path() -> (String, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("aga_trace_test_{}.db", Uuid::new_v4()));
+        (path.to_string_lossy().into_owned(), path)
+    }
+
+    #[tokio::test]
+    async fn project_registered_by_git_url() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let url = "git@github.com:acme/proj.git";
+        let id = store.upsert_project(url).await.unwrap();
+        let project = store.get_project(id).await.unwrap().unwrap();
+        assert_eq!(project.git_url, url);
+        let again = store.upsert_project(url).await.unwrap();
+        assert_eq!(again, id);
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn migrates_compose_path_to_git_url() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let (path, file) = temp_db_path();
+        let options = SqliteConnectOptions::from_str(&path)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, compose_path TEXT NOT NULL UNIQUE, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO projects (compose_path) VALUES ('/old/host/path')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let store = TraceStore::new(&path).await.unwrap();
+        let old = store.get_project(1).await.unwrap().unwrap();
+        assert_eq!(old.git_url, "/old/host/path");
+
+        let id = store
+            .upsert_project("https://example.com/r.git")
+            .await
+            .unwrap();
+        let project = store.get_project(id).await.unwrap().unwrap();
+        assert_eq!(project.git_url, "https://example.com/r.git");
+
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
     }
 }

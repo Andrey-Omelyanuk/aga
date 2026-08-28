@@ -747,6 +747,15 @@ impl ChatStore {
     }
 
     #[allow(dead_code)]
+    /// Удалить воркстейшн из списка.
+    pub async fn delete_workstation(&self, id: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM workstations WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn set_workstation_state(&self, id: i64, state: &str) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE workstations SET state = ? WHERE id = ?")
             .bind(state)
@@ -932,6 +941,33 @@ mod tests {
         let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
         let users = store.list_users().await.unwrap();
         assert!(!users.is_empty());
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn deleted_workstation_disappears_from_list() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_ws_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws = store.create_workstation(1, "w1").await.unwrap();
+        assert!(store
+            .list_workstations()
+            .await
+            .unwrap()
+            .iter()
+            .any(|w| w.id == ws.id));
+        assert!(store.delete_workstation(ws.id).await.unwrap());
+        assert!(!store
+            .list_workstations()
+            .await
+            .unwrap()
+            .iter()
+            .any(|w| w.id == ws.id));
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);
