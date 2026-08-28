@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{POD_NAME}}
+  labels:
+    app: aga-workstation
+spec:
+  automountServiceAccountToken: false
+  containers:
+    - name: workstation
+      image: {{IMAGE}}
+      command: ["/entrypoint.sh"]
+      env:
+        - name: GIT_URL
+          value: "{{GIT_URL}}"
+        - name: BRANCH
+          value: "{{BRANCH}}"
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+  restartPolicy: OnFailure
