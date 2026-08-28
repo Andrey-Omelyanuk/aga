@@ -217,15 +217,34 @@
     </main>
 
     <script>
-        const API_BASE = '';
+        // Ядро (API) — отдельный сервис: в стенде api.localhost, локально localhost:8080.
+        const API_BASE = location.hostname === 'dev.localhost' ? 'http://api.localhost' : 'http://localhost:8080';
         let currentChatId = null;
         let currentAgent = null;
         let chatCache = null;
         let pollTimer = null;
 
-        // === SSO: при 401 показываем кнопку входа через Keycloak ===
+        // === SSO: ядро возвращает токен фрагментом URL (#token=...), храним его в
+        // localStorage и шлём заголовком Authorization. При 401 — кнопка входа.
+        const hashToken = location.hash.match(/^#token=(.+)$/);
+        if (hashToken) {
+            localStorage.setItem('aga_token', hashToken[1]);
+            history.replaceState(null, '', location.pathname + location.search);
+        }
+
+        function authHeaders(headers) {
+            const token = localStorage.getItem('aga_token');
+            const out = Object.assign({}, headers || {});
+            if (token) out['Authorization'] = 'Bearer ' + token;
+            return out;
+        }
+
         async function api(path, options) {
-            const res = await fetch(`${API_BASE}${path}`, options);
+            options = options || {};
+            const res = await fetch(
+                `${API_BASE}${path}`,
+                Object.assign({}, options, { headers: authHeaders(options.headers) })
+            );
             if (res.status === 401) {
                 document.getElementById('loginBtn').style.display = 'inline-block';
             }
@@ -274,7 +293,7 @@
         async function createProject() {
             const url = document.getElementById('newProjectUrl').value.trim();
             if (!url) return;
-            const res = await fetch(`${API_BASE}/projects`, {
+            const res = await api('/projects', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ git_url: url })
@@ -286,7 +305,7 @@
         }
 
         async function deleteProject(id) {
-            await fetch(`${API_BASE}/projects/${id}`, { method: 'DELETE' });
+            await api('/projects/' + id, { method: 'DELETE' });
             loadProjects();
         }
 
@@ -334,7 +353,7 @@
             const wsId = document.getElementById('sessionWorkstation').value;
             const title = document.getElementById('newSessionTitle').value.trim();
             if (!wsId) { alert('Выберите готовый воркстейшн'); return; }
-            const res = await fetch(`${API_BASE}/workstations/${wsId}/session`, {
+            const res = await api('/workstations/' + wsId + '/session', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ title: title || 'Новая сессия' })
@@ -377,7 +396,7 @@
         }
 
         async function closeSession(id) {
-            const res = await fetch(`${API_BASE}/chats/${id}/close`, { method: 'POST' });
+            const res = await api('/chats/' + id + '/close', { method: 'POST' });
             if (res.ok) { loadSessions(); } else if (res.status === 403) {
                 alert('Закрыть сессию может только тот, кто её открыл');
             }
@@ -423,7 +442,7 @@
         }
 
         async function createNewSession() {
-            const res = await fetch(`${API_BASE}/chats`, {
+            const res = await api('/chats', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ title: 'Новая сессия' })
@@ -443,7 +462,7 @@
             currentChatId = id;
             document.getElementById('chatTitle').textContent = `Сессия #${id}`;
             try {
-                const res = await fetch(`${API_BASE}/chats/${id}`);
+                const res = await api('/chats/' + id);
                 if (!res.ok) return;
                 const data = await res.json();
                 chatCache = data;
@@ -474,7 +493,7 @@
                 div.appendChild(bubble);
                 div.appendChild(meta);
                 container.appendChild(div);
-                const artifacts = await fetch(`${API_BASE}/messages/${msg.id}/artifacts`).then(r => r.json()).catch(() => []);
+                const artifacts = await api('/messages/' + msg.id + '/artifacts').then(r => r.json()).catch(() => []);
                 for (const art of artifacts) {
                     const artDiv = document.createElement('div');
                     artDiv.className = 'message agent';
@@ -491,7 +510,7 @@
             if (!message || !currentChatId) return;
             input.value = '';
             try {
-                const res = await fetch(`${API_BASE}/chats/${currentChatId}/messages`, {
+                const res = await api('/chats/' + currentChatId + '/messages', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ body: message })
@@ -510,7 +529,7 @@
             pollTimer = setInterval(async () => {
                 if (!currentChatId) return;
                 try {
-                    const res = await fetch(`${API_BASE}/chats/${currentChatId}`);
+                    const res = await api('/chats/' + currentChatId);
                     if (!res.ok) return;
                     const data = await res.json();
                     if (JSON.stringify(data.messages) !== JSON.stringify(chatCache?.messages)) {
@@ -533,6 +552,7 @@
         }
 
         // Инициализация
+        document.getElementById('loginBtn').href = API_BASE + '/auth/login';
         loadAgents();
         loadProjects();
     </script>

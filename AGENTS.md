@@ -1,21 +1,21 @@
 # aga — LLM Agent Framework
 
 ## Overview
-Фреймворк для создания и запуска LLM-агентов. Предоставляет HTTP API, цикл агента
-(LLM → parse → exec → trace), SQLite-трассировку, human-in-the-loop и модель чата
-(сессии, участники, сообщения-дерево, шаринг). Спроектирован для слабых
-(маломощных) LLM — минимум шагов, простые промпты, никаких оркестраторов.
+Монорепо фреймворка для создания и запуска LLM-агентов. Состоит из двух
+сервисов: ядро (`main/` — Rust: HTTP API, цикл агента, SQLite-трассировка,
+human-in-the-loop, модель чата, SSO) и веб-клиент (`front/` — SPA на nginx).
+Стенд — в Kubernetes (`infra/`). Спроектирован для слабых (маломощных) LLM —
+минимум шагов, простые промпты, никаких оркестраторов.
 
 ## Boundaries
-- **Делает:** предоставляет HTTP API для отправки задач агентам и чата; управляет
-  жизненным циклом агента; валидирует команды по белому списку; хранит трассировку
-  в SQLite (WAL); поддерживает human-in-the-loop через `[ASK_HUMAN]`; управляет
-  проектами (git-репозиторий) и ролями через API; воркстейшны — как поды в
-  Kubernetes (`kubectl`); модель чата (`/users`, `/chats`, `/messages`,
-  `/workstations`); SSO (Keycloak): JWKS-проверка JWT, роли participant/admin,
-  вход веб-клиента через `/auth/login` + `/auth/callback`.
+- **Делает (платформа):** REST API задач агентам и чата; управление жизненным
+  циклом агента; валидация команд по белому списку; трассировка в SQLite (WAL);
+  human-in-the-loop через `[ASK_HUMAN]`; проекты (git-репозиторий) и роли через
+  API; воркстейшны — как поды в Kubernetes (`kubectl`); модель чата (`/users`,
+  `/chats`, `/messages`, `/workstations`); SSO (Keycloak): JWKS-проверка JWT,
+  роли participant/admin, вход веб-клиента через `/auth/login` + `/auth/callback`.
 - **Не делает:** не управляет Docker-контейнерами напрямую (только через shell);
-  не предоставляет готовых агентов — агенты конфигурируются через `roles/`;
+  не предоставляет готовых агентов — агенты конфигурируются через `main/roles/`;
   не является оркестратором (NATS, Redis, S3); не управляет воркстейшнами из
   веб-интерфейса (их поднимает админ через SSO и k8s); не редактирует персонал
   внутри aga (учётки и роли — в Keycloak).
@@ -26,28 +26,34 @@
 - **Модель чата (минимальная реализация):** дизайн — `oos/` (дерево сообщений,
   единый `parent_id`, шаринг `#share <chat_id>` как копия-шар со ссылкой на
   оригинал, сессия как корневой чат воркстейшна, реактивные агенты); реализация —
-  `src/chat.rs` + API. Ещё не сделано: DinD-изоляция воркстейшнов.
+  `main/src/chat.rs` + API. Ещё не сделано: DinD-изоляция воркстейшнов.
 
 ## Tech Stack
-- Rust 2021, Tokio, Axum 0.7, reqwest 0.11 (rustls), sqlx 0.7 (SQLite, WAL),
+- Ядро: Rust 2021, Tokio, Axum 0.7, reqwest 0.11 (rustls), sqlx 0.7 (SQLite, WAL),
   serde, regex, tracing, thiserror, base64.
+- Фронт: один `index.html` (vanilla JS), раздаётся nginx.
+- Инфра: Kubernetes (minikube), Keycloak, Docker.
 
 ## Architecture
 ```
 aga/
-├── src/           # Ядро на Rust (ядро фреймворка)
-├── static/        # Веб-клиент (SPA, index.html)
-├── roles/         # Библиотека YAML-пресетов ролей агентов
-├── prompts/       # Системные промпты для агентов
-├── config/        # Runtime-конфиг ролей (roles.yaml, из config.example.yml)
-├── examples/      # Примеры проектов (game-xo, game-2d)
-├── data/          # Runtime-данные (trace.db, work/) — в .gitignore
-├── infra/         # Образ ядра (Dockerfile), .env.example, k8s-стенд (ядро + Keycloak + воркстейшны), AGENTS.md
-├── oos/           # Дизайн-модель (object-oriented design, документы-объекты)
-├── stories/       # Истории разработки
-├── makefile       # Единственный интерфейс команд (см. Development)
-├── Cargo.toml
-└── Dockerfile     # Мультистейдж-сборка
+├── AGENTS.md           # этот уровень (монорепо)
+├── makefile            # единственный интерфейс команд (см. Development)
+├── main/               # ядро — Rust-сервис (см. main/AGENTS.md)
+│   ├── src/            # модули ядра
+│   ├── roles/          # библиотека YAML-пресетов ролей
+│   ├── prompts/        # системные промпты
+│   ├── config/         # roles.yaml (runtime) + config.example.yml
+│   ├── data/           # runtime-данные (trace.db, work/) — в .gitignore
+│   ├── Cargo.toml
+│   └── Dockerfile      # образ ядра (kubectl + бинарь)
+├── front/              # веб-клиент — SPA-сервис (см. front/AGENTS.md)
+│   ├── index.html
+│   └── Dockerfile      # образ nginx
+├── infra/              # .env.example, k8s-стенд (ядро + фронт + Keycloak + воркстейшны), AGENTS.md
+├── oos/                # дизайн-модель (object-oriented design, документы-объекты)
+├── stories/            # истории разработки
+└── examples/           # примеры проектов (game-xo, game-2d)
 ```
 
 ## Patterns
@@ -58,14 +64,16 @@ aga/
 - LLM-запросы через OpenAI-compatible API (один LlmClient на все роли).
 - Парсинг ответов LLM через regex (команды из markdown-код-блоков).
 - Human-in-the-loop через маркер `[ASK_HUMAN]...[/ASK_HUMAN]`.
-- Модель чата отделена от трассировки: `src/chat.rs` (ChatStore) рядом с
-  `src/trace.rs` (TraceStore), БД одна.
+- Модель чата отделена от трассировки: `main/src/chat.rs` (ChatStore) рядом с
+  `main/src/trace.rs` (TraceStore), БД одна.
 
 ## Development
 - Все команды — через `make` в корне.
-- `make init` — создаёт `.env` (из `infra/.env.example`) и `config/roles.yaml`
-  (из `config.example.yml`).
-- Локальная разработка: `make build`, `make run`, `make test`, `make lint`, `make fmt`.
+- `make init` — создаёт `.env` (из `infra/.env.example`) и `main/config/roles.yaml`
+  (из `main/config.example.yml`).
+- Локальная разработка: `make build`, `make run` (ядро, cargo в `main/`),
+  `make run-front` (раздача `front/index.html`), `make test`, `make lint`,
+  `make fmt`.
 - Тестовый стенд — в k8s (minikube): `make k8s-up`, `make k8s-build`, `make k8s-load`,
   `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`; ручной
   доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси
@@ -73,8 +81,8 @@ aga/
 - Переменные окружения — `.env` в корне (см. `infra/.env.example`).
 
 ## Non-Obvious Rules
-- `roles/` — библиотека пресетов; runtime загружает `config/roles.yaml` (сборка
-  из одного или нескольких пресетов, валидная структура — ключ `roles:`).
+- `main/roles/` — библиотека пресетов; runtime загружает `main/config/roles.yaml`
+  (сборка из одного или нескольких пресетов, валидная структура — ключ `roles:`).
 - Команды выполняются через `sh -c` (dev, без воркстейшна) или `kubectl exec`
   в под воркстейшна (Kubernetes). Inline-конструкции (`|`, `>`, `<`, `;`, `&`)
   запрещены на уровне `is_command_allowed`.
@@ -86,20 +94,24 @@ aga/
   сообщения с дополнительной реакцией; реактивные агенты по `@Agent.<role>`
   сериализуются per-workstation.
 - Каждый task создаёт новый Agent (легковесный, без state между задачами).
+- В стенде SPA и API разнесены по сервисам: `dev.localhost` → `front/`,
+  `api.localhost` → `main/`. Ядро статику не раздаёт.
 
 ## Verification
-- Сборка и линт: `make build`, `make lint` — без ошибок.
-- Тесты: `make test` (cargo test).
-- Интеграционный тест стенда: `make k8s-verify` — ядро и Keycloak поднимаются в
-  кластере (minikube), проверяются воркстейшны-поды, SSO и персистентность;
-  локально `make run` отвечает на `/users`, `/chats/:id/messages`.
-- Критерий готовности: фреймворк компилируется, запускается, отвечает на HTTP,
-  выполняет цикл агента и сохраняет трассировку.
+- Сборка и линт ядра: `make build`, `make lint` — без ошибок.
+- Тесты ядра: `make test` (cargo test в `main/`).
+- Фронт: `make run-front` — страница грузится без ошибок консоли.
+- Интеграционный тест стенда: `make k8s-verify` — ядро, фронт и Keycloak
+  поднимаются в кластере (minikube), проверяются воркстейшны-поды, SSO и
+  персистентность; локально `make run` отвечает на `/users`, `/chats/:id/messages`.
+- Критерий готовности: фреймворк компилируется, ядро запускается и отвечает на
+  HTTP, фронт раздаётся отдельно, цикл агента выполняется, трассировка
+  сохраняется.
 
 ## Dependencies
-- Rust (edition 2021)
+- Rust (edition 2021), nginx
 - LLM API (OpenAI-compatible: Ollama, vLLM, OpenAI, LocalAI)
-- Docker (для сборки образов ядра и воркстейшна)
+- Docker (для сборки образов ядра, фронта и воркстейшна)
 - Kubernetes (`kubectl`) — стенд и воркстейшны как поды; локально — minikube (`make k8s-up`)
 
 ## Markdown Style

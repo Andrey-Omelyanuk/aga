@@ -50,8 +50,7 @@ WORKDIR /app
 COPY --from=builder /app/target/release/aga /app/aga
 COPY --from=builder /tmp/kubectl /usr/local/bin/kubectl
 
-# Веб-клиент раздаёт ядро (ServeDir::new("static") из рабочей директории)
-COPY static/ ./static/
+# Веб-клиент — отдельный сервис (front/), ядро статику не раздаёт.
 
 # Создаём директории для данных
 RUN mkdir -p /var/lib/aga/work /etc/aga/keys && \

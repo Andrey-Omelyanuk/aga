@@ -15,7 +15,7 @@
 #   4. данные ядра переживают перезапуск пода (PVC)
 #   5. на стенде поднят Keycloak; у воркстейшна нет доступа к кластеру
 #   6. недействительный токен отклоняется, действительный работает под участником
-#   7. веб-клиент ядра и страница входа Keycloak отвечают извне
+#   7. веб-клиент (front) и страница входа Keycloak отвечают извне
 #   8. ядро работает в кластере, а не на хосте
 #   9. docker compose из проекта убран
 set -euo pipefail
@@ -25,8 +25,10 @@ NS="${AGA_K8S_NAMESPACE:-aga}"
 KUBECTL="${AGA_K8S_KUBECTL:-kubectl}"
 CORE_PORT="${CORE_PORT:-18080}"
 KC_PORT="${KC_PORT:-18081}"
+FRONT_PORT="${FRONT_PORT:-18082}"
 SERVER="http://localhost:${CORE_PORT}"
 KC_SERVER="http://localhost:${KC_PORT}"
+FRONT_SERVER="http://localhost:${FRONT_PORT}"
 EXT_IP="localhost"
 PF_PIDS=""
 
@@ -41,38 +43,50 @@ trap cleanup EXIT
 echo "==> kubectl: cluster check"
 $KUBECTL cluster-info >/dev/null
 
-echo "==> build & load core + workstation images"
-docker build -q -t aga-core:latest . >/dev/null
+echo "==> build & load core + front + workstation images"
+docker build -q -t aga-core:latest -f main/Dockerfile main >/dev/null
+docker build -q -t aga-front:latest -f front/Dockerfile front >/dev/null
 docker build -q -t aga-workstation:latest \
   -f infra/k8s/workstation-image/Dockerfile infra/k8s/workstation-image >/dev/null
 if command -v minikube >/dev/null 2>&1; then
-  minikube image load aga-core:latest aga-workstation:latest
+  minikube image load aga-core:latest aga-front:latest aga-workstation:latest
   EXT_IP=$(minikube ip)
 fi
 
-echo "==> bring up the stand (core + Keycloak in cluster)"
+echo "==> bring up the stand (core + front + Keycloak in cluster)"
 bash infra/k8s/core/deploy.sh
+bash infra/k8s/front/deploy.sh
 
 echo "==> core runs in cluster, not on host (8)"
 $KUBECTL rollout status deploy/aga-core -n "$NS" --timeout=300s
 $KUBECTL get pod -n "$NS" -l app=aga-core -o jsonpath='{.items[0].metadata.name}' >/dev/null
+
+# Front (nginx) раздаёт SPA отдельно от ядра.
+$KUBECTL rollout status deploy/aga-front -n "$NS" --timeout=300s
+$KUBECTL get pod -n "$NS" -l app=aga-front -o jsonpath='{.items[0].metadata.name}' >/dev/null
 
 # Повторный прогон: рестарт гарантирует свежий JWKS (ключи Keycloak могли
 # смениться) и последний загруженный образ.
 $KUBECTL rollout restart deploy/aga-core -n "$NS" >/dev/null
 $KUBECTL rollout status deploy/aga-core -n "$NS" --timeout=300s
 
-echo "==> port-forward core + keycloak"
+echo "==> port-forward core + keycloak + front"
 $KUBECTL port-forward -n "$NS" svc/aga "$CORE_PORT":8080 >/dev/null 2>&1 &
 PF_PIDS="$PF_PIDS $!"
 $KUBECTL port-forward -n "$NS" svc/keycloak "$KC_PORT":8080 >/dev/null 2>&1 &
 PF_PIDS="$PF_PIDS $!"
+$KUBECTL port-forward -n "$NS" svc/aga-front "$FRONT_PORT":80 >/dev/null 2>&1 &
+PF_PIDS="$PF_PIDS $!"
 
+# Core больше не раздаёт статику: готовность — ответ API (401 без токена).
+echo "==> core api answers"
 for _ in $(seq 1 90); do
-  if curl -sf "$SERVER/" >/dev/null 2>&1; then break; fi
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$SERVER/users" 2>/dev/null || true)
+  if [ "$code" = "401" ] || [ "$code" = "200" ]; then break; fi
   sleep 1
 done
-curl -sf "$SERVER/" >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' "$SERVER/users")
+[ "$code" = "401" ] || [ "$code" = "200" ]
 
 echo "==> keycloak realm is up (5)"
 for _ in $(seq 1 90); do
@@ -81,8 +95,12 @@ for _ in $(seq 1 90); do
 done
 curl -sf "$KC_SERVER/realms/aga" | jq -e '.realm == "aga"' >/dev/null
 
-echo "==> web client answers, login page reachable from outside (7)"
-curl -sf "$SERVER/" | grep -q '<main'
+echo "==> web client (front) answers, login page reachable from outside (7)"
+for _ in $(seq 1 60); do
+  if curl -sf "$FRONT_SERVER/" 2>/dev/null | grep -q '<main'; then break; fi
+  sleep 2
+done
+curl -sf "$FRONT_SERVER/" | grep -q '<main'
 KC_EXT="$EXT_IP:30081"
 for _ in $(seq 1 60); do
   if curl -sf -o /dev/null \
@@ -98,6 +116,10 @@ curl -sf "http://${KC_EXT}/realms/aga/protocol/openid-connect/auth?client_id=aga
 echo "==> api without token is rejected, sso enabled (6)"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$SERVER/users")" = "401" ]
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer invalid.token.x" "$SERVER/users")" = "401" ]
+
+echo "==> CORS allows the front origin"
+curl -s -D- -o /dev/null -H "Origin: http://dev.localhost" "$SERVER/users" \
+  | grep -qi '^access-control-allow-origin: http://dev.localhost'
 
 get_token() {
   local user="$1" pass="$2"

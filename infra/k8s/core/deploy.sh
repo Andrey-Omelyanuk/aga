@@ -3,17 +3,20 @@
 # (roles + env + realm), Deployment ядра и Keycloak, сервисы. Идемпотентен —
 # повторный запуск пересоздаёт только конфиги и приводит манифесты к желаемому.
 #
-# Конфиги не лежат в git: roles.yaml берётся из config/roles.yaml (sso-блок
+# Конфиги не лежат в git: roles.yaml берётся из main/config/roles.yaml (sso-блок
 # заменяется на стендовый), env — из .env, realm — тестовый из этого каталога.
 set -euo pipefail
 
 NS="${AGA_K8S_NAMESPACE:-aga}"
 KUBECTL="${AGA_K8S_KUBECTL:-kubectl}"
-ROLES_SRC="${AGA_ROLES_CONFIG:-./config/roles.yaml}"
+ROLES_SRC="${AGA_ROLES_CONFIG:-./main/config/roles.yaml}"
 LLM_API_URL="${AGA_K8S_LLM_API_URL:-http://192.168.49.1:11434/v1}"
 LLM_API_KEY="${LLM_API_KEY:-}"
+LLM_MODEL="${LLM_MODEL:-qwen3.5:9b}"
 RUST_LOG="${RUST_LOG:-info}"
 PORT="${PORT:-8080}"
+# Origin веб-клиента в стенде (CORS ядра + возврат токена после SSO).
+AGA_K8S_FRONT_URL="${AGA_K8S_FRONT_URL:-http://dev.localhost}"
 REALM="aga"
 CLIENT_SECRET="aga-secret"
 
@@ -40,11 +43,13 @@ echo "==> configmaps"
 $KUBECTL create configmap aga-env -n "$NS" \
   --from-literal=LLM_API_URL="$LLM_API_URL" \
   --from-literal=LLM_API_KEY="$LLM_API_KEY" \
+  --from-literal=LLM_MODEL="$LLM_MODEL" \
+  --from-literal=AGA_FRONT_URL="$AGA_K8S_FRONT_URL" \
   --from-literal=RUST_LOG="$RUST_LOG" \
   --from-literal=PORT="$PORT" \
   --dry-run=client -o yaml | $KUBECTL apply -f -
 
-# roles.yaml ядра: роли из config/roles.yaml, sso-блок — стендовый (включён,
+# roles.yaml ядра: роли из main/config/roles.yaml, sso-блок — стендовый (включён,
 # указывает на Keycloak в кластере). authorize_url — внешний для браузера.
 awk '/^sso:/{exit} {print}' "$ROLES_SRC" > "$WORK/roles.yaml"
 cat >> "$WORK/roles.yaml" <<EOF
@@ -71,6 +76,6 @@ for f in "$K8S_DIR"/*.yaml; do
 done
 
 echo "==> stand deployed: core + Keycloak in ns '$NS'"
-echo "    web client: $(minikube service aga -n "$NS" --url 2>/dev/null || echo 'minikube service aga -n aga')"
 echo "    keycloak:   $KEYCLOAK_URL"
+echo "    front:      make k8s-deploy (infra/k8s/front) + make k8s-web"
 echo "    wait:       make k8s-wait"

@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aga-front
+  namespace: aga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aga-front
+  template:
+    metadata:
+      labels:
+        app: aga-front
+    spec:
+      containers:
+        - name: nginx
+          image: aga-front:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5

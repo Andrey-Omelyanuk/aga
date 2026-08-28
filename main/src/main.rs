@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm_api_url =
         env::var("LLM_API_URL").unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
     let llm_api_key = env::var("LLM_API_KEY").ok();
+    let llm_default_model = env::var("LLM_MODEL").unwrap_or_else(|_| "qwen3.5:9b".to_string());
 
     tracing::info!("Загрузка конфигурации из {}", config_path);
     let config = config::Config::load(&config_path)?;
@@ -78,8 +79,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
 
+    // Origin веб-клиента (front/): CORS-источник и адрес возврата токена после SSO.
+    let front_url =
+        env::var("AGA_FRONT_URL").unwrap_or_else(|_| "http://dev.localhost".to_string());
+    tracing::info!("Frontend origin: {}", front_url);
+
     tracing::info!("Подключение к LLM API: {}", llm_api_url);
-    let llm_client = llm::LlmClient::new(&llm_api_url, llm_api_key);
+    let llm_client = llm::LlmClient::new(&llm_api_url, llm_api_key, &llm_default_model);
 
     let cluster = cluster::Cluster::from_env();
     tracing::info!(
@@ -107,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reactive,
         cluster,
         sso_verifier,
+        front_url,
     };
 
     // Создаём роутер

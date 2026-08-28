@@ -1,6 +1,9 @@
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap, HeaderValue, Method, StatusCode,
+    },
     response::sse::{Event, Sse},
     response::IntoResponse,
     routing::{get, post},
@@ -10,7 +13,7 @@ use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use tokio::sync::mpsc;
-use tower_http::services::ServeDir;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::agent::Agent;
 use crate::auth;
@@ -30,6 +33,8 @@ pub struct AppState {
     pub reactive: ReactiveRunner,
     pub cluster: Cluster,
     pub sso_verifier: Option<auth::JwtVerifier>,
+    /// Origin веб-клиента (front/): CORS-источник и адрес возврата токена после SSO.
+    pub front_url: String,
 }
 
 /// Текущий пользователь: без SSO — аноним-суперпользователь; с SSO —
@@ -75,6 +80,16 @@ pub struct SetProjectRolesRequest {
 }
 
 pub fn create_router(state: AppState) -> Router {
+    // SPA (front/) живёт на другом origin — CORS пропускает только его.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list([state
+            .front_url
+            .parse::<HeaderValue>()
+            .unwrap_or_else(|_| {
+                HeaderValue::from_static("http://dev.localhost")
+            })]))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([CONTENT_TYPE, AUTHORIZATION]);
     Router::new()
         .route("/tasks/:role", post(create_task))
         .route("/trace/:task_id", get(get_trace))
@@ -119,7 +134,7 @@ pub fn create_router(state: AppState) -> Router {
             "/workstations/:id",
             axum::routing::delete(delete_workstation),
         )
-        .nest_service("/", ServeDir::new("static"))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -345,7 +360,7 @@ fn sso_redirect_uri(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Начать вход: редирект на authorize-эндпоинт Keycloak. Токен после входа
-/// живёт в cookie `aga_token`, его шлёт веб-клиент.
+/// возвращается веб-клиенту (front_url/#token=...) — см. auth_callback.
 async fn auth_login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -370,8 +385,8 @@ async fn auth_login(
     Ok(axum::response::Redirect::temporary(url.as_str()))
 }
 
-/// Обработчик возврата из Keycloak: обменять code на токен и положить его
-/// в cookie `aga_token`, чтобы веб-клиент ходил под участником.
+/// Обработчик возврата из Keycloak: обменять code на токен и вернуть его
+/// веб-клиенту (redirect на front_url с токеном в фрагменте URL).
 async fn auth_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -414,7 +429,11 @@ async fn auth_callback(
         .and_then(|v| v.as_str())
         .ok_or(StatusCode::BAD_GATEWAY)?;
 
-    let mut resp = axum::response::Redirect::temporary("/").into_response();
+    // Веб-клиент (front/) получает токен фрагментом URL — фрагмент не уходит
+    // на сервер и не остаётся в логах. Cookie ставим для прямых api.localhost-клиентов.
+    let mut resp =
+        axum::response::Redirect::temporary(&format!("{}/#token={}", state.front_url, token))
+            .into_response();
     let cookie = format!("aga_token={token}; Path=/; HttpOnly; SameSite=Lax");
     resp.headers_mut().insert(
         axum::http::header::SET_COOKIE,
@@ -1028,7 +1047,7 @@ mod tests {
             roles: Default::default(),
             sso: None,
         };
-        let llm_client = LlmClient::new("http://localhost:1/v1", None);
+        let llm_client = LlmClient::new("http://localhost:1/v1", None, "test-model");
         let cluster = Cluster {
             kubectl: "kubectl".into(),
             namespace: "default".into(),
@@ -1056,6 +1075,7 @@ mod tests {
             reactive,
             cluster,
             sso_verifier,
+            front_url: "http://dev.localhost".into(),
         };
         (state, path)
     }
@@ -1292,35 +1312,5 @@ mod tests {
         // вернёт браузер на свой хост (auth.localhost) и будет 404.
         assert_eq!(redirect_uri, "http://dev.localhost/auth/callback");
         cleanup(&file).await;
-    }
-
-    #[test]
-    fn web_client_has_sso_login_link() {
-        let html = std::fs::read_to_string("static/index.html").unwrap();
-        // Веб-клиент умеет начинать вход через Keycloak (cookie ставит сервер).
-        assert!(html.contains("/auth/login"));
-        assert!(html.contains("loginBtn"));
-    }
-
-    /// Веб-клиент: воркстейшны и персонал только показываются, управления
-    /// (создание/удаление) в интерфейсе нет. Открытие сессии на станции —
-    /// это занятие, а не управление станцией, поэтому разрешено.
-    #[test]
-    fn web_client_views_workstations_and_personnel_without_management() {
-        let html = std::fs::read_to_string("static/index.html").unwrap();
-        // Воркстейшны показываются вместе с состоянием.
-        assert!(html.contains("/workstations"));
-        assert!(html.contains("ws.state"));
-        // Интерфейс не создаёт станции (POST на коллекцию /workstations) и не
-        // удаляет их (DELETE /workstations/:id).
-        assert!(!html.contains("`${API_BASE}/workstations`, {"));
-        assert!(!html.contains("deleteWorkstation"));
-        assert!(!html.contains("createWorkstation"));
-        assert!(!html.contains("`${API_BASE}/workstations/${id}`"));
-        assert!(!html.contains("/workstations/${id}"));
-        // Персонал показывается, но не редактируется внутри aga.
-        assert!(html.contains("/users"));
-        assert!(!html.contains("`${API_BASE}/users`, {"));
-        assert!(!html.contains("/users/${"));
     }
 }
