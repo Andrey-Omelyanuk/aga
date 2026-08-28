@@ -10,8 +10,9 @@
 - **Делает:** предоставляет HTTP API для отправки задач агентам и чата; управляет
   жизненным циклом агента; валидирует команды по белому списку; хранит трассировку
   в SQLite (WAL); поддерживает human-in-the-loop через `[ASK_HUMAN]`; управляет
-  проектами (docker-compose) и ролями через API; модель чата (`/users`, `/chats`,
-  `/messages`, `/workstations`).
+  проектами (git-репозиторий) и ролями через API; воркстейшны — как поды в
+  Kubernetes (`kubectl`); модель чата (`/users`, `/chats`, `/messages`,
+  `/workstations`).
 - **Не делает:** не управляет Docker-контейнерами напрямую (только через shell);
   не предоставляет готовых агентов — агенты конфигурируются через `roles/`;
   не включает полноценную аутентификацию (SSO опционально); не является
@@ -36,7 +37,7 @@ aga/
 ├── config/        # Runtime-конфиг ролей (roles.yaml, из config.example.yml)
 ├── examples/      # Примеры проектов (game-xo, game-2d)
 ├── data/          # Runtime-данные (trace.db, work/) — в .gitignore
-├── infra/         # Docker Compose (compose.yml), Dockerfile, .env.example, AGENTS.md
+├── infra/         # Docker Compose (compose.yml), Dockerfile, .env.example, k8s-воркстейшны, AGENTS.md
 ├── oos/           # Дизайн-модель (object-oriented design, документы-объекты)
 ├── stories/       # Истории разработки
 ├── makefile       # Единственный интерфейс команд (см. Development)
@@ -66,8 +67,11 @@ aga/
 ## Non-Obvious Rules
 - `roles/` — библиотека пресетов; runtime загружает `config/roles.yaml` (сборка
   из одного или нескольких пресетов, валидная структура — ключ `roles:`).
-- Команды выполняются через `sh -c` (dev) или `docker compose exec` (prod/Docker).
-  Inline-конструкции (`|`, `>`, `<`, `;`, `&`) запрещены на уровне `is_command_allowed`.
+- Команды выполняются через `sh -c` (dev, без воркстейшна) или `kubectl exec`
+  в под воркстейшна (Kubernetes). Inline-конструкции (`|`, `>`, `<`, `;`, `&`)
+  запрещены на уровне `is_command_allowed`.
+- Проект регистрируется git-URL; воркстейшн — под `ws-<id>` с собственным Docker
+  (DinD) и копией проекта; кластером управляет только ядро.
 - `[ASK_HUMAN]` — единственный протокол human-in-the-loop. При обнаружении
   выполнение задачи останавливается до ответа.
 - Модель чата: команды (`#invite`/`#kick`/`#start`/`#end`/`#share`) — это обычные
@@ -87,6 +91,7 @@ aga/
 - Rust (edition 2021)
 - LLM API (OpenAI-compatible: Ollama, vLLM, OpenAI, LocalAI)
 - Docker (для production-режима через `make run-d`)
+- Kubernetes (`kubectl`) — воркстейшны как поды; локально — minikube (`make k8s-up`)
 
 ## Markdown Style
 - Заголовки — `## <Section>`; списки через `-`; Код в блоках с указанием языка.

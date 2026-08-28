@@ -193,12 +193,12 @@ aga/
 #### `projects`
 Хранит настройки проектов (мультипроектность).
 
-| Поле           | Тип           | Описание                                              |
-|----------------|---------------|-------------------------------------------------------|
-| `id`           | INTEGER       | Первичный ключ (autoincrement)                        |
-| `compose_path` | TEXT          | Уникальный путь к docker-compose файлу (ключ проекта) |
-| `created_at`   | DATETIME      | Дата создания                                         |
-| `updated_at`   | DATETIME      | Дата последнего обновления                            |
+| Поле       | Тип           | Описание                                  |
+|------------|---------------|-------------------------------------------|
+| `id`       | INTEGER       | Первичный ключ (autoincrement)            |
+| `git_url`  | TEXT          | Уникальный git-URL репозитория (ключ проекта) |
+| `created_at` | DATETIME    | Дата создания                             |
+| `updated_at` | DATETIME    | Дата последнего обновления                |
 
 #### `project_roles`
 Хранит активные роли для каждого проекта.
@@ -217,7 +217,7 @@ aga/
 │   projects  │       │     tasks        │       │trace_entries │
 ├─────────────┤       ├──────────────────┤       ├──────────────┤
 │ id (PK)     │◄──────│ project_id (FK)  │       │ task_id (FK) │──────►┐
-│ compose_path│       │ id (PK, UUID)    │       │ id (PK)      │       │
+│ git_url     │       │ id (PK, UUID)    │       │ id (PK)      │       │
 │ created_at  │       │ role_name        │       │ step_number  │       │
 │ updated_at  │       │ status           │       │ entry_type   │       │
 └─────────────┘       │ created_at       │       │ content      │       │
