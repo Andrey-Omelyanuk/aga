@@ -18,7 +18,7 @@ K8S_CORE = infra/k8s/core
 
 .PHONY: help init build release test lint fmt fmt-fix run \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
-        k8s-logs k8s-web k8s-reset k8s-verify
+        k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify
 
 help:
 	@echo "init        - Copy example files to working config (.env, roles.yaml)"
@@ -37,6 +37,8 @@ help:
 	@echo "k8s-wait    - Wait until the core pod is ready"
 	@echo "k8s-logs    - Follow core logs"
 	@echo "k8s-web     - Open the web client in the browser"
+	@echo "k8s-dev     - Access the stand via dev.localhost/api.localhost/auth.localhost (nginx proxy)"
+	@echo "k8s-dev-stop - Stop the local nginx proxy (*.localhost access)"
 	@echo "k8s-reset   - Recreate the stand from scratch"
 	@echo "k8s-verify  - Run infra/k8s integration check against the cluster"
 
@@ -90,6 +92,21 @@ k8s-logs:
 
 k8s-web:
 	minikube service aga -n $(NS)
+
+# Доступ по хостам *.localhost (браузер резолвит их в 127.0.0.1/::1 без
+# /etc/hosts): dev.localhost — SPA, api.localhost — API, auth.localhost —
+# Keycloak. minikube tunnel не слушает loopback:80, поэтому стенд выставляется
+# локальным nginx-прокси (Docker, --network host): 80 -> ingress-nginx nodePort,
+# Host сохраняется, маршрутизацию делает ingress. Остановка — k8s-dev-stop.
+k8s-dev:
+	minikube addons enable ingress
+	@kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.type}' 2>/dev/null | grep -q LoadBalancer \
+		|| kubectl patch svc ingress-nginx-controller -n ingress-nginx -p '{"spec":{"type":"LoadBalancer"}}'
+	bash $(K8S_CORE)/deploy.sh
+	bash infra/k8s/local-proxy.sh start
+
+k8s-dev-stop:
+	bash infra/k8s/local-proxy.sh stop
 
 k8s-reset:
 	$(KUBECTL) delete ns $(NS) --ignore-not-found

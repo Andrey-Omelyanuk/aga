@@ -32,6 +32,7 @@ infra/k8s/
 │   ├── 40-service-core.yaml  # NodePort 30080 (веб-клиент/API)
 │   ├── 50-deployment-keycloak.yaml
 │   ├── 60-service-keycloak.yaml  # NodePort 30081 (вход в браузере)
+│   ├── 70-ingress.yaml       # dev/api/auth.localhost → сервисы (ingress-nginx)
 │   └── keycloak-realm.json   # тестовый realm (участники alice/bob)
 └── verify.sh                 # интеграционная проверка (make k8s-verify)
 ```
@@ -62,8 +63,10 @@ infra/k8s/
 - Keycloak — `start-dev --import-realm`, realm из configmap. `KC_HOSTNAME_STRICT:
   false`, `sslRequired: none` — работает по NodePort/IP. Клиент `aga` c
   `redirectUris: ["*"]` и `directAccessGrantsEnabled` (парольный grant для тестов).
-- authorize_url для браузера — внешний (NodePort `minikube ip:30081`); jwks_url и
-  token_url — ClusterIP `keycloak:8080` (их дергает только ядро).
+- authorize_url для браузера — внешний (по умолчанию `http://auth.localhost`
+  через ingress + tunnel; при желании переопределить `KEYCLOAK_URL`, например
+  `http://<ip>:30081` NodePort); jwks_url и token_url — ClusterIP `keycloak:8080`
+  (их дергает только ядро).
 - Воркстейшн-поды используют локально загруженные образы (`IfNotPresent` +
   тег `latest` + `minikube image load`), иначе kubelet тянет из реестра.
   `minikube image load` не обновляет уже существующий тег — после пересборки
@@ -71,8 +74,21 @@ infra/k8s/
   либо импортировать через `docker save | docker exec -i minikube docker load`).
 - `verify.sh` форвардит порты ядра (18080) и Keycloak (18081), чтобы не
   конфликтовать с рабочим сервером. Стенд после проверки остаётся поднятым.
-- `minikube service aga -n aga` — адрес веб-клиента; страница входа Keycloak —
-  `http://$(minikube ip):30081/realms/aga`.
+- `minikube service aga -n aga` — адрес веб-клиента (NodePort);
+  страница входа Keycloak — `http://$(minikube ip):30081/realms/aga`.
+- Ручной доступ без `/etc/hosts`: `make k8s-dev` включает ingress addon,
+  деплоит `70-ingress.yaml` и поднимает локальный nginx-прокси
+  (`infra/k8s/local-proxy.sh start`, Docker `--network host`). Прокси слушает
+  80 (IPv4+IPv6) и форвардит всё на ingress-nginx по nodePort, сохраняя `Host` —
+  маршрутизацию делает ingress. Браузер сам резолвит `*.localhost` в
+  127.0.0.1/::1 (RFC 6761), `minikube tunnel` не нужен (в v1.37 он не слушает
+  loopback:80). Остановка — `make k8s-dev-stop` (`local-proxy.sh stop`).
+  Итог: `http://dev.localhost` — SPA, `http://api.localhost` — API,
+  `http://auth.localhost` — Keycloak. SPA ходит в API same-origin
+  (`API_BASE=''`) и держит SSO-токен в cookie хоста, поэтому приложение должно
+  открываться через один хост (dev.localhost); api.localhost — отдельный адрес
+  API для curl/REST-клиентов. Из терминала `.localhost` ОС не резолвит — для
+  curl нужен `--resolve dev.localhost:80:127.0.0.1`.
 
 ## Verification
 - Интеграционный тест: `make k8s-verify` (или `bash infra/k8s/verify.sh`) —

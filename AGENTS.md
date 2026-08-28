@@ -67,7 +67,9 @@ aga/
   (из `config.example.yml`).
 - Локальная разработка: `make build`, `make run`, `make test`, `make lint`, `make fmt`.
 - Тестовый стенд — в k8s (minikube): `make k8s-up`, `make k8s-build`, `make k8s-load`,
-  `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`.
+  `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`; ручной
+  доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси
+  в Docker, без tunnel) и остановка — `make k8s-dev-stop`.
 - Переменные окружения — `.env` в корне (см. `infra/.env.example`).
 
 ## Non-Obvious Rules

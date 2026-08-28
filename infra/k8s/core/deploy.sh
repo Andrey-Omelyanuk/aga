@@ -17,13 +17,11 @@ PORT="${PORT:-8080}"
 REALM="aga"
 CLIENT_SECRET="aga-secret"
 
-# Куда браузер пойдёт логиниться: внешний адрес Keycloak (NodePort).
-# Для minikube — адрес кластера; в других случаях переопределить KEYCLOAK_URL.
-EXT_IP="localhost"
-if command -v minikube >/dev/null 2>&1 && minikube status >/dev/null 2>&1; then
-  EXT_IP=$(minikube ip)
-fi
-KEYCLOAK_URL="${KEYCLOAK_URL:-http://${EXT_IP}:30081}"
+# Куда браузер пойдёт логиниться. По умолчанию — auth.localhost (через ingress +
+# локальный nginx-прокси из make k8s-dev, .localhost резолвится браузером в
+# 127.0.0.1). Без ingress переопределить KEYCLOAK_URL, например
+# http://<ip>:30081 (NodePort).
+KEYCLOAK_URL="${KEYCLOAK_URL:-http://auth.localhost}"
 
 K8S_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$(mktemp -d)"

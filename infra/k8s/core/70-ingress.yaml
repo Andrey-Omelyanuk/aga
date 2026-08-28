@@ -1,0 +1,46 @@
+# Ingress стенда: все *.localhost в браузере резолвятся в 127.0.0.1 (RFC 6761),
+# а `minikube tunnel` выставляет ingress-nginx на 127.0.0.1:80/443. Поэтому
+# /etc/hosts не нужен: dev.localhost (SPA), api.localhost (API — тот же бэкенд)
+# и auth.localhost (Keycloak) доступны по http без порта.
+#
+# proxy-buffering отключён для ядра: SSE /human/pending не должен буферизоваться.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aga
+  namespace: aga
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: dev.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: aga
+                port:
+                  number: 8080
+    - host: api.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: aga
+                port:
+                  number: 8080
+    - host: auth.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
