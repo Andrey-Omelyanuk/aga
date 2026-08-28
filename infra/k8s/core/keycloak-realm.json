@@ -1,0 +1,45 @@
+{
+  "realm": "aga",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "participant" },
+      { "name": "admin" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "aga",
+      "enabled": true,
+      "secret": "aga-secret",
+      "publicClient": false,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@aga.test",
+      "emailVerified": true,
+      "firstName": "Алиса",
+      "lastName": "Участник",
+      "credentials": [{ "type": "password", "value": "alice-pass", "temporary": false }],
+      "realmRoles": ["participant"]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@aga.test",
+      "emailVerified": true,
+      "firstName": "Боб",
+      "lastName": "Админ",
+      "credentials": [{ "type": "password", "value": "bob-pass", "temporary": false }],
+      "realmRoles": ["admin", "participant"]
+    }
+  ]
+}
