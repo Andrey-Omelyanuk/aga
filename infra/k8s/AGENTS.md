@@ -38,6 +38,8 @@ infra/k8s/
 - Воркстейшн-под **привилегированный** (`privileged: true`) — без этого
   DinD внутри пода не заведётся. При этом доступа к k8s API у пода нет:
   `automountServiceAccountToken: false`, ServiceAccount не назначается.
+- У образа `imagePullPolicy: IfNotPresent` и тег `latest`: иначе kubelet всегда
+  тянет образ из реестра и игнорирует локально загруженный (`minikube image load`).
 - `verify.sh` поднимает ядро на `PORT` (по умолчанию 18080), чтобы не
   конфликтовать с рабочим сервером; порт сервер читает из переменной `PORT`.
 - Образ `aga-workstation:latest` должен попасть в кластер до создания

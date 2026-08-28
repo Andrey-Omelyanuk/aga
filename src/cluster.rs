@@ -39,6 +39,7 @@ spec:
   containers:
     - name: workstation
       image: {{IMAGE}}
+      imagePullPolicy: IfNotPresent
       command: ["/entrypoint.sh"]
       env:
         - name: GIT_URL
