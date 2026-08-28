@@ -80,6 +80,21 @@ pub enum ChatCommand {
     End,
 }
 
+/// Ошибки открытия/закрытия сессии воркстейшна.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("воркстейшн не найден")]
+    NotFound,
+    #[error("воркстейшн не готов")]
+    WorkstationNotReady,
+    #[error("на воркстейшне уже открыта сессия")]
+    WorkstationBusy,
+    #[error("закрыть сессию может только её владелец")]
+    Forbidden,
+    #[error("база данных: {0}")]
+    Db(#[from] sqlx::Error),
+}
+
 fn parse_dt(v: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(v)
         .map(|d| d.with_timezone(&Utc))
@@ -339,6 +354,16 @@ impl ChatStore {
             .unwrap_or(false))
     }
 
+    /// Обновить флаг суперпользователя (роль могла измениться в Keycloak).
+    pub async fn set_super_user(&self, id: i64, is_super: bool) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE chat_users SET is_super_user = ? WHERE id = ?")
+            .bind(is_super as i32)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn is_participant(&self, chat_id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
         let row = sqlx::query(
             "SELECT chat_id FROM chat_participants WHERE chat_id = ? AND chat_user_id = ?",
@@ -370,23 +395,14 @@ impl ChatStore {
         Ok(row.map(|r| chat_from_row(&r)))
     }
 
-    pub async fn list_chats_for_user(&self, user_id: i64) -> Result<Vec<Chat>, sqlx::Error> {
-        let super_user = self.is_super_user(user_id).await?;
-        let rows = if super_user {
-            sqlx::query(
-                "SELECT id, root_id, parent_id, level, title, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats ORDER BY updated_at DESC",
-            )
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                "SELECT c.id, c.root_id, c.parent_id, c.level, c.title, c.created_by_id, c.created_at, c.updated_at, c.state, c.result_id, c.workstation_id \
-                 FROM chats c JOIN chat_participants p ON p.chat_id = c.id WHERE p.chat_user_id = ? ORDER BY c.updated_at DESC",
-            )
-            .bind(user_id)
-            .fetch_all(&self.pool)
-            .await?
-        };
+    /// Список чатов для пользователя. Все участники видят все сессии
+    /// (персональной видимости нет), поэтому фильтра нет.
+    pub async fn list_chats_for_user(&self, _user_id: i64) -> Result<Vec<Chat>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, root_id, parent_id, level, title, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats ORDER BY updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.iter().map(chat_from_row).collect())
     }
 
@@ -766,7 +782,6 @@ impl ChatStore {
     }
 
     /// Найти активную (открытую) сессию воркстейшна.
-    #[allow(dead_code)]
     pub async fn active_session_id(&self, workstation_id: i64) -> Result<Option<i64>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT id FROM chats WHERE workstation_id = ? AND state = 'OPEN' AND root_id = id ORDER BY id DESC LIMIT 1",
@@ -775,6 +790,48 @@ impl ChatStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| r.get("id")))
+    }
+
+    /// Открыть сессию на воркстейшне: корневой чат, привязанный к воркстейшну.
+    /// Только на готовом воркстейшне и когда открытых сессий на нём нет.
+    pub async fn open_workstation_session(
+        &self,
+        workstation_id: i64,
+        title: Option<&str>,
+        created_by_id: i64,
+    ) -> Result<crate::chat::Chat, SessionError> {
+        let ws = self
+            .get_workstation(workstation_id)
+            .await?
+            .ok_or(SessionError::NotFound)?;
+        if ws.state != "ready" {
+            return Err(SessionError::WorkstationNotReady);
+        }
+        if self.active_session_id(workstation_id).await?.is_some() {
+            return Err(SessionError::WorkstationBusy);
+        }
+        Ok(self
+            .create_chat(None, title, created_by_id, Some(workstation_id))
+            .await?)
+    }
+
+    /// Закрыть сессию воркстейшна. Только владелец сессии (или суперпользователь
+    /// локального режима) — закрытие освобождает воркстейшн.
+    pub async fn close_workstation_session(
+        &self,
+        chat_id: i64,
+        by_user_id: i64,
+    ) -> Result<(), SessionError> {
+        self.get_chat(chat_id)
+            .await?
+            .ok_or(SessionError::NotFound)?;
+        let is_super = self.is_super_user(by_user_id).await?;
+        let is_owner = self.is_owner(chat_id, by_user_id).await?;
+        if !is_super && !is_owner {
+            return Err(SessionError::Forbidden);
+        }
+        self.close_chat(chat_id).await?;
+        Ok(())
     }
 
     /// Воркстейшн корневого чата, к которому принадлежит чат.
@@ -968,6 +1025,210 @@ mod tests {
             .unwrap()
             .iter()
             .any(|w| w.id == ws.id));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    async fn ready_ws(store: &ChatStore) -> i64 {
+        let ws = store.create_workstation(1, "w1").await.unwrap();
+        store.set_workstation_state(ws.id, "ready").await.unwrap();
+        ws.id
+    }
+
+    #[tokio::test]
+    async fn participant_sees_all_sessions() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_see_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let participant = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        let alice = store
+            .insert_user("alice", "human", false, None, None)
+            .await
+            .unwrap();
+        let carol = store
+            .insert_user("carol", "human", false, None, None)
+            .await
+            .unwrap();
+        let c1 = store
+            .create_chat(None, Some("s1"), alice, None)
+            .await
+            .unwrap();
+        let c2 = store
+            .create_chat(None, Some("s2"), carol, None)
+            .await
+            .unwrap();
+        let chats = store.list_chats_for_user(participant).await.unwrap();
+        assert!(chats.iter().any(|c| c.id == c1.id));
+        assert!(chats.iter().any(|c| c.id == c2.id));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn session_binds_to_ready_workstation() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_open_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws_id = ready_ws(&store).await;
+        let user = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        let chat = store
+            .open_workstation_session(ws_id, Some("s1"), user)
+            .await
+            .unwrap();
+        assert_eq!(chat.workstation_id, Some(ws_id));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn workstation_not_ready_rejects_session() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_nr_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws = store.create_workstation(1, "w1").await.unwrap();
+        let user = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        let err = store
+            .open_workstation_session(ws.id, Some("s1"), user)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionError::WorkstationNotReady));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn workstation_holds_single_open_session() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_busy_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws_id = ready_ws(&store).await;
+        let user = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        store
+            .open_workstation_session(ws_id, Some("a"), user)
+            .await
+            .unwrap();
+        let err = store
+            .open_workstation_session(ws_id, Some("b"), user)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionError::WorkstationBusy));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn session_closed_only_by_owner() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_owner_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws_id = ready_ws(&store).await;
+        let owner = store
+            .insert_user("owner", "human", false, None, None)
+            .await
+            .unwrap();
+        let chat = store
+            .open_workstation_session(ws_id, Some("s"), owner)
+            .await
+            .unwrap();
+        store
+            .close_workstation_session(chat.id, owner)
+            .await
+            .unwrap();
+        assert!(store.active_session_id(ws_id).await.unwrap().is_none());
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn participant_cannot_close_foreign_session() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_foreign_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws_id = ready_ws(&store).await;
+        let owner = store
+            .insert_user("owner", "human", false, None, None)
+            .await
+            .unwrap();
+        let other = store
+            .insert_user("other", "human", false, None, None)
+            .await
+            .unwrap();
+        let chat = store
+            .open_workstation_session(ws_id, Some("s"), owner)
+            .await
+            .unwrap();
+        let err = store
+            .close_workstation_session(chat.id, other)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionError::Forbidden));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn closed_session_frees_workstation() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_free_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws_id = ready_ws(&store).await;
+        let user = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        let first = store
+            .open_workstation_session(ws_id, Some("a"), user)
+            .await
+            .unwrap();
+        store
+            .close_workstation_session(first.id, user)
+            .await
+            .unwrap();
+        let second = store
+            .open_workstation_session(ws_id, Some("b"), user)
+            .await
+            .unwrap();
+        assert_ne!(first.id, second.id);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);

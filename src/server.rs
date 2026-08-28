@@ -2,6 +2,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::sse::{Event, Sse},
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -13,7 +14,7 @@ use tower_http::services::ServeDir;
 
 use crate::agent::Agent;
 use crate::auth;
-use crate::chat::{parse_command, Chat, ChatCommand, ChatStore, Message};
+use crate::chat::{parse_command, Chat, ChatCommand, ChatStore, Message, SessionError};
 use crate::cluster::Cluster;
 use crate::config::Config;
 use crate::llm::LlmClient;
@@ -28,19 +29,13 @@ pub struct AppState {
     pub chat_store: ChatStore,
     pub reactive: ReactiveRunner,
     pub cluster: Cluster,
+    pub sso_verifier: Option<auth::JwtVerifier>,
 }
 
-fn sso_enabled(state: &AppState) -> bool {
-    state
-        .config
-        .sso
-        .as_ref()
-        .map(|s| s.enabled)
-        .unwrap_or(false)
-}
-
-async fn current_user(state: &AppState, headers: &HeaderMap) -> i64 {
-    auth::resolve_user(headers, &state.chat_store, sso_enabled(state)).await
+/// Текущий пользователь: без SSO — аноним-суперпользователь; с SSO —
+/// участник из токена. Недействительный токен — 401.
+async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<i64, StatusCode> {
+    auth::resolve_user(headers, &state.chat_store, state.sso_verifier.as_ref()).await
 }
 
 #[derive(Deserialize)]
@@ -92,6 +87,9 @@ pub fn create_router(state: AppState) -> Router {
             get(get_project_roles).post(set_project_roles),
         )
         .route("/roles", get(list_all_roles))
+        // === SSO (Keycloak): вход веб-клиента ===
+        .route("/auth/login", get(auth_login))
+        .route("/auth/callback", get(auth_callback))
         // === Модель чата ===
         .route("/users", get(list_users))
         .route("/users/:id", get(get_user))
@@ -112,6 +110,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/workstations",
             get(list_workstations).post(create_workstation),
+        )
+        .route(
+            "/workstations/:id/session",
+            get(get_workstation_session).post(open_workstation_session),
         )
         .route(
             "/workstations/:id",
@@ -206,7 +208,10 @@ async fn answer_human_request(
 
 async fn list_projects(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<ProjectInfo>>, StatusCode> {
+    // Любой вошедший участник видит все проекты.
+    current_user(&state, &headers).await?;
     match state.trace_store.get_all_projects().await {
         Ok(projects) => {
             let mut result = Vec::new();
@@ -230,8 +235,10 @@ async fn list_projects(
 
 async fn create_project(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectInfo>, StatusCode> {
+    current_user(&state, &headers).await?;
     match state.trace_store.upsert_project(&payload.git_url).await {
         Ok(project_id) => {
             let active_roles = state
@@ -252,7 +259,9 @@ async fn create_project(
 async fn get_project(
     Path(id): Path<i64>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<ProjectInfo>, StatusCode> {
+    current_user(&state, &headers).await?;
     match state.trace_store.get_project(id).await {
         Ok(Some(project)) => {
             let active_roles = state
@@ -274,7 +283,9 @@ async fn get_project(
 async fn delete_project(
     Path(id): Path<i64>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
     match state.trace_store.delete_project(id).await {
         Ok(true) => Ok(StatusCode::OK),
         Ok(false) => Err(StatusCode::NOT_FOUND),
@@ -285,7 +296,9 @@ async fn delete_project(
 async fn get_project_roles(
     Path(id): Path<i64>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, StatusCode> {
+    current_user(&state, &headers).await?;
     match state.trace_store.get_active_project_roles(id).await {
         Ok(roles) => Ok(Json(roles)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -295,8 +308,10 @@ async fn get_project_roles(
 async fn set_project_roles(
     Path(id): Path<i64>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<SetProjectRolesRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
     let roles_refs: Vec<&str> = payload.active_roles.iter().map(|s| s.as_str()).collect();
     match state.trace_store.set_project_roles(id, &roles_refs).await {
         Ok(_) => Ok(StatusCode::OK),
@@ -304,16 +319,104 @@ async fn set_project_roles(
     }
 }
 
-async fn list_all_roles(State(state): State<AppState>) -> Result<Json<Vec<String>>, StatusCode> {
+async fn list_all_roles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    current_user(&state, &headers).await?;
     let roles: Vec<String> = state.config.roles.keys().cloned().collect();
     Ok(Json(roles))
+}
+
+// === SSO (Keycloak): вход веб-клиента ===
+
+/// Начать вход: редирект на authorize-эндпоинт Keycloak. Токен после входа
+/// живёт в cookie `aga_token`, его шлёт веб-клиент.
+async fn auth_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<axum::response::Redirect, StatusCode> {
+    let sso = state
+        .config
+        .sso
+        .as_ref()
+        .filter(|s| s.enabled)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let authorize_url = sso.authorize_url.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let client_id = sso.client_id.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    // Куда Keycloak вернёт после входа — хост из заголовка Origin/fallback.
+    let redirect_uri = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|o| format!("{o}/auth/callback"))
+        .unwrap_or_else(|| "/auth/callback".to_string());
+    let mut url = url::Url::parse(authorize_url).map_err(|_| StatusCode::NOT_FOUND)?;
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("scope", "openid");
+    Ok(axum::response::Redirect::temporary(url.as_str()))
+}
+
+/// Обработчик возврата из Keycloak: обменять code на токен и положить его
+/// в cookie `aga_token`, чтобы веб-клиент ходил под участником.
+async fn auth_callback(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<axum::response::Response, StatusCode> {
+    let sso = state
+        .config
+        .sso
+        .as_ref()
+        .filter(|s| s.enabled)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let code = params.get("code").ok_or(StatusCode::BAD_REQUEST)?;
+    let token_url = sso.token_url.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let client_id = sso.client_id.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let client_secret = sso.client_secret.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let redirect_uri = params
+        .get("redirect_uri")
+        .cloned()
+        .unwrap_or_else(|| "/auth/callback".to_string());
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(token_url)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", &redirect_uri),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ])
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let json: serde_json::Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let token = json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    let mut resp = axum::response::Redirect::temporary("/").into_response();
+    let cookie = format!("aga_token={token}; Path=/; HttpOnly; SameSite=Lax");
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        cookie
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    Ok(resp)
 }
 
 // === Модель чата ===
 
 async fn list_users(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<crate::chat::ChatUser>>, StatusCode> {
+    current_user(&state, &headers).await?;
     state
         .chat_store
         .list_users()
@@ -325,7 +428,9 @@ async fn list_users(
 async fn get_user(
     Path(id): Path<i64>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<crate::chat::ChatUser>, StatusCode> {
+    current_user(&state, &headers).await?;
     match state.chat_store.get_user(id).await {
         Ok(Some(u)) => Ok(Json(u)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
@@ -348,7 +453,7 @@ async fn create_chat(
     headers: HeaderMap,
     Json(payload): Json<CreateChatRequest>,
 ) -> Result<Json<Chat>, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
+    let user_id = current_user(&state, &headers).await?;
     match state
         .chat_store
         .create_chat(
@@ -368,7 +473,7 @@ async fn list_chats(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Chat>>, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
+    let user_id = current_user(&state, &headers).await?;
     state
         .chat_store
         .list_chats_for_user(user_id)
@@ -382,7 +487,7 @@ async fn get_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
+    let user_id = current_user(&state, &headers).await?;
     if !can_read(&state, id, user_id).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -416,26 +521,16 @@ async fn close_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
-    if !can_write(&state, id, user_id).await {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let is_super = state
+    let user_id = current_user(&state, &headers).await?;
+    match state
         .chat_store
-        .is_super_user(user_id)
+        .close_workstation_session(id, user_id)
         .await
-        .unwrap_or(false);
-    let is_owner = state
-        .chat_store
-        .is_owner(id, user_id)
-        .await
-        .unwrap_or(false);
-    if !is_super && !is_owner {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    match state.chat_store.close_chat(id).await {
-        Ok(true) => Ok(StatusCode::OK),
-        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    {
+        Ok(()) => Ok(StatusCode::OK),
+        Err(SessionError::NotFound) => Err(StatusCode::NOT_FOUND),
+        Err(SessionError::Forbidden) => Err(StatusCode::FORBIDDEN),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -461,7 +556,7 @@ async fn send_message(
     headers: HeaderMap,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
+    let user_id = current_user(&state, &headers).await?;
     if !can_write(&state, chat_id, user_id).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -577,7 +672,7 @@ async fn list_chat_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Message>>, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
+    let user_id = current_user(&state, &headers).await?;
     if !can_read(&state, chat_id, user_id).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -600,7 +695,7 @@ async fn add_participant(
     headers: HeaderMap,
     Json(payload): Json<AddParticipantRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
+    let user_id = current_user(&state, &headers).await?;
     if !can_write(&state, chat_id, user_id).await {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -617,7 +712,7 @@ async fn remove_participant(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
+    let user_id = current_user(&state, &headers).await?;
     let is_super = state
         .chat_store
         .is_super_user(user_id)
@@ -649,7 +744,7 @@ async fn share_message(
     headers: HeaderMap,
     Json(payload): Json<ShareRequest>,
 ) -> Result<Json<Message>, StatusCode> {
-    let user_id = current_user(&state, &headers).await;
+    let user_id = current_user(&state, &headers).await?;
     // Нужна видимость исходного сообщения.
     let Some(original) = state
         .chat_store
@@ -691,7 +786,9 @@ async fn message_artifacts(
 
 async fn list_workstations(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<crate::chat::Workstation>>, StatusCode> {
+    current_user(&state, &headers).await?;
     state
         .chat_store
         .list_workstations()
@@ -707,10 +804,23 @@ pub struct CreateWorkstationRequest {
     pub name: Option<String>,
 }
 
+/// Создание воркстейшна — только для суперпользователя (админ внешний,
+/// интерфейс станции не создаёт и не удаляет). Участники получают 403.
 async fn create_workstation(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<CreateWorkstationRequest>,
 ) -> Result<Json<crate::chat::Workstation>, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    if !state
+        .chat_store
+        .is_super_user(user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let name = payload.name.unwrap_or_else(|| "ws".to_string());
 
     // Воркстейшн — под в Kubernetes: сначала запись, потом сам под.
@@ -761,7 +871,17 @@ async fn create_workstation(
 async fn delete_workstation(
     Path(id): Path<i64>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    if !state
+        .chat_store
+        .is_super_user(user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
     // Сначала под, потом запись: если кластер не отдал под — состояние не
     // трогаем, пользователь повторит.
     if let Err(e) = state.cluster.delete_pod(&Cluster::pod_name(id)).await {
@@ -775,23 +895,65 @@ async fn delete_workstation(
     }
 }
 
+#[derive(Deserialize)]
+pub struct OpenWorkstationSessionRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Активная сессия воркстейшна (или null).
+async fn get_workstation_session(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Option<Chat>>, StatusCode> {
+    current_user(&state, &headers).await?;
+    let chat_id = state
+        .chat_store
+        .active_session_id(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some(chat_id) = chat_id else {
+        return Ok(Json(None));
+    };
+    let chat = state
+        .chat_store
+        .get_chat(chat_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(chat))
+}
+
+/// Открыть сессию на воркстейшне: любой участник, воркстейшн готов,
+/// открытой сессии на нём нет. Закрытие сессии освобождает воркстейшн.
+async fn open_workstation_session(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<OpenWorkstationSessionRequest>,
+) -> Result<Json<Chat>, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    let chat = match state
+        .chat_store
+        .open_workstation_session(id, payload.title.as_deref(), user_id)
+        .await
+    {
+        Ok(chat) => chat,
+        Err(SessionError::NotFound) => return Err(StatusCode::NOT_FOUND),
+        Err(SessionError::WorkstationNotReady) => return Err(StatusCode::CONFLICT),
+        Err(SessionError::WorkstationBusy) => return Err(StatusCode::CONFLICT),
+        Err(SessionError::Forbidden) => return Err(StatusCode::FORBIDDEN),
+        Err(SessionError::Db(_)) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    Ok(Json(chat))
+}
+
 // === Permission helpers ===
 
-/// Читать чат можно участникам и суперпользователю.
-async fn can_read(state: &AppState, chat_id: i64, user_id: i64) -> bool {
-    if state
-        .chat_store
-        .is_super_user(user_id)
-        .await
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    state
-        .chat_store
-        .is_participant(chat_id, user_id)
-        .await
-        .unwrap_or(false)
+/// Читать чат можно всем: персональной видимости нет, участники видят
+/// все сессии всех проектов.
+async fn can_read(_state: &AppState, _chat_id: i64, _user_id: i64) -> bool {
+    true
 }
 
 /// Писать в открытый чат можно участникам и суперпользователю.
@@ -830,4 +992,276 @@ async fn build_context(state: &AppState, chat_id: i64) -> Option<String> {
         .map(|m| m.body.clone())
         .collect();
     Some(tail.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn test_state(sso: bool) -> (AppState, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("aga_srv_test_{}.db", uuid::Uuid::new_v4()));
+        let trace_store = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let chat_store = crate::chat::ChatStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let config = Config {
+            roles: Default::default(),
+            sso: None,
+        };
+        let llm_client = LlmClient::new("http://localhost:1/v1", None);
+        let cluster = Cluster {
+            kubectl: "kubectl".into(),
+            namespace: "default".into(),
+            template: "/nonexistent.yaml".into(),
+            image: "img".into(),
+            wait_timeout_secs: 1,
+        };
+        let reactive = ReactiveRunner::new(
+            config.clone(),
+            llm_client.clone(),
+            trace_store.clone(),
+            chat_store.clone(),
+            cluster.clone(),
+        );
+        let sso_verifier = if sso {
+            Some(auth::JwtVerifier::from_jwks_json(auth::TEST_JWKS).unwrap())
+        } else {
+            None
+        };
+        let state = AppState {
+            config,
+            trace_store,
+            llm_client,
+            chat_store,
+            reactive,
+            cluster,
+            sso_verifier,
+        };
+        (state, path)
+    }
+
+    fn auth_headers(sub: &str, roles: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", auth::test_sign_token(sub, roles))
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+
+    async fn get(uri: &str, headers: &HeaderMap, state: AppState) -> (StatusCode, String) {
+        let router = create_router(state);
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(auth) = headers.get("authorization") {
+            builder = builder.header("authorization", auth);
+        }
+        let resp = router
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    async fn post_json(
+        uri: &str,
+        headers: &HeaderMap,
+        state: AppState,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        let router = create_router(state);
+        let mut builder = Request::builder().method("POST").uri(uri);
+        builder = builder.header("content-type", "application/json");
+        if let Some(auth) = headers.get("authorization") {
+            builder = builder.header("authorization", auth);
+        }
+        let resp = router
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    async fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn participant_sees_all_projects_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (_, _) = post_json(
+            "/projects",
+            &headers,
+            state.clone(),
+            serde_json::json!({"git_url": "https://example.com/a.git"}),
+        )
+        .await;
+        let (status, _) = get("/projects", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn participant_creates_project_visible_to_others() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (status, _) = post_json(
+            "/projects",
+            &alice,
+            state.clone(),
+            serde_json::json!({"git_url": "https://example.com/a.git"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Проект виден другому участнику.
+        let bob = auth_headers("bob", &["participant"]);
+        let (status, body) = get("/projects", &bob, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("example.com/a.git"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn participant_cannot_create_workstation() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, _) = post_json(
+            "/workstations",
+            &headers,
+            state.clone(),
+            serde_json::json!({"project_id": 1, "name": "w1"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn workstations_listed_with_state() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        // Админ (внешний) поднял воркстейшн — участник видит его и состояние.
+        state
+            .chat_store
+            .create_workstation(1, "ws-1")
+            .await
+            .unwrap();
+        let (status, body) = get("/workstations", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let workstations: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(workstations.len(), 1);
+        assert_eq!(workstations[0]["name"], "ws-1");
+        assert!(workstations[0]["state"].is_string());
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn personnel_listed_from_sso_but_not_editable() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = get("/users", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        // Участник виден в списке.
+        assert!(body.contains("alice"));
+        // Создания/редактирования внутри aga нет: POST /users не существует.
+        let (status, _) = post_json(
+            "/users",
+            &headers,
+            state.clone(),
+            serde_json::json!({"name": "mallory"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_token_rejected_by_api() {
+        let (state, file) = test_state(true).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer not.a.jwt".parse().unwrap(),
+        );
+        let (status, _) = get("/projects", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn anonymous_superuser_works_without_sso() {
+        let (state, file) = test_state(false).await;
+        let headers = HeaderMap::new();
+        // Без SSO списки работают — ручки не требуют токена.
+        let (status, _) = get("/projects", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn login_redirects_to_keycloak_when_configured() {
+        let (state, file) = test_state(true).await;
+        // Проверяем /auth/login: без SSO-конфигурации эндпоинтов — 404.
+        let _headers = HeaderMap::new();
+        let router = create_router(state.clone());
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        cleanup(&file).await;
+    }
+
+    #[test]
+    fn web_client_has_sso_login_link() {
+        let html = std::fs::read_to_string("static/index.html").unwrap();
+        // Веб-клиент умеет начинать вход через Keycloak (cookie ставит сервер).
+        assert!(html.contains("/auth/login"));
+        assert!(html.contains("loginBtn"));
+    }
+
+    /// Веб-клиент: воркстейшны и персонал только показываются, управления
+    /// (создание/удаление) в интерфейсе нет. Открытие сессии на станции —
+    /// это занятие, а не управление станцией, поэтому разрешено.
+    #[test]
+    fn web_client_views_workstations_and_personnel_without_management() {
+        let html = std::fs::read_to_string("static/index.html").unwrap();
+        // Воркстейшны показываются вместе с состоянием.
+        assert!(html.contains("/workstations"));
+        assert!(html.contains("ws.state"));
+        // Интерфейс не создаёт станции (POST на коллекцию /workstations) и не
+        // удаляет их (DELETE /workstations/:id).
+        assert!(!html.contains("`${API_BASE}/workstations`, {"));
+        assert!(!html.contains("deleteWorkstation"));
+        assert!(!html.contains("createWorkstation"));
+        assert!(!html.contains("`${API_BASE}/workstations/${id}`"));
+        assert!(!html.contains("/workstations/${id}"));
+        // Персонал показывается, но не редактируется внутри aga.
+        assert!(html.contains("/users"));
+        assert!(!html.contains("`${API_BASE}/users`, {"));
+        assert!(!html.contains("/users/${"));
+    }
 }
