@@ -41,6 +41,11 @@ spec:
       image: {{IMAGE}}
       imagePullPolicy: IfNotPresent
       command: ["/entrypoint.sh"]
+      readinessProbe:
+        exec:
+          command: ["sh", "-c", "test -d /work/project/.git"]
+        initialDelaySeconds: 2
+        periodSeconds: 3
       env:
         - name: GIT_URL
           value: "{{GIT_URL}}"
@@ -145,8 +150,9 @@ impl Cluster {
         Ok(())
     }
 
-    /// Ждать, пока под не перейдёт в Running. Возвращает false по таймауту
-    /// или при падении пода (образ ещё тянется — состояние 'creating').
+    /// Ждать, пока под не станет Ready (проект склонирован, см. readinessProbe
+    /// в манифесте). Возвращает false по таймауту или при падении пода
+    /// (образ ещё тянется — состояние 'creating').
     pub async fn wait_ready(&self, pod_name: &str) -> Result<bool, ClusterError> {
         let deadline = Instant::now() + Duration::from_secs(self.wait_timeout_secs);
         loop {
@@ -158,14 +164,19 @@ impl Cluster {
                     "-n",
                     &self.namespace,
                     "-o",
-                    "jsonpath={.status.phase}",
+                    "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}",
                 ])
                 .output()
                 .await?;
-            let phase = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            match phase.as_str() {
-                "Running" => return Ok(true),
-                "Failed" | "Unknown" => return Ok(false),
+            let ready = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            match ready.as_str() {
+                "True" => return Ok(true),
+                "False" => {
+                    if Instant::now() > deadline {
+                        return Ok(false);
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
                 _ => {
                     if Instant::now() > deadline {
                         return Ok(false);

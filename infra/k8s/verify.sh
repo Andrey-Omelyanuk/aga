@@ -83,8 +83,16 @@ done
 kubectl exec -n "$NS" "$POD" -- sh -c 'ls /work/project >/dev/null && docker info >/dev/null'
 
 echo "==> workstation works on its own branch"
-BRANCH=$(kubectl exec -n "$NS" "$POD" -- sh -c 'git -C /work/project branch --show-current')
-[ "$BRANCH" = "$POD" ]
+BRANCH_OK=""
+for _ in $(seq 1 30); do
+  if BRANCH=$(kubectl exec -n "$NS" "$POD" -- sh -c \
+      'git -C /work/project branch --show-current' 2>/dev/null) && [ "$BRANCH" = "$POD" ]; then
+    BRANCH_OK=1
+    break
+  fi
+  sleep 2
+done
+[ -n "$BRANCH_OK" ]
 
 echo "==> pod has no k8s API access"
 [ "$(kubectl get pod "$POD" -n "$NS" -o jsonpath='{.spec.automountServiceAccountToken}')" = "false" ]

@@ -11,6 +11,11 @@ spec:
       image: {{IMAGE}}
       imagePullPolicy: IfNotPresent
       command: ["/entrypoint.sh"]
+      readinessProbe:
+        exec:
+          command: ["sh", "-c", "test -d /work/project/.git"]
+        initialDelaySeconds: 2
+        periodSeconds: 3
       env:
         - name: GIT_URL
           value: "{{GIT_URL}}"
