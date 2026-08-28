@@ -7,14 +7,9 @@ use tokio::process::Command;
 /// Способ исполнения команд.
 #[derive(Debug, Clone, Default)]
 pub enum Executor {
-    /// Локальное исполнение `sh -c` (dev-режим).
+    /// Локальное исполнение `sh -c` (dev-режим, без воркстейшна).
     #[default]
     Sh,
-    /// Исполнение внутри контейнера через `docker compose exec`.
-    DockerCompose {
-        compose_path: String,
-        service: String,
-    },
 }
 
 pub struct Agent {
@@ -122,7 +117,7 @@ impl Agent {
                 break;
             }
 
-            // Выполняем команды через docker compose exec
+            // Выполняем команды
             for cmd in commands {
                 if !self.is_command_allowed(&cmd) {
                     let error = format!("Command '{}' is not allowed", cmd);
@@ -136,7 +131,7 @@ impl Agent {
                     .add_entry(task_id, step, "command", &cmd, None)
                     .await?;
 
-                // Выполняем команду через docker compose exec
+                // Выполняем команду выбранным executor'ом
                 let output = self.execute_command(&cmd).await?;
                 self.trace_store
                     .add_entry(task_id, step, "command_output", &output, None)
@@ -167,21 +162,6 @@ impl Agent {
         match &self.executor {
             Executor::Sh => {
                 let output = Command::new("sh").arg("-c").arg(command).output().await?;
-                Self::collect(output)
-            }
-            Executor::DockerCompose {
-                compose_path,
-                service,
-            } => {
-                let output = Command::new("docker")
-                    .args(["compose", "-f"])
-                    .arg(compose_path)
-                    .args(["exec", "-T"])
-                    .arg(service)
-                    .args(["sh", "-c"])
-                    .arg(command)
-                    .output()
-                    .await?;
                 Self::collect(output)
             }
         }
