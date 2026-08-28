@@ -330,6 +330,20 @@ async fn list_all_roles(
 
 // === SSO (Keycloak): вход веб-клиента ===
 
+/// Абсолютный `redirect_uri` для SSO-флоу: `{scheme}://{host}/auth/callback`.
+/// scheme берётся из `X-Forwarded-Proto` (когда запрос идёт через ingress/прокси),
+/// иначе http; host — из заголовка `Host`. Относительный redirect_uri Keycloak
+/// резолвит в свой собственный хост (auth.localhost) — после входа браузер
+/// попадает на Keycloak и получает 404 "Page not found". Поэтому хост обязателен.
+fn sso_redirect_uri(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(axum::http::header::HOST)?.to_str().ok()?;
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http");
+    Some(format!("{scheme}://{host}/auth/callback"))
+}
+
 /// Начать вход: редирект на authorize-эндпоинт Keycloak. Токен после входа
 /// живёт в cookie `aga_token`, его шлёт веб-клиент.
 async fn auth_login(
@@ -344,12 +358,9 @@ async fn auth_login(
         .ok_or(StatusCode::NOT_FOUND)?;
     let authorize_url = sso.authorize_url.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let client_id = sso.client_id.as_deref().ok_or(StatusCode::NOT_FOUND)?;
-    // Куда Keycloak вернёт после входа — хост из заголовка Origin/fallback.
-    let redirect_uri = headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .map(|o| format!("{o}/auth/callback"))
-        .unwrap_or_else(|| "/auth/callback".to_string());
+    // Куда Keycloak вернёт после входа — абсолютный адрес из заголовка Host
+    // (Origin при обычной навигации браузер не шлёт).
+    let redirect_uri = sso_redirect_uri(&headers).ok_or(StatusCode::NOT_FOUND)?;
     let mut url = url::Url::parse(authorize_url).map_err(|_| StatusCode::NOT_FOUND)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -363,6 +374,7 @@ async fn auth_login(
 /// в cookie `aga_token`, чтобы веб-клиент ходил под участником.
 async fn auth_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::response::Response, StatusCode> {
     let sso = state
@@ -375,10 +387,13 @@ async fn auth_callback(
     let token_url = sso.token_url.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let client_id = sso.client_id.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let client_secret = sso.client_secret.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    // Keycloak не эхоит redirect_uri в колбэке — вычисляем из Host, чтобы обмен
+    // code→token прошёл с тем же значением, что и на authorize-шаге.
     let redirect_uri = params
         .get("redirect_uri")
         .cloned()
-        .unwrap_or_else(|| "/auth/callback".to_string());
+        .or_else(|| sso_redirect_uri(&headers))
+        .ok_or(StatusCode::BAD_REQUEST)?;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -1232,6 +1247,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn login_redirects_with_absolute_redirect_uri_from_host() {
+        let (mut state, file) = test_state(false).await;
+        state.config.sso = Some(crate::config::SsoConfig {
+            enabled: true,
+            jwks_url: None,
+            authorize_url: Some(
+                "http://auth.localhost/realms/aga/protocol/openid-connect/auth".into(),
+            ),
+            token_url: None,
+            client_id: Some("aga".into()),
+            client_secret: None,
+        });
+        let router = create_router(state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/login")
+                    .header("Host", "dev.localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let url = url::Url::parse(location).unwrap();
+        let redirect_uri = url
+            .query_pairs()
+            .find(|(k, _)| k == "redirect_uri")
+            .map(|(_, v)| v.into_owned())
+            .unwrap();
+        // Абсолютный redirect_uri на хосте SPA, иначе Keycloak после входа
+        // вернёт браузер на свой хост (auth.localhost) и будет 404.
+        assert_eq!(redirect_uri, "http://dev.localhost/auth/callback");
         cleanup(&file).await;
     }
 
