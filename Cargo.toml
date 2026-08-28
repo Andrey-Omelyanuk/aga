@@ -30,9 +30,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 regex = "1"
 base64 = "0.21"
+jsonwebtoken = "9"
 futures = "0.3"
 bytes = "1"
 futures-util = "0.3"
+url = { version = "2", features = ["serde"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http = "1"
 
 [profile.release]
 opt-level = 3
