@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -30,12 +31,39 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Агент из AgentSet-а. Объединяет правила и инструменты в одном описании:
+/// отдельные skills/rules/commands не выделяются — всё в `description`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct ProjectRole {
-    pub project_id: i64,
-    pub role_name: String,
-    pub is_active: bool,
+pub struct AgentDef {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub allowed_commands: Vec<String>,
+    pub max_iterations: u32,
+    pub model: Option<String>,
+    pub temperature: f32,
+    /// Указание на родителя в дереве набора: агент наследует под-уровень папки.
+    pub parent_id: Option<i64>,
+}
+
+/// Набор агентов с их деревом. Прикрепляется к одному или нескольким проектам.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSet {
+    pub id: i64,
+    pub name: String,
+    pub agents: Vec<AgentDef>,
+}
+
+/// Спек агента при создании/обновлении набора: parent — имя родителя в дереве.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSpec {
+    pub name: String,
+    pub description: String,
+    pub allowed_commands: Vec<String>,
+    pub max_iterations: u32,
+    pub model: Option<String>,
+    pub temperature: f32,
+    pub parent: Option<String>,
 }
 
 pub struct TraceStore {
@@ -124,35 +152,73 @@ impl TraceStore {
         // теперь он задаётся git-URL, который воркстейшн клонирует в свой под.
         migrate_projects_git_url(&pool).await?;
 
-        // Таблица активных ролей для проектов
+        // === AgentSet (набор агентов на проект) ===
+        // Роли заменены наборами: у набора свои агенты (дерево через parent_id),
+        // проект хранит прикреплённый набор. Один набор — на несколько проектов.
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS project_roles (
-                project_id INTEGER NOT NULL,
-                role_name TEXT NOT NULL,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                PRIMARY KEY (project_id, role_name),
-                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            CREATE TABLE IF NOT EXISTS agent_sets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             "#,
         )
         .execute(&pool)
         .await?;
 
-        // Индексы для ускорения поиска
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_project_roles_project ON project_roles(project_id)",
+            r#"
+            CREATE TABLE IF NOT EXISTS agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                set_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                allowed_commands TEXT NOT NULL DEFAULT '[]',
+                max_iterations INTEGER NOT NULL DEFAULT 3,
+                model TEXT,
+                temperature REAL NOT NULL DEFAULT 0.7,
+                parent_id INTEGER,
+                UNIQUE (set_id, name),
+                FOREIGN KEY (set_id) REFERENCES agent_sets(id) ON DELETE CASCADE,
+                FOREIGN KEY (parent_id) REFERENCES agents(id) ON DELETE CASCADE
+            )
+            "#,
         )
         .execute(&pool)
         .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_project_roles_active ON project_roles(project_id, is_active)")
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS project_agent_set (
+                project_id INTEGER PRIMARY KEY,
+                agent_set_id INTEGER NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (agent_set_id) REFERENCES agent_sets(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        // Индексы для поиска агентов набора
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_agents_set ON agents(set_id)")
             .execute(&pool)
             .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_project_agent_set ON project_agent_set(agent_set_id)",
+        )
+        .execute(&pool)
+        .await?;
 
         // WAL режим для лучшей производительности
         sqlx::query("PRAGMA journal_mode=WAL")
             .execute(&pool)
             .await?;
+
+        // Внешние ключи обязательны для каскадного удаления наборов/агентов.
+        sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
 
         Ok(Self { pool })
     }
@@ -385,142 +451,138 @@ impl TraceStore {
         Ok(result.rows_affected() > 0)
     }
 
-    // === Методы для управления ролями проектов ===
+    // === Методы для управления AgentSet-ами ===
 
-    /// Активировать роль для проекта
-    #[allow(dead_code)]
-    pub async fn activate_project_role(
+    /// Создать набор агентов. Агенты кладутся сразу: parent — имя родителя в
+    /// дереве (агент папки, наследником которого становится этот агент).
+    pub async fn create_agent_set(
         &self,
-        project_id: i64,
-        role_name: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO project_roles (project_id, role_name, is_active) VALUES (?, ?, 1)
-             ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 1",
-        )
-        .bind(project_id)
-        .bind(role_name)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Деактивировать роль для проекта
-    #[allow(dead_code)]
-    pub async fn deactivate_project_role(
-        &self,
-        project_id: i64,
-        role_name: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO project_roles (project_id, role_name, is_active) VALUES (?, ?, 0)
-             ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 0",
-        )
-        .bind(project_id)
-        .bind(role_name)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Получить все активные роли для проекта
-    pub async fn get_active_project_roles(
-        &self,
-        project_id: i64,
-    ) -> Result<Vec<String>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT role_name FROM project_roles WHERE project_id = ? AND is_active = 1",
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let roles: Vec<String> = rows.into_iter().map(|r| r.get("role_name")).collect();
-        Ok(roles)
-    }
-
-    /// Получить все роли для проекта (активные и неактивные)
-    #[allow(dead_code)]
-    pub async fn get_all_project_roles(
-        &self,
-        project_id: i64,
-    ) -> Result<Vec<ProjectRole>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT project_id, role_name, is_active FROM project_roles WHERE project_id = ?",
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let roles: Vec<ProjectRole> = rows
-            .into_iter()
-            .map(|r| {
-                let project_id: i64 = r.get("project_id");
-                let role_name: String = r.get("role_name");
-                let is_active: i32 = r.get("is_active");
-                ProjectRole {
-                    project_id,
-                    role_name,
-                    is_active: is_active != 0,
-                }
-            })
-            .collect();
-        Ok(roles)
-    }
-
-    /// Проверить, активна ли роль для проекта
-    #[allow(dead_code)]
-    pub async fn is_project_role_active(
-        &self,
-        project_id: i64,
-        role_name: &str,
-    ) -> Result<bool, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT is_active FROM project_roles WHERE project_id = ? AND role_name = ?",
-        )
-        .bind(project_id)
-        .bind(role_name)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        match row {
-            Some(r) => {
-                let is_active: i32 = r.get("is_active");
-                Ok(is_active != 0)
-            }
-            None => Ok(false),
-        }
-    }
-
-    /// Установить набор активных ролей для проекта
-    pub async fn set_project_roles(
-        &self,
-        project_id: i64,
-        active_roles: &[&str],
-    ) -> Result<(), sqlx::Error> {
-        // Начинаем транзакцию
+        name: &str,
+        specs: &[AgentSpec],
+    ) -> Result<i64, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-
-        // Сначала деактивируем все роли
-        sqlx::query("UPDATE project_roles SET is_active = 0 WHERE project_id = ?")
-            .bind(project_id)
+        let result = sqlx::query("INSERT INTO agent_sets (name) VALUES (?)")
+            .bind(name)
             .execute(&mut *tx)
             .await?;
+        let set_id = result.last_insert_rowid();
 
-        // Затем активируем указанные роли
-        for role in active_roles {
-            sqlx::query(
-                "INSERT INTO project_roles (project_id, role_name, is_active) VALUES (?, ?, 1)
-                 ON CONFLICT(project_id, role_name) DO UPDATE SET is_active = 1",
+        let mut ids: HashMap<String, i64> = HashMap::new();
+        for spec in specs {
+            let parent_id: Option<i64> = spec.parent.as_deref().and_then(|p| ids.get(p).copied());
+            let cmds =
+                serde_json::to_string(&spec.allowed_commands).unwrap_or_else(|_| "[]".into());
+            let result = sqlx::query(
+                "INSERT INTO agents (set_id, name, description, allowed_commands, max_iterations, model, temperature, parent_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(project_id)
-            .bind(role)
+            .bind(set_id)
+            .bind(&spec.name)
+            .bind(&spec.description)
+            .bind(&cmds)
+            .bind(spec.max_iterations as i64)
+            .bind(&spec.model)
+            .bind(spec.temperature as f64)
+            .bind(parent_id)
             .execute(&mut *tx)
             .await?;
+            ids.insert(spec.name.clone(), result.last_insert_rowid());
         }
 
         tx.commit().await?;
+        Ok(set_id)
+    }
+
+    async fn load_set(&self, set_id: i64) -> Result<Option<AgentSet>, sqlx::Error> {
+        let name_row = sqlx::query("SELECT name FROM agent_sets WHERE id = ?")
+            .bind(set_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(name_row) = name_row else {
+            return Ok(None);
+        };
+        let name: String = name_row.get("name");
+        let rows = sqlx::query(
+            "SELECT id, name, description, allowed_commands, max_iterations, model, temperature, parent_id
+             FROM agents WHERE set_id = ? ORDER BY id",
+        )
+        .bind(set_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut agents = Vec::new();
+        for r in rows {
+            let cmds: String = r.get("allowed_commands");
+            let allowed_commands = serde_json::from_str(&cmds).unwrap_or_else(|_| Vec::new());
+            agents.push(AgentDef {
+                id: r.get("id"),
+                name: r.get("name"),
+                description: r.get("description"),
+                allowed_commands,
+                max_iterations: r.get("max_iterations"),
+                model: r.get("model"),
+                temperature: r.get("temperature"),
+                parent_id: r.get("parent_id"),
+            });
+        }
+        Ok(Some(AgentSet {
+            id: set_id,
+            name,
+            agents,
+        }))
+    }
+
+    pub async fn list_agent_sets(&self) -> Result<Vec<AgentSet>, sqlx::Error> {
+        let rows = sqlx::query("SELECT id FROM agent_sets ORDER BY id")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut sets = Vec::new();
+        for r in rows {
+            let id: i64 = r.get("id");
+            if let Some(set) = self.load_set(id).await? {
+                sets.push(set);
+            }
+        }
+        Ok(sets)
+    }
+
+    pub async fn get_agent_set(&self, set_id: i64) -> Result<Option<AgentSet>, sqlx::Error> {
+        self.load_set(set_id).await
+    }
+
+    pub async fn delete_agent_set(&self, set_id: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM agent_sets WHERE id = ?")
+            .bind(set_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Прикрепить набор к проекту. Один набор замещает прежний (project_id —
+    /// PK): повторная привязка меняет набор проекта.
+    pub async fn attach_agent_set(&self, project_id: i64, set_id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO project_agent_set (project_id, agent_set_id) VALUES (?, ?)
+             ON CONFLICT(project_id) DO UPDATE SET agent_set_id = excluded.agent_set_id",
+        )
+        .bind(project_id)
+        .bind(set_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    pub async fn get_project_agent_set(
+        &self,
+        project_id: i64,
+    ) -> Result<Option<AgentSet>, sqlx::Error> {
+        let row = sqlx::query("SELECT agent_set_id FROM project_agent_set WHERE project_id = ?")
+            .bind(project_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(r) => self.load_set(r.get("agent_set_id")).await,
+            None => Ok(None),
+        }
     }
 }
 
@@ -639,6 +701,182 @@ mod tests {
         // виден сразу всем участникам.
         let projects = store.get_all_projects().await.unwrap();
         assert!(projects.iter().any(|p| p.id == id));
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    fn spec(name: &str, parent: Option<&str>) -> AgentSpec {
+        AgentSpec {
+            name: name.to_string(),
+            description: format!("Правила {name}"),
+            allowed_commands: vec!["echo".to_string()],
+            max_iterations: 3,
+            model: None,
+            temperature: 0.7,
+            parent: parent.map(|s| s.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn one_agent_set_attaches_to_many_projects() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let pa = store
+            .upsert_project("https://example.com/a.git")
+            .await
+            .unwrap();
+        let pb = store
+            .upsert_project("https://example.com/b.git")
+            .await
+            .unwrap();
+        let set_id = store
+            .create_agent_set("ops", &[spec("dev", None)])
+            .await
+            .unwrap();
+        store.attach_agent_set(pa, set_id).await.unwrap();
+        store.attach_agent_set(pb, set_id).await.unwrap();
+        assert_eq!(
+            store.get_project_agent_set(pa).await.unwrap().unwrap().id,
+            set_id
+        );
+        assert_eq!(
+            store.get_project_agent_set(pb).await.unwrap().unwrap().id,
+            set_id
+        );
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn each_agent_keeps_own_rules_commands_and_llm() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let s1 = AgentSpec {
+            name: "dev".to_string(),
+            description: "Правила разработчика".to_string(),
+            allowed_commands: vec!["git".to_string(), "make".to_string()],
+            max_iterations: 2,
+            model: Some("model-dev".to_string()),
+            temperature: 0.1,
+            parent: None,
+        };
+        let s2 = AgentSpec {
+            name: "deploy".to_string(),
+            description: "Правила деплоера".to_string(),
+            allowed_commands: vec!["docker".to_string()],
+            max_iterations: 9,
+            model: None,
+            temperature: 0.9,
+            parent: None,
+        };
+        let set_id = store.create_agent_set("ops", &[s1, s2]).await.unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
+        let deploy = set.agents.iter().find(|a| a.name == "deploy").unwrap();
+        assert_eq!(dev.description, "Правила разработчика");
+        assert_eq!(
+            dev.allowed_commands,
+            vec!["git".to_string(), "make".to_string()]
+        );
+        assert_eq!(dev.max_iterations, 2);
+        assert_eq!(dev.model.as_deref(), Some("model-dev"));
+        assert_eq!(dev.temperature, 0.1);
+        assert_eq!(deploy.allowed_commands, vec!["docker".to_string()]);
+        assert_eq!(deploy.max_iterations, 9);
+        assert!(deploy.model.is_none());
+        assert_eq!(deploy.temperature, 0.9);
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn agent_set_agents_form_tree_by_parent() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let set_id = store
+            .create_agent_set(
+                "tree",
+                &[
+                    spec("src", None),
+                    spec("src/backend", Some("src")),
+                    spec("src/backend/api", Some("src/backend")),
+                ],
+            )
+            .await
+            .unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let by_name: std::collections::HashMap<&str, &AgentDef> =
+            set.agents.iter().map(|a| (a.name.as_str(), a)).collect();
+        let root = by_name["src"];
+        let backend = by_name["src/backend"];
+        let api = by_name["src/backend/api"];
+        // Дерево повторяет иерархию: у папки — агент, у подпапок — его наследники.
+        assert_eq!(backend.parent_id, Some(root.id));
+        assert_eq!(api.parent_id, Some(backend.id));
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn replacing_agent_set_changes_project_agents() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let project = store
+            .upsert_project("https://example.com/r.git")
+            .await
+            .unwrap();
+        let set_a = store
+            .create_agent_set("set-a", &[spec("dev-a", None)])
+            .await
+            .unwrap();
+        let set_b = store
+            .create_agent_set("set-b", &[spec("dev-b", None)])
+            .await
+            .unwrap();
+        store.attach_agent_set(project, set_a).await.unwrap();
+        assert_eq!(
+            store
+                .get_project_agent_set(project)
+                .await
+                .unwrap()
+                .unwrap()
+                .name,
+            "set-a"
+        );
+        store.attach_agent_set(project, set_b).await.unwrap();
+        let set = store.get_project_agent_set(project).await.unwrap().unwrap();
+        assert_eq!(set.name, "set-b");
+        assert!(set.agents.iter().all(|a| a.name == "dev-b"));
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn deleted_agent_set_disappears_from_projects() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let project = store
+            .upsert_project("https://example.com/r.git")
+            .await
+            .unwrap();
+        let set_id = store
+            .create_agent_set("ops", &[spec("dev", None)])
+            .await
+            .unwrap();
+        store.attach_agent_set(project, set_id).await.unwrap();
+        store.delete_agent_set(set_id).await.unwrap();
+        // Набор удалён — привязка проекта каскадно снята: работает только набор.
+        assert!(store
+            .get_project_agent_set(project)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store.get_agent_set(set_id).await.unwrap().is_none());
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);

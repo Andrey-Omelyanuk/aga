@@ -38,10 +38,6 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(role_config: RoleConfig, llm_client: LlmClient, trace_store: TraceStore) -> Self {
-        Self::with_executor(role_config, llm_client, trace_store, Executor::Sh)
-    }
-
     pub fn with_executor(
         role_config: RoleConfig,
         llm_client: LlmClient,

@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
+/// Конфигурация ядра. Ролей больше нет — их заменили AgentSet-ы, которые живут
+/// в БД и настраиваются через API. Здесь остался только SSO.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub roles: HashMap<String, RoleConfig>,
     #[serde(default)]
     pub sso: Option<SsoConfig>,
 }
@@ -52,10 +52,6 @@ impl Config {
         let config: Config = serde_yaml::from_str(&content)?;
         Ok(config)
     }
-
-    pub fn get_role(&self, name: &str) -> Option<&RoleConfig> {
-        self.roles.get(name)
-    }
 }
 
 #[cfg(test)]
@@ -69,43 +65,23 @@ mod tests {
     }
 
     #[test]
-    fn role_without_llm_model_loads_with_none() {
+    fn config_loads_without_roles_and_ignores_unknown_keys() {
+        // Роли из прежнего roles.yaml сервер больше не читает: конфиг загружает
+        // только SSO, а посторонние ключи (roles:) игнорируются serde.
         let yaml = r#"
 roles:
-  r:
+  app-deployer:
     prompt: p
     allowed_commands: ["echo"]
     max_iterations: 1
     llm:
-      temperature: 0.5
+      temperature: 0.7
+sso:
+  enabled: false
 "#;
         let path = write_tmp(yaml);
         let config = Config::load(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
-
-        let role = config.get_role("r").unwrap();
-        assert!(role.llm.model.is_none());
-        assert_eq!(role.llm.temperature, 0.5);
-    }
-
-    #[test]
-    fn role_with_llm_model_loads_it() {
-        let yaml = r#"
-roles:
-  r:
-    prompt: p
-    allowed_commands: ["echo"]
-    max_iterations: 1
-    llm:
-      model: "deepseek-v4-flash"
-      temperature: 0.3
-"#;
-        let path = write_tmp(yaml);
-        let config = Config::load(path.to_str().unwrap()).unwrap();
-        std::fs::remove_file(&path).ok();
-
-        let role = config.get_role("r").unwrap();
-        assert_eq!(role.llm.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(role.llm.temperature, 0.3);
+        assert!(config.sso.is_some());
     }
 }

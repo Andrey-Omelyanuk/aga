@@ -47,13 +47,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chat_store = chat::ChatStore::new(&db_path).await?;
     tracing::info!("ChatStore ok");
 
-    // Учётка агента для каждой настроенной роли.
-    for role in config.roles.keys() {
-        if let Ok(id) = chat_store.ensure_agent_user(role).await {
-            tracing::debug!("agent user for role {role}: {id}");
-        }
-    }
-
     // Верификатор JWT против JWKS. Включён только когда SSO включён и задан
     // jwks_url; иначе запросы работают под аноним-суперпользователем.
     let sso_verifier = match config.sso.as_ref().filter(|s| s.enabled) {
@@ -97,7 +90,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let reactive = reactive::ReactiveRunner::new(
-        config.clone(),
         llm_client.clone(),
         trace_store.clone(),
         chat_store.clone(),
@@ -108,7 +100,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = server::AppState {
         config,
         trace_store,
-        llm_client,
         chat_store,
         reactive,
         cluster,

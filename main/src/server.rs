@@ -15,12 +15,10 @@ use std::convert::Infallible;
 use tokio::sync::mpsc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use crate::agent::Agent;
 use crate::auth;
 use crate::chat::{parse_command, Chat, ChatCommand, ChatStore, Message, SessionError};
 use crate::cluster::Cluster;
 use crate::config::Config;
-use crate::llm::LlmClient;
 use crate::reactive::ReactiveRunner;
 use crate::trace::TraceStore;
 
@@ -28,7 +26,6 @@ use crate::trace::TraceStore;
 pub struct AppState {
     pub config: Config,
     pub trace_store: TraceStore,
-    pub llm_client: LlmClient,
     pub chat_store: ChatStore,
     pub reactive: ReactiveRunner,
     pub cluster: Cluster,
@@ -44,20 +41,6 @@ async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<i64, Stat
 }
 
 #[derive(Deserialize)]
-pub struct TaskRequest {
-    pub task: String,
-    #[allow(dead_code)]
-    pub project_id: Option<i64>,
-}
-
-#[derive(Serialize)]
-pub struct TaskResponse {
-    pub status: String,
-    pub task_id: String,
-    pub result: String,
-}
-
-#[derive(Deserialize)]
 pub struct HumanAnswerRequest {
     pub answer: String,
 }
@@ -66,7 +49,8 @@ pub struct HumanAnswerRequest {
 pub struct ProjectInfo {
     pub id: i64,
     pub git_url: String,
-    pub active_roles: Vec<String>,
+    /// Прикреплённый набор агентов (или null).
+    pub agent_set: Option<crate::trace::AgentSet>,
 }
 
 #[derive(Deserialize)]
@@ -75,8 +59,14 @@ pub struct CreateProjectRequest {
 }
 
 #[derive(Deserialize)]
-pub struct SetProjectRolesRequest {
-    pub active_roles: Vec<String>,
+pub struct AttachAgentSetRequest {
+    pub agent_set_id: i64,
+}
+
+#[derive(Deserialize)]
+pub struct CreateAgentSetRequest {
+    pub name: String,
+    pub agents: Vec<crate::trace::AgentSpec>,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -91,17 +81,20 @@ pub fn create_router(state: AppState) -> Router {
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([CONTENT_TYPE, AUTHORIZATION]);
     Router::new()
-        .route("/tasks/:role", post(create_task))
         .route("/trace/:task_id", get(get_trace))
         .route("/human/pending", get(pending_human_requests))
         .route("/human/answer/:id", post(answer_human_request))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/:id", get(get_project).delete(delete_project))
         .route(
-            "/projects/:id/roles",
-            get(get_project_roles).post(set_project_roles),
+            "/projects/:id/agent-set",
+            get(get_project_agent_set).post(attach_agent_set),
         )
-        .route("/roles", get(list_all_roles))
+        .route("/agent-sets", get(list_agent_sets).post(create_agent_set))
+        .route(
+            "/agent-sets/:id",
+            get(get_agent_set).delete(delete_agent_set),
+        )
         // === SSO (Keycloak): вход веб-клиента ===
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
@@ -136,35 +129,6 @@ pub fn create_router(state: AppState) -> Router {
         )
         .layer(cors)
         .with_state(state)
-}
-
-async fn create_task(
-    Path(role): Path<String>,
-    State(state): State<AppState>,
-    Json(payload): Json<TaskRequest>,
-) -> Result<Json<TaskResponse>, StatusCode> {
-    let role_config = state
-        .config
-        .get_role(&role)
-        .ok_or(StatusCode::NOT_FOUND)?
-        .clone();
-
-    let task_id = uuid::Uuid::new_v4().to_string();
-
-    let agent = Agent::new(
-        role_config,
-        state.llm_client.clone(),
-        state.trace_store.clone(),
-    );
-
-    match agent.run(&task_id, &payload.task).await {
-        Ok(result) => Ok(Json(TaskResponse {
-            status: "ok".to_string(),
-            task_id,
-            result,
-        })),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
 }
 
 async fn get_trace(
@@ -231,15 +195,15 @@ async fn list_projects(
         Ok(projects) => {
             let mut result = Vec::new();
             for project in projects {
-                let active_roles = state
+                let agent_set = state
                     .trace_store
-                    .get_active_project_roles(project.id)
+                    .get_project_agent_set(project.id)
                     .await
-                    .unwrap_or_default();
+                    .unwrap_or(None);
                 result.push(ProjectInfo {
                     id: project.id,
                     git_url: project.git_url,
-                    active_roles,
+                    agent_set,
                 });
             }
             Ok(Json(result))
@@ -256,15 +220,15 @@ async fn create_project(
     current_user(&state, &headers).await?;
     match state.trace_store.upsert_project(&payload.git_url).await {
         Ok(project_id) => {
-            let active_roles = state
+            let agent_set = state
                 .trace_store
-                .get_active_project_roles(project_id)
+                .get_project_agent_set(project_id)
                 .await
-                .unwrap_or_default();
+                .unwrap_or(None);
             Ok(Json(ProjectInfo {
                 id: project_id,
                 git_url: payload.git_url,
-                active_roles,
+                agent_set,
             }))
         }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -279,15 +243,15 @@ async fn get_project(
     current_user(&state, &headers).await?;
     match state.trace_store.get_project(id).await {
         Ok(Some(project)) => {
-            let active_roles = state
+            let agent_set = state
                 .trace_store
-                .get_active_project_roles(project.id)
+                .get_project_agent_set(project.id)
                 .await
-                .unwrap_or_default();
+                .unwrap_or(None);
             Ok(Json(ProjectInfo {
                 id: project.id,
                 git_url: project.git_url,
-                active_roles,
+                agent_set,
             }))
         }
         Ok(None) => Err(StatusCode::NOT_FOUND),
@@ -308,39 +272,110 @@ async fn delete_project(
     }
 }
 
-async fn get_project_roles(
-    Path(id): Path<i64>,
+// === API для управления наборами агентов ===
+
+async fn list_agent_sets(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<String>>, StatusCode> {
+) -> Result<Json<Vec<crate::trace::AgentSet>>, StatusCode> {
     current_user(&state, &headers).await?;
-    match state.trace_store.get_active_project_roles(id).await {
-        Ok(roles) => Ok(Json(roles)),
+    state
+        .trace_store
+        .list_agent_sets()
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn create_agent_set(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateAgentSetRequest>,
+) -> Result<Json<crate::trace::AgentSet>, StatusCode> {
+    current_user(&state, &headers).await?;
+    match state
+        .trace_store
+        .create_agent_set(&payload.name, &payload.agents)
+        .await
+    {
+        Ok(set_id) => state
+            .trace_store
+            .get_agent_set(set_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+            .map(Json),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
-async fn set_project_roles(
+async fn get_agent_set(
     Path(id): Path<i64>,
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<SetProjectRolesRequest>,
+) -> Result<Json<crate::trace::AgentSet>, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .get_agent_set(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
+}
+
+async fn delete_agent_set(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
     current_user(&state, &headers).await?;
-    let roles_refs: Vec<&str> = payload.active_roles.iter().map(|s| s.as_str()).collect();
-    match state.trace_store.set_project_roles(id, &roles_refs).await {
+    match state.trace_store.delete_agent_set(id).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn attach_agent_set(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AttachAgentSetRequest>,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    if state
+        .trace_store
+        .get_project(id)
+        .await
+        .unwrap_or(None)
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    match state
+        .trace_store
+        .attach_agent_set(id, payload.agent_set_id)
+        .await
+    {
         Ok(_) => Ok(StatusCode::OK),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
-async fn list_all_roles(
+async fn get_project_agent_set(
+    Path(id): Path<i64>,
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<String>>, StatusCode> {
+) -> Result<Json<crate::trace::AgentSet>, StatusCode> {
     current_user(&state, &headers).await?;
-    let roles: Vec<String> = state.config.roles.keys().cloned().collect();
-    Ok(Json(roles))
+    state
+        .trace_store
+        .get_project_agent_set(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
 }
 
 // === SSO (Keycloak): вход веб-клиента ===
@@ -679,15 +714,15 @@ async fn send_message(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
-        // Реактивные агенты по упоминаниям @Agent.<role>.
-        for role in crate::chat::mentioned_roles(&payload.body) {
-            if let Ok(agent_user_id) = state.chat_store.ensure_agent_user(&role).await {
+        // Реактивные агенты по упоминаниям @Agent.<имя> из набора проекта.
+        for name in crate::chat::mentioned_roles(&payload.body) {
+            if let Ok(agent_user_id) = state.chat_store.ensure_agent_user(&name).await {
                 let context = build_context(&state, chat_id)
                     .await
                     .unwrap_or_else(|| payload.body.clone());
                 state
                     .reactive
-                    .enqueue(chat_id, &role, agent_user_id, context);
+                    .enqueue(chat_id, &name, agent_user_id, context);
             }
         }
 
@@ -1031,6 +1066,7 @@ async fn build_context(state: &AppState, chat_id: i64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::LlmClient;
     use axum::body::Body;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -1043,10 +1079,7 @@ mod tests {
         let chat_store = crate::chat::ChatStore::new(path.to_str().unwrap())
             .await
             .unwrap();
-        let config = Config {
-            roles: Default::default(),
-            sso: None,
-        };
+        let config = Config { sso: None };
         let llm_client = LlmClient::new("http://localhost:1/v1", None, "test-model");
         let cluster = Cluster {
             kubectl: "kubectl".into(),
@@ -1056,7 +1089,6 @@ mod tests {
             wait_timeout_secs: 1,
         };
         let reactive = ReactiveRunner::new(
-            config.clone(),
             llm_client.clone(),
             trace_store.clone(),
             chat_store.clone(),
@@ -1070,7 +1102,6 @@ mod tests {
         let state = AppState {
             config,
             trace_store,
-            llm_client,
             chat_store,
             reactive,
             cluster,
@@ -1311,6 +1342,163 @@ mod tests {
         // Абсолютный redirect_uri на хосте SPA, иначе Keycloak после входа
         // вернёт браузер на свой хост (auth.localhost) и будет 404.
         assert_eq!(redirect_uri, "http://dev.localhost/auth/callback");
+        cleanup(&file).await;
+    }
+
+    fn agent_json(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "description": format!("Правила {name}"),
+            "allowed_commands": ["git", "make"],
+            "max_iterations": 3,
+            "model": null,
+            "temperature": 0.7,
+            "parent": null
+        })
+    }
+
+    #[tokio::test]
+    async fn created_agent_set_listed_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, _) = post_json(
+            "/agent-sets",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [agent_json("dev")] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get("/agent-sets", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("ops"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn attached_agent_set_appears_on_project() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let project_id = state
+            .trace_store
+            .upsert_project("https://example.com/a.git")
+            .await
+            .unwrap();
+        let set_id = state
+            .trace_store
+            .create_agent_set(
+                "ops",
+                &[crate::trace::AgentSpec {
+                    name: "dev".to_string(),
+                    description: "Правила разработчика".to_string(),
+                    allowed_commands: vec!["git".to_string()],
+                    max_iterations: 3,
+                    model: None,
+                    temperature: 0.7,
+                    parent: None,
+                }],
+            )
+            .await
+            .unwrap();
+        let (status, _) = post_json(
+            &format!("/projects/{project_id}/agent-set"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "agent_set_id": set_id }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get("/projects", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("dev"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn replacing_agent_set_changes_project_agents_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let project_id = state
+            .trace_store
+            .upsert_project("https://example.com/r.git")
+            .await
+            .unwrap();
+        let set_a = state
+            .trace_store
+            .create_agent_set(
+                "set-a",
+                &[crate::trace::AgentSpec {
+                    name: "dev-a".to_string(),
+                    description: "a".to_string(),
+                    allowed_commands: vec![],
+                    max_iterations: 1,
+                    model: None,
+                    temperature: 0.5,
+                    parent: None,
+                }],
+            )
+            .await
+            .unwrap();
+        let set_b = state
+            .trace_store
+            .create_agent_set(
+                "set-b",
+                &[crate::trace::AgentSpec {
+                    name: "dev-b".to_string(),
+                    description: "b".to_string(),
+                    allowed_commands: vec![],
+                    max_iterations: 1,
+                    model: None,
+                    temperature: 0.5,
+                    parent: None,
+                }],
+            )
+            .await
+            .unwrap();
+        let (s, _) = post_json(
+            &format!("/projects/{project_id}/agent-set"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "agent_set_id": set_a }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (s, _) = post_json(
+            &format!("/projects/{project_id}/agent-set"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "agent_set_id": set_b }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        let (_, body) = get(
+            &format!("/projects/{project_id}/agent-set"),
+            &headers,
+            state.clone(),
+        )
+        .await;
+        assert!(body.contains("dev-b"));
+        assert!(!body.contains("dev-a"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn role_endpoints_removed() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        // Глобальные роли и ручная настройка ролей проекта исчезли.
+        let (status, _) = get("/roles", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get("/projects/1/roles", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = post_json(
+            "/projects/1/roles",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "active_roles": ["dev"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         cleanup(&file).await;
     }
 }
