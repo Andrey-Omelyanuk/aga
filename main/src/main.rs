@@ -82,7 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cluster = cluster::Cluster::from_env();
     tracing::info!(
-        "Kubernetes: kubectl={} namespace={} template={} image={}",
+        "Workstations: backend={:?} kubectl={} namespace={} template={} image={}",
+        cluster.backend,
         cluster.kubectl,
         cluster.namespace,
         cluster.template,

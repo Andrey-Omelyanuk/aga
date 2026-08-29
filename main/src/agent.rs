@@ -12,6 +12,8 @@ pub enum Executor {
     Sh,
     /// Исполнение внутри пода воркстейшна через `kubectl exec`.
     KubectlExec { namespace: String, pod: String },
+    /// Исполнение внутри контейнера воркстейшна через `docker exec` (dev).
+    DockerExec { container: String },
 }
 
 /// Аргументы для `kubectl exec` в под воркстейшна.
@@ -22,6 +24,18 @@ pub fn kubectl_exec_args(namespace: &str, pod: &str, command: &str) -> Vec<Strin
         namespace.to_string(),
         pod.to_string(),
         "--".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        command.to_string(),
+    ]
+}
+
+/// Аргументы для `docker exec` в контейнер воркстейшна. В отличие от kubectl,
+/// docker exec разделитель `--` не понимает — команда идёт сразу после имени.
+pub fn docker_exec_args(container: &str, command: &str) -> Vec<String> {
+    vec![
+        "exec".to_string(),
+        container.to_string(),
         "sh".to_string(),
         "-c".to_string(),
         command.to_string(),
@@ -183,6 +197,13 @@ impl Agent {
                     .await?;
                 Self::collect(output)
             }
+            Executor::DockerExec { container } => {
+                let output = Command::new("docker")
+                    .args(docker_exec_args(container, command))
+                    .output()
+                    .await?;
+                Self::collect(output)
+            }
         }
     }
 
@@ -246,6 +267,14 @@ mod tests {
         assert_eq!(
             kubectl_exec_args("aga", "ws-7", "ls -la"),
             vec!["exec", "-n", "aga", "ws-7", "--", "sh", "-c", "ls -la"]
+        );
+    }
+
+    #[test]
+    fn agent_commands_run_in_workstation_container() {
+        assert_eq!(
+            docker_exec_args("ws-7", "ls -la"),
+            vec!["exec", "ws-7", "sh", "-c", "ls -la"]
         );
     }
 }

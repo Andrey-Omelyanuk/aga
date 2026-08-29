@@ -38,6 +38,10 @@ COPY src/ ./src/
 # fn main(){}. Сносим только фингерпринт приложения: зависимости остаются в кэше.
 RUN rm -rf target/release/.fingerprint/aga-* && cargo build --release
 
+# Статический docker-клиент (без демона): воркстейшны в dev-режиме —
+# контейнеры (AGA_WS_BACKEND=docker, cluster.rs / agent.rs).
+FROM docker:27-cli as docker-cli
+
 # Финальный образ
 FROM debian:bookworm-slim
 
@@ -49,6 +53,7 @@ WORKDIR /app
 # Копируем бинарник из builder
 COPY --from=builder /app/target/release/aga /app/aga
 COPY --from=builder /tmp/kubectl /usr/local/bin/kubectl
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 # Веб-клиент — отдельный сервис (front/), ядро статику не раздаёт.
 

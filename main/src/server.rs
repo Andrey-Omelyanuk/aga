@@ -1082,6 +1082,7 @@ mod tests {
         let config = Config { sso: None };
         let llm_client = LlmClient::new("http://localhost:1/v1", None, "test-model");
         let cluster = Cluster {
+            backend: crate::cluster::Backend::K8s,
             kubectl: "kubectl".into(),
             namespace: "default".into(),
             template: "/nonexistent.yaml".into(),

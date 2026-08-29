@@ -5,11 +5,28 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-/// Управление кластером Kubernetes из ядра: создание/удаление воркстейшн-подов
-/// и ожидание их готовности. Кластером управляет только ядро; агент внутри
-/// пода про кластер не знает.
+/// Способ запуска воркстейшнов: под в Kubernetes или контейнер в Docker (dev).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    K8s,
+    Docker,
+}
+
+impl Backend {
+    fn from_env() -> Self {
+        match std::env::var("AGA_WS_BACKEND").as_deref() {
+            Ok("docker") => Backend::Docker,
+            _ => Backend::K8s,
+        }
+    }
+}
+
+/// Управление воркстейшнами: в Kubernetes — поды (kubectl), в dev — контейнеры
+/// (docker). Кластером/контейнерами управляет только ядро; агент внутри
+/// воркстейшна про него не знает.
 #[derive(Debug, Clone)]
 pub struct Cluster {
+    pub backend: Backend,
     pub kubectl: String,
     pub namespace: String,
     pub template: String,
@@ -74,6 +91,7 @@ impl Cluster {
             .and_then(|v| v.parse().ok())
             .unwrap_or(120);
         Self {
+            backend: Backend::from_env(),
             kubectl: env("AGA_K8S_KUBECTL", "kubectl"),
             namespace: env("AGA_K8S_NAMESPACE", "default"),
             template: env("AGA_K8S_TEMPLATE", "./infra/k8s/workstation-pod.yaml"),
@@ -90,6 +108,37 @@ impl Cluster {
     /// Ветка, на которой воркстейшн работает в своём поде.
     pub fn branch_name(ws_id: i64) -> String {
         format!("ws-{ws_id}")
+    }
+
+    /// Аргументы `docker run` для контейнера воркстейшна. Абсолютный путь на
+    /// хосте монтируется в `/work/project` (entrypoint клон пропускает, работа
+    /// идёт с примонтированной копией); git-URL клонируется как в k8s
+    /// (GIT_URL/BRANCH).
+    pub fn docker_run_args(
+        container: &str,
+        image: &str,
+        git_url: &str,
+        branch: &str,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--name".to_string(),
+            container.to_string(),
+            "--privileged".to_string(),
+        ];
+        if git_url.starts_with('/') {
+            args.extend(["-v".to_string(), format!("{git_url}:/work/project")]);
+        } else {
+            args.extend([
+                "-e".to_string(),
+                format!("GIT_URL={git_url}"),
+                "-e".to_string(),
+                format!("BRANCH={branch}"),
+            ]);
+        }
+        args.extend([image.to_string(), "/entrypoint.sh".to_string()]);
+        args
     }
 
     /// Собрать манифест воркстейшн-пода: под с собственным Docker (DinD),
@@ -112,8 +161,21 @@ impl Cluster {
             .replace("{{IMAGE}}", &self.image))
     }
 
-    /// Создать под воркстейшна в кластере (`kubectl apply -f -`).
+    /// Создать воркстейшн (под в k8s или контейнер в docker по backend).
     pub async fn create_pod(
+        &self,
+        pod_name: &str,
+        git_url: &str,
+        branch: &str,
+    ) -> Result<(), ClusterError> {
+        match self.backend {
+            Backend::Docker => self.create_container(pod_name, git_url, branch).await,
+            Backend::K8s => self.create_k8s_pod(pod_name, git_url, branch).await,
+        }
+    }
+
+    /// Создать под воркстейшна в кластере (`kubectl apply -f -`).
+    async fn create_k8s_pod(
         &self,
         pod_name: &str,
         git_url: &str,
@@ -129,31 +191,105 @@ impl Cluster {
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(manifest.as_bytes()).await?;
         }
-        check_kubectl(child.wait_with_output().await?)?;
+        check_output(child.wait_with_output().await?)?;
         Ok(())
     }
 
-    /// Удалить под воркстейшна (`--ignore-not-found`: отсутствующий под — не ошибка).
-    pub async fn delete_pod(&self, pod_name: &str) -> Result<(), ClusterError> {
-        let output = Command::new(&self.kubectl)
-            .args([
-                "delete",
-                "pod",
-                pod_name,
-                "-n",
-                &self.namespace,
-                "--ignore-not-found",
-            ])
+    /// Создать/переиспользовать контейнер воркстейшна (docker). Уже
+    /// существующий (compose-стенд) — переиспользуем: запущенный — без
+    /// действий, остановленный — стартуем.
+    async fn create_container(
+        &self,
+        container: &str,
+        git_url: &str,
+        branch: &str,
+    ) -> Result<(), ClusterError> {
+        let inspect = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", container])
             .output()
             .await?;
-        check_kubectl(output)?;
+        if inspect.status.success() {
+            if String::from_utf8_lossy(&inspect.stdout).trim() == "true" {
+                return Ok(());
+            }
+            let output = Command::new("docker")
+                .args(["start", container])
+                .output()
+                .await?;
+            check_output(output)?;
+            return Ok(());
+        }
+        let output = Command::new("docker")
+            .args(Self::docker_run_args(
+                container,
+                &self.image,
+                git_url,
+                branch,
+            ))
+            .output()
+            .await?;
+        check_output(output)?;
         Ok(())
     }
 
-    /// Ждать, пока под не станет Ready (проект склонирован, см. readinessProbe
-    /// в манифесте). Возвращает false по таймауту или при падении пода
-    /// (образ ещё тянется — состояние 'creating').
+    /// Удалить воркстейшн (под в k8s или контейнер в docker).
+    pub async fn delete_pod(&self, pod_name: &str) -> Result<(), ClusterError> {
+        match self.backend {
+            Backend::Docker => {
+                let output = Command::new("docker")
+                    .args(["rm", "-f", pod_name])
+                    .output()
+                    .await?;
+                check_output(output)?;
+                Ok(())
+            }
+            Backend::K8s => {
+                let output = Command::new(&self.kubectl)
+                    .args([
+                        "delete",
+                        "pod",
+                        pod_name,
+                        "-n",
+                        &self.namespace,
+                        "--ignore-not-found",
+                    ])
+                    .output()
+                    .await?;
+                check_output(output)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Ждать готовности воркстейшна: под — Ready (проект склонирован,
+    /// readinessProbe в манифесте), контейнер — `test -d /work/project/.git`.
+    /// Возвращает false по таймауту или при падении (образ ещё тянется /
+    /// контейнер не готов).
     pub async fn wait_ready(&self, pod_name: &str) -> Result<bool, ClusterError> {
+        match self.backend {
+            Backend::Docker => self.wait_container_ready(pod_name).await,
+            Backend::K8s => self.wait_k8s_pod_ready(pod_name).await,
+        }
+    }
+
+    async fn wait_container_ready(&self, container: &str) -> Result<bool, ClusterError> {
+        let deadline = Instant::now() + Duration::from_secs(self.wait_timeout_secs);
+        loop {
+            let output = Command::new("docker")
+                .args(["exec", container, "sh", "-c", "test -d /work/project/.git"])
+                .output()
+                .await?;
+            if output.status.success() {
+                return Ok(true);
+            }
+            if Instant::now() > deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    async fn wait_k8s_pod_ready(&self, pod_name: &str) -> Result<bool, ClusterError> {
         let deadline = Instant::now() + Duration::from_secs(self.wait_timeout_secs);
         loop {
             let output = Command::new(&self.kubectl)
@@ -188,7 +324,7 @@ impl Cluster {
     }
 }
 
-fn check_kubectl(output: Output) -> Result<(), ClusterError> {
+fn check_output(output: Output) -> Result<(), ClusterError> {
     if output.status.success() {
         Ok(())
     } else {
@@ -204,6 +340,7 @@ mod tests {
 
     fn cluster() -> Cluster {
         Cluster {
+            backend: Backend::K8s,
             kubectl: "kubectl".into(),
             namespace: "aga".into(),
             template: "/nonexistent/workstation-pod.yaml".into(),
@@ -238,5 +375,53 @@ mod tests {
             .unwrap();
         assert!(m.contains("automountServiceAccountToken: false"));
         assert!(!m.contains("serviceAccountName"));
+    }
+
+    #[test]
+    fn docker_run_clones_git_url_like_k8s() {
+        assert_eq!(
+            Cluster::docker_run_args(
+                "ws-3",
+                "aga-workstation:dev",
+                "https://example.com/proj.git",
+                "ws-3"
+            ),
+            vec![
+                "run",
+                "-d",
+                "--name",
+                "ws-3",
+                "--privileged",
+                "-e",
+                "GIT_URL=https://example.com/proj.git",
+                "-e",
+                "BRANCH=ws-3",
+                "aga-workstation:dev",
+                "/entrypoint.sh"
+            ]
+        );
+    }
+
+    #[test]
+    fn docker_run_mounts_local_project_path() {
+        assert_eq!(
+            Cluster::docker_run_args(
+                "ws-4",
+                "aga-workstation:dev",
+                "/home/dev/examples/game-xo",
+                "ws-4"
+            ),
+            vec![
+                "run",
+                "-d",
+                "--name",
+                "ws-4",
+                "--privileged",
+                "-v",
+                "/home/dev/examples/game-xo:/work/project",
+                "aga-workstation:dev",
+                "/entrypoint.sh"
+            ]
+        );
     }
 }

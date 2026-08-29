@@ -10,15 +10,17 @@ human-in-the-loop, модель чата, SSO) и веб-клиент (`front/` 
 ## Boundaries
 - **Делает (платформа):** REST API задач агентам и чата; управление жизненным
   циклом агента; валидация команд по белому списку; трассировка в SQLite (WAL);
-  human-in-the-loop через `[ASK_HUMAN]`; проекты (git-репозиторий) и роли через
-  API; воркстейшны — как поды в Kubernetes (`kubectl`); модель чата (`/users`,
+  human-in-the-loop через `[ASK_HUMAN]`; проекты (git-репозиторий) и наборы
+  агентов (AgentSet) через API; воркстейшны — поды в Kubernetes (`kubectl`) или
+  контейнеры в dev (`docker`, `AGA_WS_BACKEND=docker`); модель чата (`/users`,
   `/chats`, `/messages`, `/workstations`); SSO (Keycloak): JWKS-проверка JWT,
   роли participant/admin, вход веб-клиента через `/auth/login` + `/auth/callback`.
-- **Не делает:** не управляет Docker-контейнерами напрямую (только через shell);
-  не предоставляет готовых агентов — агенты конфигурируются через `main/roles/`;
-  не является оркестратором (NATS, Redis, S3); не управляет воркстейшнами из
-  веб-интерфейса (их поднимает админ через SSO и k8s); не редактирует персонал
-  внутри aga (учётки и роли — в Keycloak).
+- **Не делает:** не управляет Docker-контейнерами напрямую в k8s-стенде (в
+  dev-режиме воркстейшны — контейнеры, которыми ядро управляет через docker
+  CLI); не предоставляет готовых агентов — агенты настраиваются наборами
+  (AgentSet) через API; не является оркестратором (NATS, Redis, S3); не управляет
+  воркстейшнами из веб-интерфейса (создание — только суперпользователь API);
+  не редактирует персонал внутри aga (учётки и роли — в Keycloak).
 - **Модель доступа (веб):** участники из SSO видят все проекты и сессии;
   участник создаёт проекты и открывает сессии на готовых воркстейшнах (одна
   активная сессия на воркстейшн); закрыть сессию может только её владелец;
@@ -42,16 +44,15 @@ aga/
 ├── makefile            # единственный интерфейс команд (см. Development)
 ├── main/               # ядро — Rust-сервис (см. main/AGENTS.md)
 │   ├── src/            # модули ядра
-│   ├── roles/          # библиотека YAML-пресетов ролей
-│   ├── prompts/        # системные промпты
-│   ├── config/         # roles.yaml (runtime) + config.example.yml
+│   ├── prompts/        # общая инструкция для агентов
+│   ├── config/         # sso-конфиг (runtime) + config.example.yml
 │   ├── data/           # runtime-данные (trace.db, work/) — в .gitignore
 │   ├── Cargo.toml
-│   └── Dockerfile      # образ ядра (kubectl + бинарь)
+│   └── Dockerfile      # образ ядра (kubectl + docker CLI + бинарь)
 ├── front/              # веб-клиент — SPA-сервис (см. front/AGENTS.md)
 │   ├── index.html
 │   └── Dockerfile      # образ nginx
-├── infra/              # .env.example, k8s-стенд (ядро + фронт + Keycloak + воркстейшны), AGENTS.md
+├── infra/              # .env.example, dev-compose (ядро + воркстейшны), k8s-стенд, AGENTS.md
 └── stories/            # истории разработки
 ```
 
@@ -73,6 +74,12 @@ aga/
 - Локальная разработка: `make build`, `make run` (ядро, cargo в `main/`),
   `make run-front` (раздача `front/index.html`), `make test`, `make lint`,
   `make fmt`.
+- Dev-стенд без кластера (ядро + 2 воркстейшна в docker compose):
+  `make dev-prepare`, `make dev-up`, `make dev-down`, `make dev-logs`,
+  `make dev-ps`, `make dev-reset`, `make dev-verify`. Воркстейшны — контейнеры
+  `ws-1`/`ws-2` с пустыми git-репо (проект агент наполняет сам); ядро в
+  docker-режиме (`AGA_WS_BACKEND=docker`) переиспользует их. Фронт —
+  `make run-front`.
 - Тестовый стенд — в k8s (minikube): `make k8s-up`, `make k8s-build`, `make k8s-load`,
   `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`; ручной
   доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси
@@ -80,17 +87,19 @@ aga/
 - Переменные окружения — `.env` в корне (см. `infra/.env.example`).
 
 ## Non-Obvious Rules
-- `main/roles/` — библиотека пресетов; runtime загружает `main/config/roles.yaml`
-  (сборка из одного или нескольких пресетов, валидная структура — ключ `roles:`).
-- Команды выполняются через `sh -c` (dev, без воркстейшна) или `kubectl exec`
-  в под воркстейшна (Kubernetes). Inline-конструкции (`|`, `>`, `<`, `;`, `&`)
+- Агенты проекта определяет набор (AgentSet) через API (`/agent-sets`,
+  привязка к проекту), а не глобальный конфиг ролей.
+- Команды выполняются через `sh -c` (dev, без воркстейшна), `kubectl exec`
+  в под воркстейшна (Kubernetes) или `docker exec` в контейнер воркстейшна
+  (dev, `AGA_WS_BACKEND=docker`). Inline-конструкции (`|`, `>`, `<`, `;`, `&`)
   запрещены на уровне `is_command_allowed`.
-- Проект регистрируется git-URL; воркстейшн — под `ws-<id>` с собственным Docker
-  (DinD) и копией проекта; кластером управляет только ядро.
+- Проект регистрируется git-URL; воркстейшн — под/контейнер `ws-<id>` с
+  собственным Docker (DinD) и копией проекта; кластером/контейнерами управляет
+  только ядро. Dev-compose поднимает контейнеры заранее — ядро их переиспользует.
 - `[ASK_HUMAN]` — единственный протокол human-in-the-loop. При обнаружении
   выполнение задачи останавливается до ответа.
 - Модель чата: команды (`#invite`/`#kick`/`#start`/`#end`/`#share`) — это обычные
-  сообщения с дополнительной реакцией; реактивные агенты по `@Agent.<role>`
+  сообщения с дополнительной реакцией; реактивные агенты по `@Agent.<имя>`
   сериализуются per-workstation.
 - Каждый task создаёт новый Agent (легковесный, без state между задачами).
 - В стенде SPA и API разнесены по сервисам: `dev.localhost` → `front/`,
@@ -110,7 +119,7 @@ aga/
 ## Dependencies
 - Rust (edition 2021), nginx
 - LLM API (OpenAI-compatible: Ollama, vLLM, OpenAI, LocalAI)
-- Docker (для сборки образов ядра, фронта и воркстейшна)
+- Docker (для сборки образов ядра, фронта и воркстейшна; dev-стенд — `docker compose`)
 - Kubernetes (`kubectl`) — стенд и воркстейшны как поды; локально — minikube (`make k8s-up`)
 
 ## Markdown Style

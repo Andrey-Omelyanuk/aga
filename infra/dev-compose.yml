@@ -1,0 +1,70 @@
+# Dev-стенд (docker compose): ядро + 2 воркстейшна, без кластера.
+# Единственный способ поднять *стенд* — k8s (make k8s-*); этот compose —
+# только для локальной разработки и отладки многопоточности воркстейшнов.
+#
+# Управление — make dev-prepare / dev-up / dev-down / dev-logs / dev-ps /
+# dev-reset / dev-verify. Воркстейшны (ws-1, ws-2) поднимаются заранее и
+# переиспользуются ядром (AGA_WS_BACKEND=docker): POST /workstations находит
+# существующий контейнер ws-<id> и не пересоздаёт его.
+#
+# Проекты воркстейшнов — пустые git-репо (make dev-prepare инициализирует их
+# в main/data/work/ws-{1,2}); GIT_URL не задан, entrypoint клон пропускает и
+# работает с примонтированной копией. Проект агент наполняет сам в dev.
+name: aga-dev
+
+services:
+  core:
+    image: aga-core:dev
+    build:
+      context: ../main
+      dockerfile: Dockerfile
+    container_name: aga-core
+    # Воркстейшны управляются через docker.sock хоста; образ ядра запускается
+    # пользователем aga (uid 1000) — для dev переходим на root.
+    user: "0:0"
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - ../main/config/roles.yaml:/etc/aga/roles.yaml:ro
+      - aga-data:/var/lib/aga
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - PORT=${PORT:-8080}
+      - AGA_CONFIG_PATH=/etc/aga/roles.yaml
+      - AGA_DB_PATH=/var/lib/aga/trace.db
+      # Воркстейшны как docker-контейнеры (не поды): переиспользуем ws-1/ws-2
+      # из compose, при необходимости создаём через docker run.
+      - AGA_WS_BACKEND=docker
+      # Образ воркстейшна: тот же, что собирает compose (server ниже).
+      - AGA_K8S_IMAGE=aga-workstation:dev
+      - LLM_API_URL=${LLM_API_URL:-http://host.docker.internal:11434/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-qwen3.5:9b}
+      - AGA_FRONT_URL=${AGA_FRONT_URL:-http://localhost:8081}
+    restart: "no"
+
+  ws-1:
+    image: aga-workstation:dev
+    build: ./k8s/workstation-image
+    container_name: ws-1
+    privileged: true
+    volumes:
+      - ../main/data/work/ws-1:/work/project
+    environment:
+      - BRANCH=ws-1
+    restart: "no"
+
+  ws-2:
+    image: aga-workstation:dev
+    build: ./k8s/workstation-image
+    container_name: ws-2
+    privileged: true
+    volumes:
+      - ../main/data/work/ws-2:/work/project
+    environment:
+      - BRANCH=ws-2
+    restart: "no"
+
+volumes:
+  aga-data:

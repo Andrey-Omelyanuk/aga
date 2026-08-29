@@ -60,10 +60,21 @@
 Отредактируйте `main/config/roles.yaml` (пример ниже).
 
 ### 2. Запуск
-Локальная разработка (без кластера):
+Локальная разработка (без кластера, воркстейшн — локальный `sh -c`):
 ```bash
 make run
 ```
+
+Dev-стенд без кластера (ядро + 2 воркстейшна в docker compose) — для отладки
+реактивных агентов и многопоточности воркстейшнов:
+```bash
+make dev-up      # собрать и поднять ядро + ws-1 + ws-2
+make dev-verify  # ядро отвечает, ws-1/ws-2 ready
+make run-front   # веб-клиент на localhost:8081 (API_BASE уже localhost:8080)
+```
+Воркстейшны — контейнеры `ws-1`/`ws-2` с пустыми git-репо (`make dev-prepare`),
+проект агент наполняет сам; ядро в docker-режиме переиспользует их. Остановка —
+`make dev-down`, пересоздание с чистой БД — `make dev-reset`.
 
 Тестовый стенд — в Kubernetes (minikube), ядро и Keycloak поднимаются в кластере:
 ```bash
@@ -126,7 +137,7 @@ aga/
 ├── makefile
 ├── main/                   # ядро — Rust-сервис
 │   ├── Cargo.toml
-│   ├── Dockerfile          # образ ядра (kubectl + бинарь)
+│   ├── Dockerfile          # образ ядра (kubectl + docker CLI + бинарь)
 │   ├── src/                # main.rs, config.rs, trace.rs, llm.rs, agent.rs, server.rs ...
 │   ├── roles/              # библиотека YAML-пресетов ролей
 │   ├── prompts/            # системные промпты
@@ -136,7 +147,8 @@ aga/
 │   ├── index.html
 │   └── Dockerfile          # образ nginx
 ├── infra/
-│   └── k8s/                # стенд (ядро + фронт + Keycloak) и воркстейшны
+│   ├── dev-compose.yml      # dev-стенд (ядро + ws-1 + ws-2, make dev-*)
+│   └── k8s/                 # стенд (ядро + фронт + Keycloak) и воркстейшны
 └── data/                   # runtime (в main/data/) — создаётся при запуске
 ```
 

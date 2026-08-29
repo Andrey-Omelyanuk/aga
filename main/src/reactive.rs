@@ -122,7 +122,7 @@ impl ReactiveRunner {
             return;
         };
 
-        let executor = executor_for_workstation(ws_id, &self.cluster.namespace);
+        let executor = executor_for_workstation(ws_id, &self.cluster);
         let agent = Agent::with_executor(
             role_config,
             self.llm_client.clone(),

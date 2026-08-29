@@ -23,7 +23,8 @@ CARGO_IN_MAIN = cd main && $(CARGO)
 
 .PHONY: help init build release test lint fmt fmt-fix run run-front \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
-        k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify
+        k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
+        dev-prepare dev-up dev-down dev-logs dev-ps dev-reset dev-verify
 
 help:
 	@echo "init        - Copy example files to working config (.env, roles.yaml)"
@@ -35,6 +36,13 @@ help:
 	@echo "fmt-fix     - Apply formatting"
 	@echo "run         - Run core locally (cargo run in main/)"
 	@echo "run-front   - Serve front/index.html locally (python3 -m http.server)"
+	@echo "dev-prepare - Create empty git repos for ws-1/ws-2 (main/data/work/)"
+	@echo "dev-up      - Start dev stand (docker compose: core + ws-1 + ws-2)"
+	@echo "dev-down    - Stop dev stand (docker compose down)"
+	@echo "dev-logs    - Follow dev stand logs"
+	@echo "dev-ps      - Show dev stand containers"
+	@echo "dev-reset   - Recreate dev stand from scratch (fresh DB)"
+	@echo "dev-verify  - Check dev stand: core API + both workstations ready"
 	@echo "k8s-up      - Start local cluster (minikube)"
 	@echo "k8s-down    - Delete local cluster (minikube delete)"
 	@echo "k8s-build   - Build core, front and workstation images"
@@ -77,6 +85,47 @@ run: init
 # Локальная раздача фронта без стенда (API_BASE должен указывать на ядро).
 run-front:
 	python3 -m http.server 8081 --directory front
+
+# Dev-стенд (docker compose): ядро + 2 воркстейшна, без кластера.
+# Воркстейшны поднимаются заранее (ws-1/ws-2) и переиспользуются ядром в
+# docker-режиме (AGA_WS_BACKEND=docker). Проекты — пустые репо (dev-prepare).
+# Стенд — по-прежнему k8s (make k8s-*); compose только для разработки.
+# --env-file .env — compose берёт LLM_API_URL и др. из корневого .env
+# (по умолчанию искал бы .env рядом с compose-файлом).
+DEV_COMPOSE = infra/dev-compose.yml
+DEV_COMPOSE_CMD = docker compose --env-file .env -f $(DEV_COMPOSE)
+
+# Воркстейшн — git-копия проекта (контракт: /work/project/.git). Тестовых
+# проектов нет — пустое репо, агент сам наполняет проект в dev.
+dev-prepare:
+	rm -rf main/data/work/ws-1 main/data/work/ws-2
+	mkdir -p main/data/work/ws-1 main/data/work/ws-2
+	git -C main/data/work/ws-1 init -q
+	git -C main/data/work/ws-1 -c user.name=aga -c user.email=dev@aga commit -q --allow-empty -m init
+	git -C main/data/work/ws-2 init -q
+	git -C main/data/work/ws-2 -c user.name=aga -c user.email=dev@aga commit -q --allow-empty -m init
+
+dev-up: dev-prepare
+	$(DEV_COMPOSE_CMD) up -d --build
+
+dev-down:
+	$(DEV_COMPOSE_CMD) down
+
+dev-logs:
+	$(DEV_COMPOSE_CMD) logs -f
+
+dev-ps:
+	$(DEV_COMPOSE_CMD) ps
+
+dev-reset:
+	$(DEV_COMPOSE_CMD) down -v
+	rm -f main/data/trace.db main/data/trace.db-wal main/data/trace.db-shm
+	$(MAKE) dev-up
+
+dev-verify:
+	@curl -fsS http://localhost:8080/users >/dev/null && echo "core OK"
+	@docker exec ws-1 sh -c "test -d /work/project/.git" && echo "ws-1 OK"
+	@docker exec ws-2 sh -c "test -d /work/project/.git" && echo "ws-2 OK"
 
 k8s-up:
 	minikube start
