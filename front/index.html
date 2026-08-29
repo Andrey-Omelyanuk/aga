@@ -280,7 +280,7 @@
                         <h4>${escapeHtml(p.git_url)}</h4>
                         <div class="meta">Проект #${p.id}</div>
                         <div style="margin-top:6px">
-                            ${(p.active_roles || []).map(r => `<span class="pill blue">${escapeHtml(r)}</span>`).join('')}
+                            ${(p.agent_set && p.agent_set.agents || []).map(a => `<span class="pill blue">${escapeHtml(a.name)}</span>`).join('')}
                         </div>
                         <div style="margin-top:8px">
                             <button class="btn gray small" onclick="deleteProject(${p.id})">Удалить</button>
@@ -426,17 +426,22 @@
             } catch (e) { console.error('Персонал:', e); }
         }
 
-        // === Агенты (роли) ===
+        // === Агенты (из AgentSet-ов) ===
         async function loadAgents() {
             try {
-                const res = await api('/roles');
-                const roles = await res.json();
+                const res = await api('/agent-sets');
+                const sets = await res.json();
                 const select = document.getElementById('agentSelect');
-                roles.forEach(role => {
-                    const option = document.createElement('option');
-                    option.value = role;
-                    option.textContent = role;
-                    select.appendChild(option);
+                const seen = {};
+                sets.forEach(set => {
+                    (set.agents || []).forEach(agent => {
+                        if (seen[agent.name]) return;
+                        seen[agent.name] = true;
+                        const option = document.createElement('option');
+                        option.value = agent.name;
+                        option.textContent = agent.name;
+                        select.appendChild(option);
+                    });
                 });
             } catch (e) { console.error('Агенты:', e); }
         }
