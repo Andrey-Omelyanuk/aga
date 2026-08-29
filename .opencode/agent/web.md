@@ -9,7 +9,7 @@ mode: subagent
 Клиент ходит в REST API ядра (`/users`, `/chats`, `/chats/:id/messages`, `/messages/:id/share`)
 и опрашивает чат для ответов реактивных агентов. API_BASE — адрес ядра (`api.localhost`),
 токен — `Authorization: Bearer`.
-Не трогай `main/`, `main/roles/`, `infra/` — это уровни других специалистов.
+Не трогай `main/`, `main/config/`, `infra/` — это уровни других специалистов.
 
 Verification: страница загружается без ошибок консоли (`make run-front`);
 API-вызовы клиента соответствуют серверным роутам.

@@ -9,7 +9,7 @@ LLM-клиент, трассировка, модель чата).
 
 Паттерны уровня: Tokio-асинхронность, AppState через Axum State, ChatStore и
 TraceStore разделены (БД одна), команды чата — обычные сообщения с реакцией.
-Не трогай `front/`, `main/roles/`, `infra/` — это уровни других специалистов.
+Не трогай `front/`, `main/config/`, `infra/` — это уровни других специалистов.
 
 Verification: не завершай работу, пока зелёные `make lint` (clippy --all-targets)
 и `make test` (cargo test).
