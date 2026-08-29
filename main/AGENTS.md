@@ -8,12 +8,10 @@ LLM-клиент, SQLite-трассировка, управление проек
 ## Boundaries
 - **Делает:** обрабатывает HTTP-запросы (Axum); запускает цикл агента (LLM,
   парсинг, валидация, выполнение команд); хранит/отдаёт трассировку; управляет
-  проектами и ролями в SQLite; поднимает воркстейшны-поды через kubectl;
-  раздаёт API и REST-клиентам; включает/выключает SSO.
-- **Не делает:** не раздаёт веб-клиент (это `front/`); не определяет роли и
-  промпты агентов как библиотеку (это `main/roles/`, `main/prompts/` — рантайм
-  читает их из `main/config/roles.yaml`); не управляет Docker напрямую;
-  не предоставляет CLI.
+  проектами и наборами агентов (AgentSet) в SQLite; поднимает воркстейшны-поды
+  через kubectl; раздаёт API и REST-клиентам; включает/выключает SSO.
+- **Не делает:** не раздаёт веб-клиент (это `front/`); не управляет Docker
+  напрямую; не предоставляет CLI.
 
 ## Tech Stack
 - Rust 2021, Axum 0.7, Tokio 1, sqlx 0.7 (SQLite), reqwest 0.11, regex, serde,
@@ -26,9 +24,8 @@ main/
 ├── Cargo.toml           # пакет aga
 ├── Dockerfile           # образ ядра: kubectl + бинарь (без static/)
 ├── src/                 # модули ядра
-├── roles/               # библиотека YAML-пресетов ролей агентов
-├── prompts/             # системные промпты
-├── config/              # roles.yaml (runtime, gitignored) + config.example.yml
+├── prompts/             # общая инструкция для агентов
+├── config/              # sso-конфиг (runtime, gitignored) + config.example.yml
 └── data/                # runtime: trace.db, work/ (gitignored)
 ```
 ```
@@ -56,7 +53,9 @@ src/
 - **Сборка/запуск:** CWD для cargo-команд — `main/` (makefile делает `cd main`); пути конфига из env (`.env`) относительные оттуда.
 
 ## Non-Obvious Rules
-- **TraceStore шире трассировки:** в нём же живут `projects` и `project_roles`. ChatStore — отдельный модуль с таблицами модели чата, БД одна (тот же файл).
+- **TraceStore шире трассировки:** в нём же живут `projects`, `agent_sets` и
+  `agents` (набор агентов на проект). ChatStore — отдельный модуль с таблицами
+  модели чата, БД одна (тот же файл).
 - **Проект = git-URL:** воркстейшн-под клонирует репозиторий; `compose_path` из старых БД мигрируется в `git_url` (см. `migrate_projects_git_url`).
 - **Воркстейшн = под:** `ws-<id>` в неймспейсе кластера, команды агента — `kubectl exec`. Pod-манифест рендерит `cluster.rs` из шаблона (встроенный дефолт совпадает с `infra/k8s/workstation-pod.yaml`); под привилегированный (DinD) и без доступа к k8s API (`automountServiceAccountToken: false`).
 - **Воркстейшнами из интерфейса не управляют:** создание/удаление — только суперпользователь (админ внешний, поднимает станции через k8s); участники видят список и состояние (`GET /workstations`), но `POST`/`DELETE` им запрещены (403). Сессию открывают на готовом воркстейшне (`POST /workstations/:id/session`), один воркстейшн — одна активная сессия.
@@ -67,11 +66,21 @@ src/
 - **Agent per task / per reactive-сообщение:** Agent создаётся на каждую задачу и каждый реактивный запуск; state не хранится между вызовами.
 - **Команды из LLM:** извлекаются из markdown-блоков <code>```bash</code>. Код-блок может содержать несколько команд (построчно). Пустые строки и комментарии (`#`) игнорируются.
 - **Команды чата** (`#invite`/`#kick`/`#start`/`#end`/`#share`) — это обычные сообщения с дополнительной реакцией; разбираются в `chat::parse_command`, исполняются в server.rs.
-- **Реактивные агенты:** `@Agent.<role>` в сообщении триггерит ReactiveRunner.enqueue; очередь сериализуется per-workstation (ключ 0 = локальный хост). Ответ пишется сообщением от учётки агента + артефакт.
+- **AgentSet заменяет роли:** агентов проекта определяет прикреплённый набор
+  (`agent_sets`/`agents`/`project_agent_set`), а не глобальные роли. Набор
+  настраивается через API (`/agent-sets`), прикрепляется к проекту
+  (`/projects/:id/agent-set`); у проекта один набор (повторная привязка меняет
+  его), один набор — на многие проекты (каскад ON DELETE). Агенты набора —
+  дерево по иерархии папок проекта: у агента есть `parent_id` на родителя.
+  Конфиг агента (правила в `description`, `allowed_commands`, LLM) хранится в
+  наборе; отдельные skills/rules/commands не выделяются — всё в описании.
+- **Реактивные агенты:** `@Agent.<имя>` в сообщении триггерит ReactiveRunner;
+  конфиг запускаемого агента берётся из набора проекта чата (`agent_role_config`);
+  очередь сериализуется per-workstation (ключ 0 = локальный хост).
 - **Error handling в API:** большинство хендлеров при ошибке возвращают `500 INTERNAL_SERVER_ERROR` без деталей. Детали — в логах (tracing) и в БД (trace_entries с entry_type = "error").
 
 ## Verification
-- `make test` — `cargo test` в `main/`: unit-тесты для: `extract_commands`, `is_command_allowed`, `Config::load`, `parse_command`, `mentioned_roles`, `project_registered_by_git_url`, `migrates_compose_path_to_git_url`, `deleted_workstation_disappears_from_list`, `workstation_renders_pod_with_git_url_and_branch`, `each_workstation_gets_its_own_pod`, `workstation_pod_has_no_k8s_api_access`, `agent_commands_run_in_workstation_pod`, `workstation_executor_targets_its_pod`, `chatstore_opens_db`, JWKS-верификации (`verifies_valid_token_and_extracts_sub_and_roles`, `rejects_invalid_token`, `rejects_tampered_payload`), `resolve_user` (`participant_resolves_from_valid_token`, `invalid_token_rejected`, `anonymous_superuser_without_sso`, `admin_role_maps_to_super_user`), сессий воркстейшна (`session_binds_to_ready_workstation`, `workstation_not_ready_rejects_session`, `workstation_holds_single_open_session`, `session_closed_only_by_owner`, `participant_cannot_close_foreign_session`, `closed_session_frees_workstation`), видимости (`participant_sees_all_sessions`, `participant_sees_all_projects`, `created_project_visible_to_all_participants`), роутера (`participant_sees_all_projects_via_api`, `participant_creates_project_visible_to_others`, `participant_cannot_create_workstation`, `workstations_listed_with_state`, `personnel_listed_from_sso_but_not_editable`, `invalid_token_rejected_by_api`, `anonymous_superuser_works_without_sso`).
+- `make test` — `cargo test` в `main/`: unit-тесты для: `extract_commands`, `is_command_allowed`, `Config::load`, `parse_command`, `mentioned_roles`, `project_registered_by_git_url`, `migrates_compose_path_to_git_url`, `deleted_workstation_disappears_from_list`, `workstation_renders_pod_with_git_url_and_branch`, `each_workstation_gets_its_own_pod`, `workstation_pod_has_no_k8s_api_access`, `agent_commands_run_in_workstation_pod`, `workstation_executor_targets_its_pod`, `chatstore_opens_db`, JWKS-верификации (`verifies_valid_token_and_extracts_sub_and_roles`, `rejects_invalid_token`, `rejects_tampered_payload`), `resolve_user` (`participant_resolves_from_valid_token`, `invalid_token_rejected`, `anonymous_superuser_without_sso`, `admin_role_maps_to_super_user`), сессий воркстейшна (`session_binds_to_ready_workstation`, `workstation_not_ready_rejects_session`, `workstation_holds_single_open_session`, `session_closed_only_by_owner`, `participant_cannot_close_foreign_session`, `closed_session_frees_workstation`), видимости (`participant_sees_all_sessions`, `participant_sees_all_projects`, `created_project_visible_to_all_participants`), AgentSet (`one_agent_set_attaches_to_many_projects`, `each_agent_keeps_own_rules_commands_and_llm`, `agent_set_agents_form_tree_by_parent`, `replacing_agent_set_changes_project_agents`, `deleted_agent_set_disappears_from_projects`, `mentioned_agent_resolves_own_rules_commands_and_llm`), роутера (`participant_sees_all_projects_via_api`, `participant_creates_project_visible_to_others`, `participant_cannot_create_workstation`, `workstations_listed_with_state`, `personnel_listed_from_sso_but_not_editable`, `invalid_token_rejected_by_api`, `anonymous_superuser_works_without_sso`, `created_agent_set_listed_via_api`, `attached_agent_set_appears_on_project`, `replacing_agent_set_changes_project_agents_via_api`, `role_endpoints_removed`).
 - `make lint` (cargo clippy --all-targets) — статический анализ без предупреждений.
 - **Составные тесты:** `chatstore_opens_db` проверяет открытие TraceStore+ChatStore на временной БД; роутер-тесты гоняют запросы через `tower::ServiceExt::oneshot`.
 - **Тесты веб-клиента** (`web_client_*` из старого `src/server.rs`) вынесены в уровень `front/` — ядро UI не раздаёт.
