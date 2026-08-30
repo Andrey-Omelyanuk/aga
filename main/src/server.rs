@@ -134,6 +134,7 @@ pub fn create_router(state: AppState) -> Router {
             axum::routing::delete(delete_workstation),
         )
         .route("/workstations/:id/switch", post(switch_workstation))
+        .route("/workstations/:id/release", post(release_workstation))
         .route("/workstations/:id/down", post(mark_workstation_down))
         // === Просмотр содержимого проекта в воркстейшне ===
         .route("/workstations/:id/tree", get(workstation_tree))
@@ -1021,9 +1022,45 @@ async fn switch_workstation(
     };
     let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
     let branch = Cluster::branch_name(id);
+    // Смена проекта уже зафиксирована в БД (источник истины для списка).
+    // Перезапись /work/project — лучшая попытка: в dev-стенде git_url может
+    // быть плейсхолдером (воркстейшн работает с примонтированной копией),
+    // поэтому сбой exec не откатывает назначение, а только логируется.
     if let Err(e) = crate::ws_ops::replace_project(&executor, &git_url, &branch).await {
-        tracing::error!("failed to switch project on ws-{id}: {e}");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        tracing::warn!("failed to switch project on ws-{id}: {e}");
+    }
+    Ok(Json(ws))
+}
+
+/// Отпустить воркстейшн — только суперпользователь. Свободная станция (без
+/// открытой сессии) сбрасывается в «не привязан к проекту» (project_id = 0),
+/// файлы проекта очищаются; сам ws (под/сервис) не пересоздаётся.
+async fn release_workstation(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::chat::Workstation>, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    if !state
+        .chat_store
+        .is_super_user(user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ws = state
+        .chat_store
+        .release_workstation(id)
+        .await
+        .map_err(|e| match e {
+            SessionError::NotFound => StatusCode::NOT_FOUND,
+            SessionError::WorkstationBusy => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
+    let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
+    if let Err(e) = crate::ws_ops::release_workspace(&executor).await {
+        tracing::warn!("failed to clear workspace on released ws-{id}: {e}");
     }
     Ok(Json(ws))
 }
@@ -1445,6 +1482,22 @@ mod tests {
             &headers,
             state.clone(),
             serde_json::json!({"project_id": 2}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn releasing_workstation_forbidden_for_participant() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        // Отпускание воркстейшна — процедура админа.
+        let (status, _) = post_json(
+            "/workstations/1/release",
+            &headers,
+            state.clone(),
+            serde_json::json!({}),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);

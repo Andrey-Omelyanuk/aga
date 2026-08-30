@@ -10,4 +10,8 @@ export class Workstation extends Model {
   get isReady(): boolean {
     return this.state === 'ready';
   }
+
+  get isFree(): boolean {
+    return this.project_id === 0;
+  }
 }

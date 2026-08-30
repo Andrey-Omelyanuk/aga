@@ -23,6 +23,7 @@ export type TabName =
   | 'chat';
 
 const POLL_INTERVAL_MS = 2000;
+const ACTIVE_PROJECT_KEY = 'aga_active_project';
 
 export class AppStore {
   projects: Project[] = [];
@@ -34,16 +35,43 @@ export class AppStore {
   currentChatId: number | null = null;
   currentChat: Chat | null = null;
   activeTab: TabName = 'projects';
+  activeProjectId: number | null = null;
   showLogin = false;
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     makeAutoObservable(this);
+    this.activeProjectId = this.readActiveProjectId();
   }
 
   get loginUrl(): string {
     return `${API_BASE}/auth/login`;
+  }
+
+  get activeProject(): Project | null {
+    return this.projects.find((p) => p.id === this.activeProjectId) ?? null;
+  }
+
+  projectName(id: number): string {
+    const p = this.projects.find((x) => x.id === id);
+    return p ? p.git_url : `Проект #${id}`;
+  }
+
+  setActiveProject(id: number | null): void {
+    this.activeProjectId = id;
+    if (id === null) {
+      localStorage.removeItem(ACTIVE_PROJECT_KEY);
+    } else {
+      localStorage.setItem(ACTIVE_PROJECT_KEY, String(id));
+    }
+  }
+
+  private readActiveProjectId(): number | null {
+    const raw = localStorage.getItem(ACTIVE_PROJECT_KEY);
+    if (raw === null) return null;
+    const id = Number(raw);
+    return Number.isFinite(id) ? id : null;
   }
 
   setActiveTab(tab: TabName): void {
@@ -98,7 +126,13 @@ export class AppStore {
 
   async loadProjects(): Promise<void> {
     const items = await projectRepo.load(Project.getQuery({}));
-    runInAction(() => (this.projects = items));
+    runInAction(() => {
+      this.projects = items;
+      const stillExists = items.some((p) => p.id === this.activeProjectId);
+      if (!stillExists) {
+        this.setActiveProject(items.length > 0 ? items[0].id : null);
+      }
+    });
   }
 
   async createProject(gitUrl: string): Promise<void> {
@@ -146,11 +180,32 @@ export class AppStore {
 
   async openWorkstationSession(workstationId: number, title: string): Promise<void> {
     await workstationRepo.action(
-      new Workstation({ id: workstationId }),
+      this.wsById(workstationId),
       'session',
       { title: title || 'Новая сессия' },
     );
     await this.loadChats();
+  }
+
+  async releaseWorkstation(id: number): Promise<void> {
+    await workstationRepo.action(this.wsById(id), 'release', {});
+    await this.loadWorkstations();
+  }
+
+  async occupyWorkstation(id: number): Promise<void> {
+    if (this.activeProjectId === null) return;
+    await workstationRepo.action(this.wsById(id), 'switch', {
+      project_id: this.activeProjectId,
+    });
+    await this.loadWorkstations();
+  }
+
+  /// Экземпляр воркстейшна из кэша: конструировать `new Workstation({ id })`
+  /// нельзя — id уже в кэше, и cache.inject упадёт «already exist».
+  private wsById(id: number): Workstation {
+    const ws = this.workstations.find((w) => w.id === id);
+    if (ws) return ws;
+    throw new Error(`воркстейшн #${id} не загружен`);
   }
 
   async createChat(title = 'Новая сессия'): Promise<Chat> {
@@ -161,7 +216,9 @@ export class AppStore {
   }
 
   async closeChat(id: number): Promise<void> {
-    await chatRepo.action(new Chat({ id }), 'close', {});
+    const chat = this.chats.find((c) => c.id === id);
+    if (!chat) throw new Error(`чат #${id} не загружен`);
+    await chatRepo.action(chat, 'close', {});
     await this.loadChats();
     if (this.currentChatId === id) this.selectChat(null);
   }
@@ -189,11 +246,9 @@ export class AppStore {
 
   async sendMessage(body: string): Promise<void> {
     if (!this.currentChatId) return;
-    const data = await chatRepo.action(
-      new Chat({ id: this.currentChatId }),
-      'messages',
-      { body },
-    );
+    const chat = this.currentChat ?? this.chats.find((c) => c.id === this.currentChatId);
+    if (!chat) throw new Error('чат не загружен');
+    const data = await chatRepo.action(chat, 'messages', { body });
     if (this.currentChat) {
       this.currentChat.messages.push(data.message);
     }

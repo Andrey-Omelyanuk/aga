@@ -858,6 +858,27 @@ impl ChatStore {
             .ok_or(SessionError::NotFound)
     }
 
+    /// Отпустить воркстейшн: станция становится свободной (не привязана ни к
+    /// одному проекту). Свобода кодируется `project_id = 0` — сантинел, id
+    /// проектов начинаются с 1 (AUTOINCREMENT), внешних ключей на него нет.
+    /// Только на свободной станции (без открытой сессии) — иначе
+    /// `WorkstationBusy`.
+    pub async fn release_workstation(&self, ws_id: i64) -> Result<Workstation, SessionError> {
+        if self.get_workstation(ws_id).await?.is_none() {
+            return Err(SessionError::NotFound);
+        }
+        if self.active_session_id(ws_id).await?.is_some() {
+            return Err(SessionError::WorkstationBusy);
+        }
+        sqlx::query("UPDATE workstations SET project_id = 0 WHERE id = ?")
+            .bind(ws_id)
+            .execute(&self.pool)
+            .await?;
+        self.get_workstation(ws_id)
+            .await?
+            .ok_or(SessionError::NotFound)
+    }
+
     /// Прерванная (незакрытая) сессия на упавшем воркстейшне того же проекта —
     /// кандидат на восстановление. Берём самую свежую по `updated_at`.
     pub async fn interrupted_session_for_project(
@@ -1448,6 +1469,58 @@ mod tests {
                 .project_id,
             7
         );
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn released_workstation_becomes_free() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_release_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws = store.create_workstation(1, "w1", None).await.unwrap();
+        let released = store.release_workstation(ws.id).await.unwrap();
+        // Свобода — project_id = 0 (сантинел; id проектов с 1).
+        assert_eq!(released.project_id, 0);
+        assert_eq!(
+            store
+                .get_workstation(ws.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .project_id,
+            0
+        );
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn releasing_workstation_rejected_while_session_open() {
+        let path = std::env::temp_dir().join(format!(
+            "aga_chat_releasebusy_test_{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let ws_id = ready_ws(&store).await;
+        let user = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        store
+            .open_workstation_session(ws_id, Some("s"), user)
+            .await
+            .unwrap();
+        let err = store.release_workstation(ws_id).await.unwrap_err();
+        assert!(matches!(err, SessionError::WorkstationBusy));
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);

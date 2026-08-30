@@ -2,6 +2,7 @@ import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
 import { Link } from '@/components/ui/link';
 import { Button } from '@/components/ui/button';
+import { Select } from '@/components/ui/select';
 import { Tabs, type Tab } from '@/components/ui/tabs';
 import { useStore } from '@/store-hooks';
 import type { TabName } from '@/models/store';
@@ -36,6 +37,27 @@ export const App = observer(function App() {
     <div className="flex h-screen flex-col">
       <header className="flex items-center gap-4 border-b border-slate-200 bg-white px-5 py-2.5">
         <span className="font-semibold text-slate-800">aga</span>
+        <label className="flex items-center gap-2 text-sm text-slate-500">
+          Проект
+          <Select
+            className="h-8"
+            value={store.activeProjectId === null ? '' : String(store.activeProjectId)}
+            onChange={(e) => store.setActiveProject(e.target.value ? Number(e.target.value) : null)}
+          >
+            {store.projects.length === 0 ? (
+              <option value="">Проектов нет</option>
+            ) : (
+              <>
+                <option value="">— все проекты —</option>
+                {store.projects.map((p) => (
+                  <option key={p.id} value={String(p.id)}>
+                    {p.git_url}
+                  </option>
+                ))}
+              </>
+            )}
+          </Select>
+        </label>
         <Tabs tabs={TABS} value={store.activeTab} onChange={(v) => store.setActiveTab(v)} />
         <span className="flex-1" />
         {store.showLogin && (
