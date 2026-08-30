@@ -1,4 +1,14 @@
 import { makeAutoObservable, runInAction } from 'mobx';
+import {
+  AND,
+  ARRAY,
+  EQ,
+  IN,
+  NUMBER,
+  STRING,
+  Variable,
+  type QueryCacheSync,
+} from 'mobx-model-ui';
 import { API_BASE, TOKEN_KEY } from '../api/http';
 import {
   chatRepo,
@@ -37,11 +47,32 @@ export class AppStore {
   activeProjectId: number | null = null;
   showLogin = false;
 
+  /// Наблюдаемая переменная фильтра воркстейшнов: свободные (project_id = 0)
+  /// + занятые текущим проектом. Меняется вместе с activeProjectId.
+  private readonly projectIdsFilter: Variable<number[]> = new Variable(
+    ARRAY(NUMBER()),
+    { value: [0] },
+  );
+
+  /// Воркстейшны, на которых можно открыть сессию (только готовые и свободные
+  /// или занятые текущим проектом) — QueryCacheSync с mobx-model-ui фильтром:
+  /// следит за кэшем Workstation и реактивно держит items в нужном состоянии.
+  private readonly sessionWorkstationsQuery: QueryCacheSync<Workstation> =
+    workstationRepo.getQueryCacheSync({
+      filter: AND(
+        EQ('state', new Variable(STRING(), { value: 'ready' })),
+        IN('project_id', this.projectIdsFilter),
+      ),
+    });
+
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     makeAutoObservable(this);
-    this.activeProjectId = this.readActiveProjectId();
+    runInAction(() => {
+      this.activeProjectId = this.readActiveProjectId();
+      this.projectIdsFilter.value = this.projectIdsFor(this.activeProjectId);
+    });
   }
 
   get loginUrl(): string {
@@ -55,12 +86,11 @@ export class AppStore {
   /// Воркстейшны, на которых можно открыть сессию: только готовые и при этом
   /// свободные или занятые текущим проектом (глобальный фильтр).
   get sessionWorkstations(): Workstation[] {
-    return this.workstations.filter(
-      (ws) =>
-        ws.isReady &&
-        (ws.isFree ||
-          (this.activeProjectId !== null && ws.project_id === this.activeProjectId)),
-    );
+    return this.sessionWorkstationsQuery.items;
+  }
+
+  private projectIdsFor(id: number | null): number[] {
+    return id === null ? [0] : [0, id];
   }
 
   projectName(id: number): string {
@@ -70,6 +100,7 @@ export class AppStore {
 
   setActiveProject(id: number | null): void {
     this.activeProjectId = id;
+    this.projectIdsFilter.value = this.projectIdsFor(id);
     if (id === null) {
       localStorage.removeItem(ACTIVE_PROJECT_KEY);
     } else {

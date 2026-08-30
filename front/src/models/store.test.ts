@@ -1,11 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { runInAction } from 'mobx';
 import { AppStore } from './store';
 import { Workstation } from './workstation';
+import { workstationRepo } from './registry';
 
 function ws(id: number, state: string, project_id: number): Workstation {
   return new Workstation({ id, name: `ws-${id}`, state, project_id });
 }
+
+// sessionWorkstations идёт через QueryCacheSync (кэш mobx-model-ui): чистим
+// кэш между тестами, чтобы фильтр не подхватывал модели из предыдущего.
+beforeEach(() => {
+  workstationRepo.modelDescriptor.cache.clear();
+});
 
 describe('sessionWorkstations', () => {
   it('offers only ready workstations that are free or bound to the current project', () => {
