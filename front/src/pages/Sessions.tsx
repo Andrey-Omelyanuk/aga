@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
@@ -10,6 +11,7 @@ import { useStore } from '@/store-hooks';
 
 export const Sessions = observer(function Sessions() {
   const store = useStore();
+  const navigate = useNavigate();
   const [wsId, setWsId] = useState('');
   const [title, setTitle] = useState('');
 
@@ -60,10 +62,7 @@ export const Sessions = observer(function Sessions() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => {
-                store.setActiveTab('chat');
-                void store.selectChat(chat.id);
-              }}
+              onClick={() => navigate(`/chat/${chat.id}`)}
             >
               Открыть в чате
             </Button>

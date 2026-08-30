@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/tabs';
@@ -9,8 +10,16 @@ import { formatTime } from '@/lib/format';
 
 export const Chat = observer(function Chat() {
   const s = store;
+  const navigate = useNavigate();
+  const { id } = useParams();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState('');
+
+  const chatId = id !== undefined && /^\d+$/.test(id) ? Number(id) : null;
+
+  useEffect(() => {
+    void s.selectChat(chatId);
+  }, [chatId]);
 
   const send = async () => {
     const body = draft.trim();
@@ -21,7 +30,7 @@ export const Chat = observer(function Chat() {
 
   const createNew = async () => {
     const chat = await s.createChat();
-    await s.selectChat(chat.id);
+    navigate(`/chat/${chat.id}`);
   };
 
   useEffect(() => {
@@ -53,7 +62,7 @@ export const Chat = observer(function Chat() {
               className={`mb-1 w-full cursor-pointer rounded-md p-2.5 text-left ${
                 s.currentChatId === chat.id ? 'bg-blue-100' : 'hover:bg-slate-100'
               }`}
-              onClick={() => s.selectChat(chat.id)}
+              onClick={() => navigate(`/chat/${chat.id}`)}
             >
               <div className="text-[13px] text-slate-800">
                 {chat.title || `Сессия #${chat.id}`}

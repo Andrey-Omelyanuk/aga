@@ -1,33 +1,39 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
+import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { Link } from '@/components/ui/link';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
-import { Tabs, type Tab } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
 import { useStore } from '@/store-hooks';
 import type { TabName } from '@/models/store';
-import { Projects } from '@/pages/Projects';
-import { Workstations } from '@/pages/Workstations';
-import { Sessions } from '@/pages/Sessions';
-import { Personnel } from '@/pages/Personnel';
-import { Files } from '@/pages/Files';
-import { Chat } from '@/pages/Chat';
 
-const TABS: Array<Tab<TabName>> = [
-  { value: 'projects', label: 'Проекты' },
-  { value: 'workstations', label: 'Воркстейшны' },
-  { value: 'sessions', label: 'Сессии' },
-  { value: 'personnel', label: 'Персонал' },
-  { value: 'files', label: 'Файлы' },
-  { value: 'chat', label: 'Чат' },
+const TABS: Array<{ tab: TabName; label: string; to: string }> = [
+  { tab: 'projects', label: 'Проекты', to: '/projects' },
+  { tab: 'workstations', label: 'Воркстейшны', to: '/workstations' },
+  { tab: 'sessions', label: 'Сессии', to: '/sessions' },
+  { tab: 'personnel', label: 'Персонал', to: '/personnel' },
+  { tab: 'files', label: 'Файлы', to: '/files' },
+  { tab: 'chat', label: 'Чат', to: '/chat' },
 ];
+
+function tabFromPath(path: string): TabName {
+  const tab = path.split('/')[1] as TabName | undefined;
+  return TABS.some((t) => t.tab === tab) ? (tab as TabName) : 'projects';
+}
 
 export const App = observer(function App() {
   const store = useStore();
+  const location = useLocation();
   const [ready, setReady] = useState(false);
   useEffect(() => {
     void store.init().then(() => setReady(true));
   }, [store]);
+
+  const tab = tabFromPath(location.pathname);
+  useEffect(() => {
+    void store.ensureLoaded(tab);
+  }, [tab]);
 
   if (!ready) {
     return <div className="h-screen p-10 text-slate-400">Загрузка…</div>;
@@ -58,7 +64,24 @@ export const App = observer(function App() {
             )}
           </Select>
         </label>
-        <Tabs tabs={TABS} value={store.activeTab} onChange={(v) => store.setActiveTab(v)} />
+        <nav className="flex gap-1">
+          {TABS.map(({ tab: t, label, to }) => (
+            <NavLink
+              key={t}
+              to={to}
+              className={({ isActive }) =>
+                cn(
+                  'rounded-md px-4 py-2 text-sm cursor-pointer',
+                  isActive
+                    ? 'bg-blue-100 font-semibold text-blue-700'
+                    : 'text-slate-500 hover:bg-slate-100',
+                )
+              }
+            >
+              {label}
+            </NavLink>
+          ))}
+        </nav>
         <span className="flex-1" />
         {store.showLogin && (
           <Link href={store.loginUrl}>
@@ -67,12 +90,7 @@ export const App = observer(function App() {
         )}
       </header>
       <main className="flex-1 overflow-auto p-5">
-        {store.activeTab === 'projects' && <Projects />}
-        {store.activeTab === 'workstations' && <Workstations />}
-        {store.activeTab === 'sessions' && <Sessions />}
-        {store.activeTab === 'personnel' && <Personnel />}
-        {store.activeTab === 'files' && <Files />}
-        {store.activeTab === 'chat' && <Chat />}
+        <Outlet />
       </main>
     </div>
   );

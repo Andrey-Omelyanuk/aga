@@ -34,7 +34,6 @@ export class AppStore {
 
   currentChatId: number | null = null;
   currentChat: Chat | null = null;
-  activeTab: TabName = 'projects';
   activeProjectId: number | null = null;
   showLogin = false;
 
@@ -74,11 +73,6 @@ export class AppStore {
     return Number.isFinite(id) ? id : null;
   }
 
-  setActiveTab(tab: TabName): void {
-    this.activeTab = tab;
-    void this.ensureLoaded(tab);
-  }
-
   async init(): Promise<void> {
     this.readTokenFromHash();
     http.setOnUnauthorized(() => runInAction(() => (this.showLogin = true)));
@@ -101,7 +95,7 @@ export class AppStore {
     if (localStorage.getItem(TOKEN_KEY)) this.showLogin = false;
   }
 
-  private async ensureLoaded(tab: TabName): Promise<void> {
+  async ensureLoaded(tab: TabName): Promise<void> {
     switch (tab) {
       case 'projects':
         await this.loadProjects();
