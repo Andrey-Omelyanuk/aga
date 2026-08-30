@@ -34,7 +34,8 @@ human-in-the-loop, модель чата, SSO) и веб-клиент (`front/` 
 ## Tech Stack
 - Ядро: Rust 2021, Tokio, Axum 0.7, reqwest 0.11 (rustls), sqlx 0.7 (SQLite, WAL),
   serde, regex, tracing, thiserror, base64.
-- Фронт: один `index.html` (vanilla JS), раздаётся nginx.
+- Фронт: React SPA (Vite, mobx-model-ui, Tailwind, shadcn/ui, Storybook),
+  собирается в `dist/`, раздаётся nginx.
 - Инфра: Kubernetes (minikube), Keycloak, Docker.
 
 ## Architecture
@@ -49,9 +50,10 @@ aga/
 │   ├── data/           # runtime-данные (trace.db, work/) — в .gitignore
 │   ├── Cargo.toml
 │   └── Dockerfile      # образ ядра (kubectl + docker CLI + бинарь)
-├── front/              # веб-клиент — SPA-сервис (см. front/AGENTS.md)
-│   ├── index.html
-│   └── Dockerfile      # образ nginx
+├── front/              # веб-клиент — React SPA-сервис (см. front/AGENTS.md)
+│   ├── src/            # models / api / components / pages / styles
+│   ├── stories/        # Storybook
+│   └── Dockerfile      # образ nginx (раздаёт dist/)
 ├── infra/              # .env.example, dev-compose (ядро + воркстейшны), k8s-стенд, AGENTS.md
 └── stories/            # истории разработки
 ```
@@ -72,7 +74,7 @@ aga/
 - `make init` — создаёт `.env` (из `infra/.env.example`) и `main/config/roles.yaml`
   (из `main/config.example.yml`).
 - Локальная разработка: `make build`, `make run` (ядро, cargo в `main/`),
-  `make run-front` (раздача `front/index.html`), `make test`, `make lint`,
+  `make run-front` (vite dev, `front/`), `make test`, `make lint`,
   `make fmt`.
 - Dev-стенд без кластера (ядро + 2 воркстейшна в docker compose):
   `make dev-prepare`, `make dev-up`, `make dev-down`, `make dev-logs`,
@@ -108,7 +110,8 @@ aga/
 ## Verification
 - Сборка и линт ядра: `make build`, `make lint` — без ошибок.
 - Тесты ядра: `make test` (cargo test в `main/`).
-- Фронт: `make run-front` — страница грузится без ошибок консоли.
+- Фронт: `make run-front` — страница грузится без ошибок консоли; Storybook
+  и unit-тесты строятся без ошибок.
 - Интеграционный тест стенда: `make k8s-verify` — ядро, фронт и Keycloak
   поднимаются в кластере (minikube), проверяются воркстейшны-поды, SSO и
   персистентность; локально `make run` отвечает на `/users`, `/chats/:id/messages`.

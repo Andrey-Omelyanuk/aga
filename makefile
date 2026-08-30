@@ -22,6 +22,7 @@ K8S_FRONT = infra/k8s/front
 CARGO_IN_MAIN = cd main && $(CARGO)
 
 .PHONY: help init build release test lint fmt fmt-fix run run-front \
+        front-test storybook storybook-build \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
         dev-prepare dev-up dev-down dev-logs dev-ps dev-reset dev-verify
@@ -35,7 +36,9 @@ help:
 	@echo "fmt         - Check formatting (cargo fmt --check)"
 	@echo "fmt-fix     - Apply formatting"
 	@echo "run         - Run core locally (cargo run in main/)"
-	@echo "run-front   - Serve front/index.html locally (python3 -m http.server)"
+	@echo "run-front   - Serve front locally (vite dev, port 8081)"
+	@echo "front-test  - Run frontend unit tests (vitest)"
+	@echo "storybook   - Run Storybook dev server"
 	@echo "dev-prepare - Create empty git repos for ws-1/ws-2 (main/data/work/)"
 	@echo "dev-up      - Start dev stand (docker compose: core + ws-1 + ws-2)"
 	@echo "dev-down    - Stop dev stand (docker compose down)"
@@ -70,6 +73,15 @@ release:
 test:
 	$(CARGO_IN_MAIN) test
 
+front-test:
+	cd front && npm test
+
+storybook:
+	cd front && npm run storybook
+
+storybook-build:
+	cd front && npm run build-storybook
+
 lint:
 	$(CARGO_IN_MAIN) clippy --all-targets -- -D warnings
 
@@ -82,9 +94,9 @@ fmt-fix:
 run: init
 	$(CARGO_IN_MAIN) run
 
-# Локальная раздача фронта без стенда (API_BASE должен указывать на ядро).
+# Локальный дев-сервер фронта без стенда (API_BASE — адрес ядра).
 run-front:
-	python3 -m http.server 8081 --directory front
+	cd front && npm run dev
 
 # Dev-стенд (docker compose): ядро + 2 воркстейшна, без кластера.
 # Воркстейшны поднимаются заранее (ws-1/ws-2) и переиспользуются ядром в
