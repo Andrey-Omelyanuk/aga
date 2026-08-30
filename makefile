@@ -138,6 +138,7 @@ dev-verify:
 	@curl -fsS http://localhost:8080/users >/dev/null && echo "core OK"
 	@docker exec ws-1 sh -c "test -d /work/project/.git" && echo "ws-1 OK"
 	@docker exec ws-2 sh -c "test -d /work/project/.git" && echo "ws-2 OK"
+	@curl -fsS http://localhost:$${AGA_FRONT_PORT:-8081}/ >/dev/null && echo "front OK"
 
 k8s-up:
 	minikube start

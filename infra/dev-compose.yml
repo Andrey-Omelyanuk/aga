@@ -1,4 +1,4 @@
-# Dev-стенд (docker compose): ядро + 2 воркстейшна, без кластера.
+# Dev-стенд (docker compose): ядро + веб-клиент + 2 воркстейшна, без кластера.
 # Единственный способ поднять *стенд* — k8s (make k8s-*); этот compose —
 # только для локальной разработки и отладки многопоточности воркстейшнов.
 #
@@ -43,6 +43,19 @@ services:
       - LLM_MODEL=${LLM_MODEL:-qwen3.5:9b}
       - AGA_FRONT_URL=${AGA_FRONT_URL:-http://localhost:8081}
     restart: "no"
+
+  front:
+      image: aga-front:dev
+      build:
+        context: ../front
+        dockerfile: Dockerfile
+      container_name: aga-front
+      # Фронт — отдельный сервис (nginx, dist/). Браузер открывает его на
+      # host-порту 8081 и ходит на ядро напрямую (localhost:8080), как при
+      # локальном make run-front.
+      ports:
+        - "${AGA_FRONT_PORT:-8081}:80"
+      restart: "no"
 
   ws-1:
     image: aga-workstation:dev

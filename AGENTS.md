@@ -54,7 +54,7 @@ aga/
 │   ├── src/            # models / api / components / pages / styles
 │   ├── stories/        # Storybook
 │   └── Dockerfile      # образ nginx (раздаёт dist/)
-├── infra/              # .env.example, dev-compose (ядро + воркстейшны), k8s-стенд, AGENTS.md
+├── infra/              # .env.example, dev-compose (ядро + фронт + воркстейшны), k8s-стенд, AGENTS.md
 └── stories/            # истории разработки
 ```
 
@@ -76,12 +76,12 @@ aga/
 - Локальная разработка: `make build`, `make run` (ядро, cargo в `main/`),
   `make run-front` (vite dev, `front/`), `make test`, `make lint`,
   `make fmt`.
-- Dev-стенд без кластера (ядро + 2 воркстейшна в docker compose):
+- Dev-стенд без кластера (ядро + веб-клиент + 2 воркстейшна в docker compose):
   `make dev-prepare`, `make dev-up`, `make dev-down`, `make dev-logs`,
   `make dev-ps`, `make dev-reset`, `make dev-verify`. Воркстейшны — контейнеры
   `ws-1`/`ws-2` с пустыми git-репо (проект агент наполняет сам); ядро в
-  docker-режиме (`AGA_WS_BACKEND=docker`) переиспользует их. Фронт —
-  `make run-front`.
+  docker-режиме (`AGA_WS_BACKEND=docker`) переиспользует их; фронт — сервис
+  `front` (nginx, `:8081`).
 - Тестовый стенд — в k8s (minikube): `make k8s-up`, `make k8s-build`, `make k8s-load`,
   `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`; ручной
   доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси

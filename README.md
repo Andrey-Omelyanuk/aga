@@ -65,12 +65,11 @@
 make run
 ```
 
-Dev-стенд без кластера (ядро + 2 воркстейшна в docker compose) — для отладки
-реактивных агентов и многопоточности воркстейшнов:
+Dev-стенд без кластера (ядро + веб-клиент + 2 воркстейшна в docker compose) — для
+отладки реактивных агентов и многопоточности воркстейшнов:
 ```bash
-make dev-up      # собрать и поднять ядро + ws-1 + ws-2
-make dev-verify  # ядро отвечает, ws-1/ws-2 ready
-make run-front   # веб-клиент на localhost:8081 (API_BASE уже localhost:8080)
+make dev-up      # собрать и поднять ядро + front + ws-1 + ws-2
+make dev-verify  # ядро отвечает, ws-1/ws-2 ready, фронт на :8081
 ```
 Воркстейшны — контейнеры `ws-1`/`ws-2` с пустыми git-репо (`make dev-prepare`),
 проект агент наполняет сам; ядро в docker-режиме переиспользует их. Остановка —
@@ -147,7 +146,7 @@ aga/
 │   ├── index.html
 │   └── Dockerfile          # образ nginx
 ├── infra/
-│   ├── dev-compose.yml      # dev-стенд (ядро + ws-1 + ws-2, make dev-*)
+│   ├── dev-compose.yml      # dev-стенд (ядро + front + ws-1 + ws-2, make dev-*)
 │   └── k8s/                 # стенд (ядро + фронт + Keycloak) и воркстейшны
 └── data/                   # runtime (в main/data/) — создаётся при запуске
 ```

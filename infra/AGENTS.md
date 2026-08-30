@@ -7,7 +7,8 @@
 ## Boundaries
 - **Делает:** docker-образ ядра (`main/Dockerfile`, включая kubectl и docker CLI),
   docker-образ веб-клиента (`front/Dockerfile`, nginx), параметризация через `.env`,
-  dev-стенд без кластера (`dev-compose.yml`: ядро + ws-1/ws-2), манифесты стенда
+  dev-стенд без кластера (`dev-compose.yml`: ядро + веб-клиент + ws-1/ws-2),
+  манифесты стенда
   (`k8s/core/`, `k8s/front/`), воркстейшны как поды Kubernetes (`k8s/`).
 - **Не делает:** не содержит логики приложения (это `main/src/` и `front/`),
   не управляет наборами агентов (AgentSet — это `main/src/` и API).
@@ -16,9 +17,10 @@
 - `main/Dockerfile` — мультистейдж-сборка бинарника ядра; в финальном образе
   `kubectl` (стенд — кластер), docker CLI (dev — контейнеры воркстейшнов) и бинарь.
   Статику ядро не раздаёт.
-- `front/Dockerfile` — nginx, раздаёт `front/index.html` (отдельный сервис).
+- `front/Dockerfile` — nginx, раздаёт `front/dist` (отдельный сервис).
 - `.env.example` — шаблон, копируется в корневой `.env` через `make init`.
-- `dev-compose.yml` — dev-стенд: ядро (docker.sock, `AGA_WS_BACKEND=docker`) +
+- `dev-compose.yml` — dev-стенд: ядро (docker.sock, `AGA_WS_BACKEND=docker`),
+  веб-клиент (`front`, nginx на host-порту `${AGA_FRONT_PORT:-8081}:80`) +
   2 воркстейшна (`ws-1`, `ws-2`, privileged, пустые git-репо в `main/data/work/`).
   Управление — `make dev-*`.
 - `k8s/core/` — стенд ядра: манифесты ядра, Keycloak, RBAC, PVC, сервисы, ingress;
@@ -28,7 +30,7 @@
 
 ## Non-Obvious Rules
 - Рутовый `makefile` — единственный интерфейс: `make run` (локальный dev,
-  cargo run в `main/`), `make run-front` (раздача `front/`), `make dev-*`
+  cargo run в `main/`), `make run-front` (vite dev, `front/`), `make dev-*`
   (dev-стенд в compose), `make k8s-*` (стенд в кластере).
 - Dev-стенд — опциональный, только для разработки; стенд поднимается в k8s.
   Compose-команды идут с `--env-file .env` (LLM_API_URL из корневого `.env`).
@@ -41,7 +43,8 @@
 
 ## Verification
 - `make init` — создаёт `.env` и `main/config/roles.yaml` из примеров.
-- `make dev-up` + `make dev-verify` — dev-стенд поднят, ядро отвечает, ws-1/ws-2 ready.
+- `make dev-up` + `make dev-verify` — dev-стенд поднят, ядро отвечает, ws-1/ws-2 ready,
+  фронт отвечает на `${AGA_FRONT_PORT:-8081}`.
 - `make k8s-deploy` + `make k8s-wait` — стенд поднят, API отвечает.
 - `make k8s-verify` — интеграционная проверка стенда в локальном кластере.
 - Критерий: ядро отвечает на HTTP, фронт раздаёт SPA, воркстейшн поднимается
