@@ -20,7 +20,9 @@
 - `front/Dockerfile` — nginx, раздаёт `front/dist` (отдельный сервис).
 - `.env.example` — шаблон, копируется в корневой `.env` через `make init`.
 - `dev-compose.yml` — dev-стенд: ядро (docker.sock, `AGA_WS_BACKEND=docker`),
-  веб-клиент (`front`, nginx на host-порту `${AGA_FRONT_PORT:-8081}:80`),
+  веб-клиент (`front`, vite dev-server с HMR, образ `node:22`, bind-mount
+  `../front`, host-порт `${AGA_FRONT_PORT:-8081}:80`; прод-сборка nginx из
+  `dist/` — отдельно, `make build` + k8s/front),
   nginx-прокси `*.localhost` (`proxy`, `dev-proxy/nginx.conf`, host-порт
   `${AGA_PROXY_PORT:-80}`) + 2 воркстейшна (`ws-1`, `ws-2`, privileged, пустые
   git-репо в `main/data/work/`). Прокси маршрутизирует как ingress в k8s:

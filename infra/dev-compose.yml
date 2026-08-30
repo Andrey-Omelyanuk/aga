@@ -45,14 +45,18 @@ services:
     restart: "no"
 
   front:
-      image: aga-front:dev
-      build:
-        context: ../front
-        dockerfile: Dockerfile
+      # Веб-клиент в dev — vite dev-server с HMR: исходники монтируются из
+      # ../front (node_modules хоста, образ node:22 — glibc, esbuild работает).
+      # Правки подхватываются без пересборки образа; прод-сборка (nginx, dist/)
+      # остаётся отдельной: make build + k8s/front.
+      image: node:22
       container_name: aga-front
-      # Фронт — отдельный сервис (nginx, dist/). Браузер открывает его на
-      # host-порту 8081 и ходит на ядро напрямую (localhost:8080), как при
-      # локальном make run-front.
+      working_dir: /app
+      command: npm run dev -- --host 0.0.0.0 --port 80 --strictPort
+      volumes:
+        - ../front:/app
+      # Браузер открывает его на host-порту 8081 и ходит на ядро напрямую
+      # (localhost:8080), как при локальном make run-front; прокси ходит на front:80.
       ports:
         - "${AGA_FRONT_PORT:-8081}:80"
       restart: "no"
