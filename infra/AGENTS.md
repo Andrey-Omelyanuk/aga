@@ -20,9 +20,11 @@
 - `front/Dockerfile` — nginx, раздаёт `front/dist` (отдельный сервис).
 - `.env.example` — шаблон, копируется в корневой `.env` через `make init`.
 - `dev-compose.yml` — dev-стенд: ядро (docker.sock, `AGA_WS_BACKEND=docker`),
-  веб-клиент (`front`, nginx на host-порту `${AGA_FRONT_PORT:-8081}:80`) +
-  2 воркстейшна (`ws-1`, `ws-2`, privileged, пустые git-репо в `main/data/work/`).
-  Управление — `make dev-*`.
+  веб-клиент (`front`, nginx на host-порту `${AGA_FRONT_PORT:-8081}:80`),
+  nginx-прокси `*.localhost` (`proxy`, `dev-proxy/nginx.conf`, host-порт
+  `${AGA_PROXY_PORT:-80}`) + 2 воркстейшна (`ws-1`, `ws-2`, privileged, пустые
+  git-репо в `main/data/work/`). Прокси маршрутизирует как ingress в k8s:
+  `dev.localhost` → front, `api.localhost` → core. Управление — `make dev-*`.
 - `k8s/core/` — стенд ядра: манифесты ядра, Keycloak, RBAC, PVC, сервисы, ingress;
   `deploy.sh` собирает конфиги из `.env` и `main/config/roles.yaml` (см. `k8s/AGENTS.md`).
 - `k8s/front/` — стенд веб-клиента: Deployment + Service nginx; `deploy.sh`.
@@ -44,7 +46,8 @@
 ## Verification
 - `make init` — создаёт `.env` и `main/config/roles.yaml` из примеров.
 - `make dev-up` + `make dev-verify` — dev-стенд поднят, ядро отвечает, ws-1/ws-2 ready,
-  фронт отвечает на `${AGA_FRONT_PORT:-8081}`.
+  фронт отвечает на `${AGA_FRONT_PORT:-8081}`, прокси отдаёт SPA на
+  `dev.localhost` и API на `api.localhost`.
 - `make k8s-deploy` + `make k8s-wait` — стенд поднят, API отвечает.
 - `make k8s-verify` — интеграционная проверка стенда в локальном кластере.
 - Критерий: ядро отвечает на HTTP, фронт раздаёт SPA, воркстейшн поднимается

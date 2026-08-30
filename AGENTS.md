@@ -81,7 +81,8 @@ aga/
   `make dev-ps`, `make dev-reset`, `make dev-verify`. Воркстейшны — контейнеры
   `ws-1`/`ws-2` с пустыми git-репо (проект агент наполняет сам); ядро в
   docker-режиме (`AGA_WS_BACKEND=docker`) переиспользует их; фронт — сервис
-  `front` (nginx, `:8081`).
+  `front` (nginx, `:8081`); прокси `*.localhost` на `:80` (`dev.localhost` → front,
+  `api.localhost` → core) — как в k8s-стенде.
 - Тестовый стенд — в k8s (minikube): `make k8s-up`, `make k8s-build`, `make k8s-load`,
   `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`; ручной
   доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси

@@ -57,6 +57,21 @@ services:
         - "${AGA_FRONT_PORT:-8081}:80"
       restart: "no"
 
+  # Прокси *.localhost как в k8s-стенде: dev.localhost → front (SPA),
+  # api.localhost → core (API). Браузер сам резолвит *.localhost в
+  # 127.0.0.1/::1 (RFC 6761), порт 80 — как в стенде. Конфиг: dev-proxy/nginx.conf.
+  proxy:
+    image: nginx:alpine
+    container_name: aga-proxy
+    depends_on:
+      - core
+      - front
+    ports:
+      - "${AGA_PROXY_PORT:-80}:80"
+    volumes:
+      - ./dev-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    restart: "no"
+
   ws-1:
     image: aga-workstation:dev
     build: ./k8s/workstation-image

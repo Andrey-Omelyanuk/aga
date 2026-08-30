@@ -71,14 +71,19 @@ pub struct CreateAgentSetRequest {
 }
 
 pub fn create_router(state: AppState) -> Router {
-    // SPA (front/) живёт на другом origin — CORS пропускает только его.
+    // SPA (front/) живёт на другом origin — CORS пропускает его. Разрешаем
+    // и dev.localhost (k8s-стенд и dev-прокси), и front_url из env (например
+    // localhost:8081 в dev-стенде) — браузер может открывать SPA обоими путями.
+    let mut origins = vec![state
+        .front_url
+        .parse::<HeaderValue>()
+        .unwrap_or_else(|_| HeaderValue::from_static("http://dev.localhost"))];
+    let dev_localhost = HeaderValue::from_static("http://dev.localhost");
+    if !origins.contains(&dev_localhost) {
+        origins.push(dev_localhost);
+    }
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list([state
-            .front_url
-            .parse::<HeaderValue>()
-            .unwrap_or_else(|_| {
-                HeaderValue::from_static("http://dev.localhost")
-            })]))
+        .allow_origin(AllowOrigin::list(origins))
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([CONTENT_TYPE, AUTHORIZATION]);
     Router::new()
