@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>aga — агенты и воркстейшны</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -139,6 +141,35 @@
         .message.agent .bubble { background: #f0f0f0; color: #333; }
         .message .meta { font-size: 11px; color: #999; margin-top: 3px; }
         .empty-state { text-align: center; color: #999; padding: 60px 20px; }
+
+        /* Просмотр содержимого проекта (Файлы) */
+        .files-layout { display: flex; height: calc(100vh - 60px); }
+        .files-sidebar {
+            width: 320px;
+            background: #fff;
+            border-right: 1px solid #e0e0e0;
+            display: flex;
+            flex-direction: column;
+        }
+        .files-sidebar .form-row { padding: 14px 16px 0; margin-bottom: 10px; }
+        .files-sidebar select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 6px; }
+        .file-tree { flex: 1; overflow-y: auto; padding: 8px 16px 16px; font-size: 13px; }
+        .tree-row { padding: 3px 6px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+        .tree-row:hover { background: #f0f0f0; }
+        .tree-row.dir { font-weight: 600; }
+        .tree-child { padding-left: 16px; }
+        .file-viewer-container { flex: 1; background: #fff; display: flex; flex-direction: column; }
+        .file-path {
+            padding: 12px 20px; border-bottom: 1px solid #e0e0e0;
+            font-size: 13px; color: #555; font-family: ui-monospace, monospace;
+        }
+        .file-viewer { flex: 1; overflow: auto; padding: 20px; }
+        .file-viewer pre {
+            margin: 0; background: #f8f8f8; border: 1px solid #e0e0e0; border-radius: 8px;
+            padding: 14px; overflow: auto;
+        }
+        .file-viewer code.hljs { background: #f8f8f8; }
+        .file-viewer img, .file-viewer video { max-width: 100%; border-radius: 8px; }
     </style>
 </head>
 <body>
@@ -149,6 +180,7 @@
             <button class="tab" data-view="workstations">Воркстейшны</button>
             <button class="tab" data-view="sessions">Сессии</button>
             <button class="tab" data-view="personnel">Персонал</button>
+            <button class="tab" data-view="files">Файлы</button>
             <button class="tab" data-view="chat">Чат</button>
         </nav>
         <span style="flex:1"></span>
@@ -185,6 +217,28 @@
         <!-- Персонал: список участников из SSO, правка — вне aga -->
         <section class="view" id="view-personnel">
             <div id="personnelList"></div>
+        </section>
+
+        <!-- Содержимое проекта воркстейшна: дерево и просмотр (только чтение) -->
+        <section class="view" id="view-files">
+            <div class="files-layout">
+                <div class="files-sidebar">
+                    <div class="form-row">
+                        <select id="fileWorkstation">
+                            <option value="">Выберите воркстейшн...</option>
+                        </select>
+                    </div>
+                    <div id="fileTree" class="file-tree">
+                        <div class="empty-state">Выберите воркстейшн</div>
+                    </div>
+                </div>
+                <div class="file-viewer-container">
+                    <div class="file-path" id="filePathLabel">Файл не выбран</div>
+                    <div id="fileViewer" class="file-viewer">
+                        <div class="empty-state">Откройте папку или файл в дереве</div>
+                    </div>
+                </div>
+            </div>
         </section>
 
         <!-- Чат -->
@@ -262,6 +316,7 @@
                 if (tab.dataset.view === 'sessions') { loadSessions(); loadWorkstationSelect(); }
                 if (tab.dataset.view === 'personnel') loadPersonnel();
                 if (tab.dataset.view === 'projects') loadProjects();
+                if (tab.dataset.view === 'files') loadFileWorkstationSelect();
             });
         });
 
@@ -460,6 +515,126 @@
                 loadSessions();
                 document.getElementById('chatInput').focus();
             }
+        }
+
+        // === Содержимое проекта воркстейшна (Файлы) ===
+        const _langMap = {
+            rs: 'rust', py: 'python', js: 'javascript', ts: 'typescript', c: 'c', h: 'c',
+            cpp: 'cpp', hpp: 'cpp', java: 'java', go: 'go', rb: 'ruby', php: 'php',
+            sh: 'bash', bash: 'bash', html: 'xml', htm: 'xml', css: 'css', scss: 'scss',
+            json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'ini', ini: 'ini', xml: 'xml',
+            md: 'markdown', markdown: 'markdown', sql: 'sql', dockerfile: 'dockerfile',
+            makefile: 'makefile', graphql: 'graphql', proto: 'protobuf', txt: 'plaintext'
+        };
+        function langFor(path) {
+            const ext = (path.split('.').pop() || '').toLowerCase();
+            return _langMap[ext] || 'plaintext';
+        }
+
+        let currentFileWsId = null;
+        let currentFileRevoke = null;
+
+        async function loadFileWorkstationSelect() {
+            const select = document.getElementById('fileWorkstation');
+            select.innerHTML = '<option value="">Выберите воркстейшн...</option>';
+            try {
+                const res = await api('/workstations');
+                if (!res.ok) return;
+                const workstations = await res.json();
+                workstations.forEach(ws => {
+                    if (ws.state !== 'ready') return;
+                    const option = document.createElement('option');
+                    option.value = ws.id;
+                    option.textContent = `${ws.name} (${ws.state})`;
+                    select.appendChild(option);
+                });
+                if (currentFileWsId) select.value = String(currentFileWsId);
+                select.onchange = () => {
+                    currentFileWsId = select.value ? Number(select.value) : null;
+                    document.getElementById('filePathLabel').textContent = 'Файл не выбран';
+                    document.getElementById('fileViewer').innerHTML =
+                        '<div class="empty-state">Откройте папку или файл в дереве</div>';
+                    loadTree(currentFileWsId, '', document.getElementById('fileTree'));
+                };
+                loadTree(currentFileWsId, '', document.getElementById('fileTree'));
+            } catch (e) { console.error('Файлы: выбор воркстейшна', e); }
+        }
+
+        async function loadTree(wsId, rel, container) {
+            container.innerHTML = '';
+            if (!wsId) {
+                container.innerHTML = '<div class="empty-state">Выберите воркстейшн</div>';
+                return;
+            }
+            const path = rel ? `?path=${encodeURIComponent(rel)}` : '';
+            try {
+                const res = await api('/workstations/' + wsId + '/tree' + path);
+                if (!res.ok) return;
+                const tree = await res.json();
+                if (!tree.entries.length) {
+                    container.innerHTML = '<div class="empty-state">Папка пуста</div>';
+                    return;
+                }
+                tree.entries.forEach(entry => renderTreeRow(wsId, entry, container));
+            } catch (e) { console.error('Файлы: дерево', e); }
+        }
+
+        function renderTreeRow(wsId, entry, container) {
+            const row = document.createElement('div');
+            row.className = `tree-row ${entry.kind}`;
+            const icon = entry.kind === 'dir' ? '📁' : '📄';
+            row.textContent = `${icon} ${entry.name}`;
+            if (entry.kind === 'dir') {
+                const child = document.createElement('div');
+                child.className = 'tree-child';
+                let loaded = false;
+                row.addEventListener('click', () => {
+                    if (loaded) {
+                        child.style.display = child.style.display === 'none' ? '' : 'none';
+                        return;
+                    }
+                    loaded = true;
+                    loadTree(wsId, entry.path, child);
+                });
+                container.appendChild(row);
+                container.appendChild(child);
+            } else {
+                row.addEventListener('click', () => openFile(wsId, entry));
+                container.appendChild(row);
+            }
+        }
+
+        async function openFile(wsId, entry) {
+            document.getElementById('filePathLabel').textContent = '📄 ' + entry.path;
+            const viewer = document.getElementById('fileViewer');
+            viewer.innerHTML = '<div class="empty-state">Загрузка…</div>';
+            if (currentFileRevoke) { URL.revokeObjectURL(currentFileRevoke); currentFileRevoke = null; }
+            try {
+                const res = await api('/workstations/' + wsId + '/file?path=' + encodeURIComponent(entry.path));
+                if (!res.ok) { viewer.innerHTML = '<div class="empty-state">Не удалось прочитать файл</div>'; return; }
+                const ct = res.headers.get('content-type') || '';
+                if (ct.startsWith('image/')) {
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob); currentFileRevoke = url;
+                    viewer.innerHTML = `<img src="${url}" alt="${entry.name}">`;
+                } else if (ct.startsWith('video/')) {
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob); currentFileRevoke = url;
+                    viewer.innerHTML = `<video controls src="${url}"></video>`;
+                } else if (ct.startsWith('audio/')) {
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob); currentFileRevoke = url;
+                    viewer.innerHTML = `<audio controls src="${url}"></audio>`;
+                } else {
+                    // Текст: подсветка синтаксиса по расширению, только чтение.
+                    const text = await res.text();
+                    viewer.innerHTML = `<pre><code class="hljs"></code></pre>`;
+                    const code = viewer.querySelector('code');
+                    code.classList.add('language-' + langFor(entry.path));
+                    code.textContent = text;
+                    if (window.hljs) hljs.highlightElement(code);
+                }
+            } catch (e) { console.error('Файлы: чтение', e); }
         }
 
         // === Чат ===
