@@ -39,6 +39,7 @@ url = { version = "2", features = ["serde"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http = "1"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

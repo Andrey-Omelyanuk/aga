@@ -42,6 +42,43 @@ pub fn docker_exec_args(container: &str, command: &str) -> Vec<String> {
     ]
 }
 
+/// Исполнить `command` выбранным executor'ом и вернуть stdout строкой.
+/// Общий путь для агентского цикла и просмотра файлов проекта (server.rs):
+/// agent выполняет команды из LLM, просмотр — фиксированные find/base64.
+pub async fn execute_via_executor(
+    executor: &Executor,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let output = match executor {
+        Executor::Sh => Command::new("sh").arg("-c").arg(command).output().await?,
+        Executor::KubectlExec { namespace, pod } => {
+            Command::new("kubectl")
+                .args(kubectl_exec_args(namespace, pod, command))
+                .output()
+                .await?
+        }
+        Executor::DockerExec { container } => {
+            Command::new("docker")
+                .args(docker_exec_args(container, command))
+                .output()
+                .await?
+        }
+    };
+    collect_output(output)
+}
+
+fn collect_output(
+    output: std::process::Output,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        Err(format!("Command failed: {}\n{}", stderr, stdout).into())
+    }
+}
+
 pub struct Agent {
     role_config: RoleConfig,
     llm_client: LlmClient,
@@ -185,39 +222,7 @@ impl Agent {
         &self,
         command: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        match &self.executor {
-            Executor::Sh => {
-                let output = Command::new("sh").arg("-c").arg(command).output().await?;
-                Self::collect(output)
-            }
-            Executor::KubectlExec { namespace, pod } => {
-                let output = Command::new("kubectl")
-                    .args(kubectl_exec_args(namespace, pod, command))
-                    .output()
-                    .await?;
-                Self::collect(output)
-            }
-            Executor::DockerExec { container } => {
-                let output = Command::new("docker")
-                    .args(docker_exec_args(container, command))
-                    .output()
-                    .await?;
-                Self::collect(output)
-            }
-        }
-    }
-
-    fn collect(
-        output: std::process::Output,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            Err(format!("Command failed: {}\n{}", stderr, stdout).into())
-        }
+        execute_via_executor(&self.executor, command).await
     }
 
     fn extract_commands(&self, text: &str) -> Vec<String> {

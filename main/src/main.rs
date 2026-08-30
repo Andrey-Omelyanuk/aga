@@ -4,6 +4,7 @@ mod chat;
 mod cluster;
 mod config;
 mod llm;
+mod project_files;
 mod reactive;
 mod server;
 mod trace;

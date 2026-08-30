@@ -1,3 +1,4 @@
+use axum::body::Body;
 use axum::{
     extract::{Path, State},
     http::{
@@ -5,7 +6,7 @@ use axum::{
         HeaderMap, HeaderValue, Method, StatusCode,
     },
     response::sse::{Event, Sse},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -127,6 +128,9 @@ pub fn create_router(state: AppState) -> Router {
             "/workstations/:id",
             axum::routing::delete(delete_workstation),
         )
+        // === Просмотр содержимого проекта в воркстейшне ===
+        .route("/workstations/:id/tree", get(workstation_tree))
+        .route("/workstations/:id/file", get(workstation_file))
         .layer(cors)
         .with_state(state)
 }
@@ -964,6 +968,94 @@ async fn delete_workstation(
     }
 }
 
+// === Просмотр содержимого проекта в воркстейшне ===
+
+/// Относительный путь внутри проекта; пустой — корень.
+#[derive(Deserialize)]
+pub struct ProjectFilePathQuery {
+    #[serde(default)]
+    pub path: String,
+}
+
+/// Дерево папок и файлов проекта воркстейшна. Читается напрямую из
+/// под/контейнера (exec find) и доступно любому вошедшему участнику —
+/// персональной видимости нет (см. `can_read`).
+async fn workstation_tree(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<ProjectFilePathQuery>,
+) -> Result<Json<crate::project_files::Tree>, StatusCode> {
+    current_user(&state, &headers).await?;
+    if state
+        .chat_store
+        .get_workstation(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
+    let tree =
+        crate::project_files::tree(&executor, crate::project_files::PROJECT_ROOT, &params.path)
+            .await
+            .map_err(map_file_error)?;
+    Ok(Json(tree))
+}
+
+/// Содержимое файла: текст (text/plain, подсветка на фронте) или байты
+/// с MIME (картинки/видео/аудио). Только чтение — записывать нельзя.
+async fn workstation_file(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<ProjectFilePathQuery>,
+) -> Result<Response, StatusCode> {
+    current_user(&state, &headers).await?;
+    if state
+        .chat_store
+        .get_workstation(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
+    let content =
+        crate::project_files::read(&executor, crate::project_files::PROJECT_ROOT, &params.path)
+            .await
+            .map_err(map_file_error)?;
+    Ok(file_response(content))
+}
+
+fn map_file_error(e: crate::project_files::FileError) -> StatusCode {
+    match e {
+        crate::project_files::FileError::InvalidPath(_) => StatusCode::BAD_REQUEST,
+        crate::project_files::FileError::NotFound => StatusCode::NOT_FOUND,
+        crate::project_files::FileError::Exec(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn file_response(content: crate::project_files::FileContent) -> Response {
+    if content.mime.starts_with("text/") {
+        let text = String::from_utf8_lossy(&content.bytes).to_string();
+        let mut resp = (StatusCode::OK, text).into_response();
+        resp.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        resp
+    } else {
+        let mut resp = Response::new(Body::from(content.bytes));
+        if let Ok(hv) = HeaderValue::from_str(&content.mime) {
+            resp.headers_mut().insert(CONTENT_TYPE, hv);
+        }
+        resp
+    }
+}
+
 #[derive(Deserialize)]
 pub struct OpenWorkstationSessionRequest {
     #[serde(default)]
@@ -1500,6 +1592,69 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn workstation_tree_requires_authentication() {
+        let (state, file) = test_state(true).await;
+        let (status, _) = get("/workstations/1/tree", &HeaderMap::new(), state.clone()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn workstation_file_requires_authentication() {
+        let (state, file) = test_state(true).await;
+        let (status, _) = get(
+            "/workstations/1/file?path=README.md",
+            &HeaderMap::new(),
+            state.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn participant_browses_any_workstation_content() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        state
+            .chat_store
+            .create_workstation(1, "ws-1")
+            .await
+            .unwrap();
+        // Участник проходит проверку доступа к содержимому любого воркстейшна.
+        // В тестовом окружении kubectl недоступен — исполнение падает с 500,
+        // но это уже не 401/403: проверка видимости пройдена.
+        let (status, _) = get("/workstations/1/tree", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn missing_workstation_content_returns_not_found() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, _) = get("/workstations/99/tree", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn no_write_route_for_project_files() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        // Просмотр только для чтения: запись файлов проекта не существует.
+        let (status, _) = post_json(
+            "/workstations/1/file",
+            &headers,
+            state.clone(),
+            serde_json::json!({"path": "README.md", "content": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
         cleanup(&file).await;
     }
 }
