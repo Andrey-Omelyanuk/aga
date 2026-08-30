@@ -9,6 +9,7 @@ mod reactive;
 mod server;
 mod trace;
 mod workstation;
+mod ws_ops;
 
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

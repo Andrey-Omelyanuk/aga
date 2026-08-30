@@ -142,23 +142,50 @@ impl Cluster {
     }
 
     /// Собрать манифест воркстейшн-пода: под с собственным Docker (DinD),
-    /// клоном проекта из git и работой на своей ветке.
+    /// клоном проекта из git и работой на своей ветке. Опциональный
+    /// `secret` — имя k8s-Secret из кластера, который монтируется в под
+    /// (секреты для сторонних CLI: ssh-ключ и т.п.); без имени секрета нет.
     pub fn render_workstation_manifest(
         &self,
         pod_name: &str,
         git_url: &str,
         branch: &str,
+        secret: Option<&str>,
     ) -> Result<String, ClusterError> {
         let template = std::fs::read_to_string(&self.template).unwrap_or_else(|_| {
             // Файл можно не класть рядом с бинарником — встроенный дефолт
             // совпадает с инфраструктурным шаблоном.
             DEFAULT_TEMPLATE.to_string()
         });
-        Ok(template
+        let mut manifest = template
             .replace("{{POD_NAME}}", pod_name)
             .replace("{{GIT_URL}}", git_url)
             .replace("{{BRANCH}}", branch)
-            .replace("{{IMAGE}}", &self.image))
+            .replace("{{IMAGE}}", &self.image);
+        if let Some(secret) = secret {
+            // Монтируем секрет как файлы в контейнер (read-only) — точки входа
+            // стабильны в обоих шаблонах (встроенном и в `infra/k8s`).
+            manifest = manifest.replace(
+                "      securityContext:\n        privileged: true",
+                &format!(
+                    "      securityContext:\n        privileged: true\n\
+                     \x20     volumeMounts:\n\
+                     \x20       - name: {secret}\n\
+                     \x20         mountPath: /etc/secrets/{secret}\n\
+                     \x20         readOnly: true"
+                ),
+            );
+            manifest = manifest.replace(
+                "  restartPolicy: OnFailure",
+                &format!(
+                    "  volumes:\n\
+                     \x20   - name: {secret}\n\
+                     \x20     secret:\n\
+                     \x20       secretName: {secret}\n  restartPolicy: OnFailure"
+                ),
+            );
+        }
+        Ok(manifest)
     }
 
     /// Создать воркстейшн (под в k8s или контейнер в docker по backend).
@@ -167,10 +194,11 @@ impl Cluster {
         pod_name: &str,
         git_url: &str,
         branch: &str,
+        secret: Option<&str>,
     ) -> Result<(), ClusterError> {
         match self.backend {
             Backend::Docker => self.create_container(pod_name, git_url, branch).await,
-            Backend::K8s => self.create_k8s_pod(pod_name, git_url, branch).await,
+            Backend::K8s => self.create_k8s_pod(pod_name, git_url, branch, secret).await,
         }
     }
 
@@ -180,8 +208,9 @@ impl Cluster {
         pod_name: &str,
         git_url: &str,
         branch: &str,
+        secret: Option<&str>,
     ) -> Result<(), ClusterError> {
-        let manifest = self.render_workstation_manifest(pod_name, git_url, branch)?;
+        let manifest = self.render_workstation_manifest(pod_name, git_url, branch, secret)?;
         let mut child = Command::new(&self.kubectl)
             .args(["apply", "-f", "-"])
             .stdin(std::process::Stdio::piped())
@@ -353,12 +382,30 @@ mod tests {
     fn workstation_renders_pod_with_git_url_and_branch() {
         let c = cluster();
         let m = c
-            .render_workstation_manifest("ws-3", "https://example.com/proj.git", "ws-3")
+            .render_workstation_manifest("ws-3", "https://example.com/proj.git", "ws-3", None)
             .unwrap();
         assert!(m.contains("name: ws-3"));
         assert!(m.contains("https://example.com/proj.git"));
         assert!(m.contains("value: \"ws-3\""));
         assert!(m.contains("aga-workstation:test"));
+    }
+
+    #[test]
+    fn workstation_pod_mounts_named_secret() {
+        let c = cluster();
+        let m = c
+            .render_workstation_manifest("ws-3", "https://x.git", "ws-3", Some("creds"))
+            .unwrap();
+        // Секрет из кластера монтируется в под по имени, только когда задан.
+        assert!(m.contains("secretName: creds"));
+        assert!(m.contains("volumeMounts:"));
+        assert!(m.contains("mountPath: /etc/secrets/creds"));
+        assert!(m.contains("readOnly: true"));
+        let plain = c
+            .render_workstation_manifest("ws-3", "https://x.git", "ws-3", None)
+            .unwrap();
+        assert!(!plain.contains("secretName"));
+        assert!(!plain.contains("volumeMounts"));
     }
 
     #[test]
@@ -371,7 +418,7 @@ mod tests {
     fn workstation_pod_has_no_k8s_api_access() {
         let c = cluster();
         let m = c
-            .render_workstation_manifest("ws-1", "https://x.git", "ws-1")
+            .render_workstation_manifest("ws-1", "https://x.git", "ws-1", None)
             .unwrap();
         assert!(m.contains("automountServiceAccountToken: false"));
         assert!(!m.contains("serviceAccountName"));

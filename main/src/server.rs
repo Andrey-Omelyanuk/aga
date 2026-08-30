@@ -128,6 +128,8 @@ pub fn create_router(state: AppState) -> Router {
             "/workstations/:id",
             axum::routing::delete(delete_workstation),
         )
+        .route("/workstations/:id/switch", post(switch_workstation))
+        .route("/workstations/:id/down", post(mark_workstation_down))
         // === Просмотр содержимого проекта в воркстейшне ===
         .route("/workstations/:id/tree", get(workstation_tree))
         .route("/workstations/:id/file", get(workstation_file))
@@ -875,6 +877,15 @@ pub struct CreateWorkstationRequest {
     pub project_id: i64,
     #[serde(default)]
     pub name: Option<String>,
+    /// Имя k8s-Secret из кластера, монтируемого в под при подъёме.
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+/// Тело запроса на переключение воркстейшна на другой проект.
+#[derive(Deserialize)]
+pub struct SwitchWorkstationRequest {
+    pub project_id: i64,
 }
 
 /// Создание воркстейшна — только для суперпользователя (админ внешний,
@@ -899,7 +910,7 @@ async fn create_workstation(
     // Воркстейшн — под в Kubernetes: сначала запись, потом сам под.
     let ws = state
         .chat_store
-        .create_workstation(payload.project_id, &name)
+        .create_workstation(payload.project_id, &name, payload.secret.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -917,7 +928,11 @@ async fn create_workstation(
     let pod_name = Cluster::pod_name(ws.id);
     let branch = Cluster::branch_name(ws.id);
 
-    if let Err(e) = state.cluster.create_pod(&pod_name, &git_url, &branch).await {
+    if let Err(e) = state
+        .cluster
+        .create_pod(&pod_name, &git_url, &branch, ws.secret.as_deref())
+        .await
+    {
         tracing::error!("failed to create workstation pod {pod_name}: {e}");
         let _ = state
             .chat_store
@@ -966,6 +981,78 @@ async fn delete_workstation(
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// Переключить воркстейшн на другой проект — только суперпользователь.
+/// Свободная станция (без открытой сессии) меняет проект: `/work/project`
+/// переписывается кодом нового проекта, сам ws (под/сервис) не пересоздаётся.
+async fn switch_workstation(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SwitchWorkstationRequest>,
+) -> Result<Json<crate::chat::Workstation>, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    if !state
+        .chat_store
+        .is_super_user(user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ws = state
+        .chat_store
+        .switch_workstation_project(id, payload.project_id)
+        .await
+        .map_err(|e| match e {
+            SessionError::NotFound => StatusCode::NOT_FOUND,
+            SessionError::WorkstationBusy => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
+    let git_url = match state.trace_store.get_project(payload.project_id).await {
+        Ok(Some(p)) => p.git_url,
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
+    let branch = Cluster::branch_name(id);
+    if let Err(e) = crate::ws_ops::replace_project(&executor, &git_url, &branch).await {
+        tracing::error!("failed to switch project on ws-{id}: {e}");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    Ok(Json(ws))
+}
+
+/// Отметить упавший воркстейшн как недоступный (инициирует восстановление).
+async fn mark_workstation_down(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    if !state
+        .chat_store
+        .is_super_user(user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if state
+        .chat_store
+        .get_workstation(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    state
+        .chat_store
+        .mark_workstation_down(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(StatusCode::OK)
 }
 
 // === Просмотр содержимого проекта в воркстейшне ===
@@ -1106,6 +1193,18 @@ async fn open_workstation_session(
         Err(SessionError::Forbidden) => return Err(StatusCode::FORBIDDEN),
         Err(SessionError::Db(_)) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
+    // Ручное восстановление после падения: если открытая сессия — продолжение
+    // прерванной на упавшей станции, восстанавливаем файлы проекта из её ветки.
+    // Сбой восстановления сессию не роняет — станция остаётся на чистом клоне,
+    // ошибка уходит в лог.
+    if let Ok(Some(prev)) = state.chat_store.continues_session_id(chat.id).await {
+        if let Ok(Some(branch)) = state.chat_store.session_branch(prev).await {
+            let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
+            if let Err(e) = crate::ws_ops::restore_workspace(&executor, &branch).await {
+                tracing::warn!("failed to restore session from ws into ws-{id}: {e}");
+            }
+        }
+    }
     Ok(Json(chat))
 }
 
@@ -1319,7 +1418,7 @@ mod tests {
         // Админ (внешний) поднял воркстейшн — участник видит его и состояние.
         state
             .chat_store
-            .create_workstation(1, "ws-1")
+            .create_workstation(1, "ws-1", None)
             .await
             .unwrap();
         let (status, body) = get("/workstations", &headers, state.clone()).await;
@@ -1328,6 +1427,38 @@ mod tests {
         assert_eq!(workstations.len(), 1);
         assert_eq!(workstations[0]["name"], "ws-1");
         assert!(workstations[0]["state"].is_string());
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn switching_workstation_forbidden_for_participant() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        // Переключение воркстейшна на другой проект — процедура админа.
+        let (status, _) = post_json(
+            "/workstations/1/switch",
+            &headers,
+            state.clone(),
+            serde_json::json!({"project_id": 2}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn marking_workstation_down_forbidden_for_participant() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        // Отметка падения станции — процедура админа.
+        let (status, _) = post_json(
+            "/workstations/1/down",
+            &headers,
+            state.clone(),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
         cleanup(&file).await;
     }
 
@@ -1622,7 +1753,7 @@ mod tests {
         let headers = auth_headers("alice", &["participant"]);
         state
             .chat_store
-            .create_workstation(1, "ws-1")
+            .create_workstation(1, "ws-1", None)
             .await
             .unwrap();
         // Участник проходит проверку доступа к содержимому любого воркстейшна.
