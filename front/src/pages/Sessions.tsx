@@ -1,5 +1,5 @@
 import { observer } from 'mobx-react-lite';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,6 +14,12 @@ export const Sessions = observer(function Sessions() {
   const navigate = useNavigate();
   const [wsId, setWsId] = useState('');
   const [title, setTitle] = useState('');
+
+  const available = store.sessionWorkstations;
+
+  useEffect(() => {
+    if (wsId && !available.some((ws) => ws.id === Number(wsId))) setWsId('');
+  }, [available, wsId]);
 
   const open = async () => {
     if (!wsId) {
@@ -37,17 +43,22 @@ export const Sessions = observer(function Sessions() {
       <div className="mb-4 flex items-center gap-2">
         <Select value={wsId} onChange={(e) => setWsId(e.target.value)}>
           <option value="">Выберите воркстейшн...</option>
-          {store.workstations.map((ws) => (
-            <option key={ws.id} value={String(ws.id)} disabled={!ws.isReady}>
+          {available.map((ws) => (
+            <option key={ws.id} value={String(ws.id)}>
               {ws.name} ({ws.state})
             </option>
           ))}
         </Select>
         <Input placeholder="Название сессии" value={title} onChange={(e) => setTitle(e.target.value)} />
-        <Button variant="secondary" onClick={open}>
+        <Button variant="secondary" onClick={open} disabled={available.length === 0}>
           Открыть сессию
         </Button>
       </div>
+      {available.length === 0 && (
+        <p className="mb-3 text-sm text-slate-400">
+          Нет готовых воркстейшнов — свободных или занятых текущим проектом
+        </p>
+      )}
       {store.chats.length === 0 && <EmptyState>Сессий пока нет</EmptyState>}
       {store.chats.map((chat) => (
         <Card key={chat.id}>

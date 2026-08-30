@@ -52,6 +52,17 @@ export class AppStore {
     return this.projects.find((p) => p.id === this.activeProjectId) ?? null;
   }
 
+  /// Воркстейшны, на которых можно открыть сессию: только готовые и при этом
+  /// свободные или занятые текущим проектом (глобальный фильтр).
+  get sessionWorkstations(): Workstation[] {
+    return this.workstations.filter(
+      (ws) =>
+        ws.isReady &&
+        (ws.isFree ||
+          (this.activeProjectId !== null && ws.project_id === this.activeProjectId)),
+    );
+  }
+
   projectName(id: number): string {
     const p = this.projects.find((x) => x.id === id);
     return p ? p.git_url : `Проект #${id}`;

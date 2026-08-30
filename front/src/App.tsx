@@ -1,6 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
-import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { NavLink, Outlet, useLocation, useSearchParams } from 'react-router-dom';
 import { Link } from '@/components/ui/link';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
@@ -25,6 +25,7 @@ function tabFromPath(path: string): TabName {
 export const App = observer(function App() {
   const store = useStore();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [ready, setReady] = useState(false);
   useEffect(() => {
     void store.init().then(() => setReady(true));
@@ -34,6 +35,33 @@ export const App = observer(function App() {
   useEffect(() => {
     void store.ensureLoaded(tab);
   }, [tab]);
+
+  const projectParam = searchParams.get('project');
+
+  // URL → стор: параметр ?project= авторитетен при загрузке (deep-link).
+  useEffect(() => {
+    if (projectParam === null) return;
+    const id = Number(projectParam);
+    if (Number.isInteger(id) && id > 0) {
+      if (id !== store.activeProjectId) store.setActiveProject(id);
+    } else {
+      setSearchParams({}, { replace: true });
+    }
+  }, [projectParam]);
+
+  // Стор → URL: активный проект всегда отражается в URL как глобальный фильтр.
+  useEffect(() => {
+    const current = store.activeProjectId;
+    if (current === null) {
+      if (projectParam !== null) setSearchParams({}, { replace: true });
+    } else if (projectParam !== String(current)) {
+      setSearchParams({ project: String(current) }, { replace: true });
+    }
+  }, [store.activeProjectId]);
+
+  const onProjectChange = (id: number | null) => {
+    store.setActiveProject(id);
+  };
 
   if (!ready) {
     return <div className="h-screen p-10 text-slate-400">Загрузка…</div>;
@@ -48,7 +76,9 @@ export const App = observer(function App() {
           <Select
             className="h-8"
             value={store.activeProjectId === null ? '' : String(store.activeProjectId)}
-            onChange={(e) => store.setActiveProject(e.target.value ? Number(e.target.value) : null)}
+            onChange={(e) =>
+              onProjectChange(e.target.value ? Number(e.target.value) : null)
+            }
           >
             {store.projects.length === 0 ? (
               <option value="">Проектов нет</option>
@@ -68,7 +98,7 @@ export const App = observer(function App() {
           {TABS.map(({ tab: t, label, to }) => (
             <NavLink
               key={t}
-              to={to}
+              to={{ pathname: to, search: location.search }}
               className={({ isActive }) =>
                 cn(
                   'rounded-md px-4 py-2 text-sm cursor-pointer',
