@@ -50,9 +50,25 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
     })),
   );
   const [saving, setSaving] = useState(false);
+  const [toolDraft, setToolDraft] = useState('');
 
   const patchAgent = (index: number, patch: Partial<Agent>) => {
     setAgents((prev) => prev.map((a, i) => (i === index ? { ...a, ...patch } : a)));
+  };
+
+  const addTool = (index: number) => {
+    const tool = toolDraft.trim();
+    if (!tool) return;
+    patchAgent(index, {
+      tools: agents[index].tools.includes(tool)
+        ? agents[index].tools
+        : [...agents[index].tools, tool],
+    });
+    setToolDraft('');
+  };
+
+  const removeTool = (index: number, tool: string) => {
+    patchAgent(index, { tools: agents[index].tools.filter((t) => t !== tool) });
   };
 
   const addAgent = () => {
@@ -232,21 +248,48 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                 onChange={(e) => patchAgent(i, { description: e.target.value })}
               />
             </div>
-            <div className="mt-2 flex items-center gap-2">
-              <span className="text-xs font-medium text-slate-500">Инструменты</span>
-              <Input
-                className="max-w-md text-xs"
-                placeholder="git, make, docker"
-                value={agent.tools.join(', ')}
-                onChange={(e) =>
-                  patchAgent(i, {
-                    tools: e.target.value
-                      .split(',')
-                      .map((t) => t.trim())
-                      .filter(Boolean),
-                  })
-                }
-              />
+            <div className="mt-2">
+              <div className="mb-1 flex items-center gap-2">
+                <span className="text-xs font-medium text-slate-500">Инструменты</span>
+                <Input
+                  className="h-7 max-w-60 text-xs"
+                  placeholder="имя инструмента"
+                  value={toolDraft}
+                  onChange={(e) => setToolDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') addTool(i);
+                  }}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => addTool(i)}
+                  disabled={!toolDraft.trim()}
+                >
+                  Добавить
+                </Button>
+              </div>
+              {agent.tools.length === 0 ? (
+                <div className="text-xs text-slate-400">Инструментов нет</div>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {agent.tools.map((tool) => (
+                    <span
+                      key={tool}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-slate-50 px-2 py-0.5 text-xs text-slate-700"
+                    >
+                      {tool}
+                      <button
+                        className="text-slate-400 hover:text-red-600"
+                        title="Удалить инструмент"
+                        onClick={() => removeTool(i, tool)}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="mt-2 grid grid-cols-2 gap-4">
               {capabilityBlock('skills', skills, 'Скиллы')}

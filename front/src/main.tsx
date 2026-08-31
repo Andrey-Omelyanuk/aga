@@ -7,6 +7,7 @@ import './index.css';
 const AppLayout = lazy(() => import('./pages/app/layout'));
 const ProjectsPage = lazy(() => import('./pages/app/projects'));
 const AgentSetsPage = lazy(() => import('./pages/app/agentSets'));
+const CapabilitiesPage = lazy(() => import('./pages/app/capabilities'));
 const WorkstationsPage = lazy(() => import('./pages/app/workstations'));
 const SessionsPage = lazy(() => import('./pages/app/sessions'));
 const PersonnelPage = lazy(() => import('./pages/app/personnel'));
@@ -27,6 +28,7 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
           <Route index element={<Navigate to="/projects" replace />} />
           <Route path="projects" element={<ProjectsPage />} />
           <Route path="agent-sets" element={<AgentSetsPage />} />
+          <Route path="capabilities" element={<CapabilitiesPage />} />
           <Route path="workstations" element={<WorkstationsPage />} />
           <Route path="sessions" element={<SessionsPage />} />
           <Route path="personnel" element={<PersonnelPage />} />

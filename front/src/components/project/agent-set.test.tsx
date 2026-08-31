@@ -60,10 +60,9 @@ describe('AgentSetEditor', () => {
     expect(text).toContain('src/backend');
     expect(text).toContain('Правила бэкенда');
     expect(text).toContain('src/backend/api');
-    // Инструменты — значение поля ввода (в textContent инпута нет).
-    const toolsInput = container.querySelector<HTMLInputElement>('input[placeholder*="git, make"]');
-    expect(toolsInput?.value).toContain('git');
-    expect(toolsInput?.value).toContain('make');
+    // Инструменты — список, каждый элемент виден.
+    expect(text).toContain('git');
+    expect(text).toContain('make');
     // Данные скиллы и команды с версиями.
     expect(text).toContain('review');
     expect(text).toContain('версия 1');
