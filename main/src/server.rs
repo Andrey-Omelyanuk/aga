@@ -7,7 +7,7 @@ use axum::{
     },
     response::sse::{Event, Sse},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use futures_util::stream::{self, Stream};
@@ -82,6 +82,11 @@ pub struct AddCapabilityVersionRequest {
     pub content: String,
 }
 
+#[derive(Deserialize)]
+pub struct RenameCapabilityRequest {
+    pub name: String,
+}
+
 pub fn create_router(state: AppState) -> Router {
     // SPA (front/) живёт на другом origin — CORS пропускает его. Разрешаем
     // и dev.localhost (k8s-стенд и dev-прокси), и front_url из env (например
@@ -117,8 +122,16 @@ pub fn create_router(state: AppState) -> Router {
         )
         // === Каталог способностей (скиллы и команды с версиями) ===
         .route("/skills", get(list_skills).post(create_skill))
+        .route(
+            "/skills/:id",
+            patch(rename_skill).delete(delete_skill),
+        )
         .route("/skills/:id/versions", post(add_skill_version))
         .route("/commands", get(list_commands).post(create_command))
+        .route(
+            "/commands/:id",
+            patch(rename_command).delete(delete_command),
+        )
         .route("/commands/:id/versions", post(add_command_version))
         // === SSO (Keycloak): вход веб-клиента ===
         .route("/auth/login", get(auth_login))
@@ -496,6 +509,60 @@ async fn add_command_version(
         .await
         .map(|_| StatusCode::OK)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn rename_skill(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RenameCapabilityRequest>,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    match state.trace_store.rename_capability(id, &payload.name).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn delete_skill(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    match state.trace_store.delete_capability(id).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn rename_command(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RenameCapabilityRequest>,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    match state.trace_store.rename_capability(id, &payload.name).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn delete_command(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    match state.trace_store.delete_capability(id).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 async fn attach_agent_set(
@@ -1522,6 +1589,27 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).to_string())
     }
 
+    async fn delete_json(
+        uri: &str,
+        headers: &HeaderMap,
+        state: AppState,
+    ) -> (StatusCode, String) {
+        let router = create_router(state);
+        let mut builder = Request::builder().method("DELETE").uri(uri);
+        if let Some(auth) = headers.get("authorization") {
+            builder = builder.header("authorization", auth);
+        }
+        let resp = router
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
     async fn post_json(
         uri: &str,
         headers: &HeaderMap,
@@ -2048,6 +2136,82 @@ mod tests {
         assert!(body.contains("ops2"));
         assert!(body.contains("api"));
         assert!(!body.contains("dev"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn capability_renamed_and_deleted_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/skills",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "review",
+                "versions": [{"version": "1", "content": "Проверять диф"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let skill_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        // Переименование через PATCH сохраняет версии.
+        let (status, _) = patch_json(
+            &format!("/skills/{skill_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "review2" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get("/skills", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("review2"));
+        assert!(body.contains("Проверять диф"));
+        // Несуществующая способность — 404.
+        let (status, _) = patch_json(
+            "/skills/999",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "x" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Удаление убирает из списка; повторное — 404.
+        let (status, _) = delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get("/skills", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("review2"));
+        let (status, _) = delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Команды — тот же каталог, те же правки.
+        let (status, body) = post_json(
+            "/commands",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "deploy",
+                "versions": [{"version": "1", "content": "Выкатывать"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let cmd_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, _) = patch_json(
+            &format!("/commands/{cmd_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "deploy2" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = delete_json(&format!("/commands/{cmd_id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
         cleanup(&file).await;
     }
 

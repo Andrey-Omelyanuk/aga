@@ -892,6 +892,26 @@ impl TraceStore {
         Ok(())
     }
 
+    /// Переименование способности каталога. Возвращает false, если способности нет.
+    pub async fn rename_capability(&self, id: i64, name: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("UPDATE capabilities SET name = ? WHERE id = ?")
+            .bind(name)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Удаление способности: версии и данные агенту удаляются каскадом.
+    /// Возвращает false, если способности нет.
+    pub async fn delete_capability(&self, id: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM capabilities WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Содержимое способности каталога: зафиксированная версия или последняя
     /// (добавленная позже всех). Версия — текст; «последняя» — max id версии.
     pub async fn resolve_capability(
@@ -1562,6 +1582,59 @@ mod tests {
         let prompt = store.agent_prompt(dev).await.unwrap();
         assert!(prompt.contains("Формат диффов"));
         assert!(!prompt.contains("Прогон тестов и правки"));
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn capability_renamed_and_deleted_with_cascade() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let skill = store
+            .create_capability(
+                CapabilityKind::Skill,
+                "review",
+                &[version("1", "v1"), version("2", "v2")],
+            )
+            .await
+            .unwrap();
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[AgentSpec {
+                    name: "dev".to_string(),
+                    description: "".to_string(),
+                    tools: vec![],
+                    max_iterations: 3,
+                    model: None,
+                    temperature: 0.7,
+                    parent: None,
+                    skills: vec![cap("review", Some("1"))],
+                    commands: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        // Переименование: версии и данные агенту сохраняются.
+        assert!(store.rename_capability(skill, "review2").await.unwrap());
+        let item = store.get_capability(skill).await.unwrap().unwrap();
+        assert_eq!(item.name, "review2");
+        assert_eq!(item.versions.len(), 2);
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
+        assert_eq!(dev.skills[0].name, "review2");
+        assert_eq!(dev.skills[0].pinned_version.as_deref(), Some("1"));
+        // Переименование несуществующей способности — false.
+        assert!(!store.rename_capability(999, "x").await.unwrap());
+        // Удаление каскадом: версии и данные агенту исчезают.
+        assert!(store.delete_capability(skill).await.unwrap());
+        assert!(store.get_capability(skill).await.unwrap().is_none());
+        assert!(store.list_capabilities(CapabilityKind::Skill).await.unwrap().is_empty());
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
+        assert!(dev.skills.is_empty());
+        assert!(!store.delete_capability(999).await.unwrap());
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
