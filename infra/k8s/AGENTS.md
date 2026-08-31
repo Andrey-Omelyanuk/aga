@@ -61,9 +61,14 @@ infra/k8s/
   ServiceAccount'а в emptyDir (`KUBECONFIG=/etc/aga/kube/kubeconfig`). Без
   явного kubeconfig RBAC к ядру не применится. initContainer ходит под root —
   SA-токен недоступен пользователю aga (uid 1000).
-- RBAC ядра — минимум в namespace `aga`: `pods` (get/list/create/delete) и
-  `pods/exec` (create). Воркстейшн-поды остаются без SA
+- RBAC ядра — минимум в namespace `aga`: `pods` (get/list/create/delete),
+  `pods/exec` (create) и `secrets` (get/create/update/delete — Secret `aga-ssh`
+  с SSH-ключом aga для воркстейшнов). Воркстейшн-поды остаются без SA
   (`automountServiceAccountToken: false`, привилегированные — DinD).
+- SSH-ключ aga (`AGA_SSH_PRIVATE_KEY` из `.env`) попадает в под ядра через
+  Secret `aga-ssh-env` (envFrom в deployment, создаёт `deploy.sh`); из него
+  ядро делает Secret `aga-ssh` и монтирует в воркстейшн-поды (`/etc/secrets/`),
+  entrypoint раскладывает ключ в `~/.ssh` до git-клона.
 - Ядро при старте тянет JWKS из Keycloak; `wait-keycloak` initContainer ждёт
   готовности realm, иначе ядро поднялось бы без SSO.
 - БД ядра — PVC с `fsGroup: 1000` (пользователь aga из образа пишет в том).

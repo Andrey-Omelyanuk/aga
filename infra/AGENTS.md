@@ -32,6 +32,8 @@
   `dev.localhost` → front, `api.localhost` → core, `auth.localhost` → Keycloak.
   Конфиг ядра — `infra/dev-roles.yaml` (генерируется `make dev-roles` из
   `main/config/roles.yaml`, sso-блок — стендовый, Keycloak этого compose).
+  SSH-ключ aga (`AGA_SSH_PRIVATE_KEY`) пробрасывается ядру из `.env` и
+  инжектится в контейнеры ws при подъёме станции.
   Управление — `make dev-*`.
 - `k8s/core/` — стенд ядра: манифесты ядра, Keycloak, RBAC, PVC, сервисы, ingress;
   `deploy.sh` собирает конфиги из `.env` и `main/config/roles.yaml` (см. `k8s/AGENTS.md`).

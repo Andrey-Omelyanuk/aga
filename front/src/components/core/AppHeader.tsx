@@ -15,7 +15,8 @@ export type TabName =
   | 'sessions'
   | 'personnel'
   | 'files'
-  | 'chat';
+  | 'chat'
+  | 'settings';
 
 const TABS: Array<{ tab: TabName; label: string; to: string }> = [
   { tab: 'projects', label: 'Проекты', to: '/projects' },
@@ -26,6 +27,7 @@ const TABS: Array<{ tab: TabName; label: string; to: string }> = [
   { tab: 'personnel', label: 'Персонал', to: '/personnel' },
   { tab: 'files', label: 'Файлы', to: '/files' },
   { tab: 'chat', label: 'Чат', to: '/chat' },
+  { tab: 'settings', label: 'Настройки', to: '/settings' },
 ];
 
 export const AppHeader = observer(() => {

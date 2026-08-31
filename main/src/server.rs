@@ -170,6 +170,8 @@ pub fn create_router(state: AppState) -> Router {
         // === Просмотр содержимого проекта в воркстейшне ===
         .route("/workstations/:id/tree", get(workstation_tree))
         .route("/workstations/:id/file", get(workstation_file))
+        // === Настройки: публичный SSH-ключ aga ===
+        .route("/settings/ssh-key", get(get_ssh_key))
         .layer(cors)
         .with_state(state)
 }
@@ -1175,10 +1177,20 @@ async fn create_workstation(
 
     let name = payload.name.unwrap_or_else(|| "ws".to_string());
 
+    // SSH-ключ aga (env): прокидывается в воркстейшн автоматически. Явный
+    // `secret` из запроса (имя k8s-Secret) имеет приоритет; иначе при
+    // заданном ключе используется общий `aga-ssh`.
+    let ssh_key = crate::ssh_key::private_key_from_env();
+    let effective_secret = match (payload.secret.clone(), ssh_key.as_ref()) {
+        (Some(secret), _) => Some(secret),
+        (None, Some(_)) => Some(crate::ssh_key::SSH_SECRET_NAME.to_string()),
+        (None, None) => None,
+    };
+
     // Воркстейшн — под в Kubernetes: сначала запись, потом сам под.
     let ws = state
         .chat_store
-        .create_workstation(payload.project_id, &name, payload.secret.as_deref())
+        .create_workstation(payload.project_id, &name, effective_secret.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1196,6 +1208,27 @@ async fn create_workstation(
     let pod_name = Cluster::pod_name(ws.id);
     let branch = Cluster::branch_name(ws.id);
 
+    // Ключ до подъёма станции: в k8s — Secret в кластере (монтируется в под
+    // манифестом, поэтому создаётся до пода). В dev-режиме (docker) ключ
+    // инжектится после `create_pod` — контейнер должен существовать.
+    if let (Some(key), crate::cluster::Backend::K8s) = (ssh_key.as_ref(), state.cluster.backend) {
+        if let Err(e) = state
+            .cluster
+            .ensure_ssh_secret(crate::ssh_key::SSH_SECRET_NAME, key)
+            .await
+        {
+            tracing::error!(
+                "failed to ensure ssh secret {}: {e}",
+                crate::ssh_key::SSH_SECRET_NAME
+            );
+            let _ = state
+                .chat_store
+                .set_workstation_state(ws.id, "failed")
+                .await;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
     if let Err(e) = state
         .cluster
         .create_pod(&pod_name, &git_url, &branch, ws.secret.as_deref())
@@ -1207,6 +1240,15 @@ async fn create_workstation(
             .set_workstation_state(ws.id, "failed")
             .await;
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // dev-режим: ключ в ~/.ssh существующего контейнера (созданного выше или
+    // переиспользованного из compose-стенда). Сбой инъекции не роняет станцию.
+    if let (Some(key), crate::cluster::Backend::Docker) = (ssh_key.as_ref(), state.cluster.backend)
+    {
+        if let Err(e) = state.cluster.inject_ssh_key(&pod_name, key).await {
+            tracing::error!("failed to inject ssh key into {pod_name}: {e}");
+        }
     }
 
     // Под уже создан; готовность (Running) подтягиваем ожиданием — под
@@ -1426,6 +1468,44 @@ fn map_file_error(e: crate::project_files::FileError) -> StatusCode {
         crate::project_files::FileError::InvalidPath(_) => StatusCode::BAD_REQUEST,
         crate::project_files::FileError::NotFound => StatusCode::NOT_FOUND,
         crate::project_files::FileError::Exec(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Публичный SSH-ключ aga (общий на инстанс) для страницы «Настройки».
+/// Приватный ключ задаёт админ в env `AGA_SSH_PRIVATE_KEY`; здесь отдаётся
+/// только публичный (не секрет) — для добавления в deploy-ключи репозитория.
+#[derive(Serialize)]
+pub struct SshKeyInfo {
+    /// Есть ли настроенный ключ (env задан).
+    configured: bool,
+    /// Публичный ключ в OpenSSH-формате (`ssh-ed25519 AAAA...`).
+    public_key: Option<String>,
+    /// SHA256-fingerprint (`SHA256:...`).
+    fingerprint: Option<String>,
+}
+
+async fn get_ssh_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SshKeyInfo>, StatusCode> {
+    current_user(&state, &headers).await?;
+    let Some(private_key) = crate::ssh_key::private_key_from_env() else {
+        return Ok(Json(SshKeyInfo {
+            configured: false,
+            public_key: None,
+            fingerprint: None,
+        }));
+    };
+    match crate::ssh_key::derive_public_key(&private_key) {
+        Ok((public_key, fingerprint)) => Ok(Json(SshKeyInfo {
+            configured: true,
+            public_key: Some(public_key),
+            fingerprint: Some(fingerprint),
+        })),
+        Err(e) => {
+            tracing::error!("invalid {}: {e}", crate::ssh_key::SSH_PRIVATE_KEY_ENV);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
@@ -2394,10 +2474,12 @@ mod tests {
             .await
             .unwrap();
         // Участник проходит проверку доступа к содержимому любого воркстейшна.
-        // В тестовом окружении kubectl недоступен — исполнение падает с 500,
-        // но это уже не 401/403: проверка видимости пройдена.
+        // Исполнение команды в тестовом окружении может упасть по-разному
+        // (нет kubectl/docker — 500; kubectl есть, но пода нет — 404), поэтому
+        // проверяем не код ошибки, а то, что это не 401/403: видимость пройдена.
         let (status, _) = get("/workstations/1/tree", &headers, state.clone()).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        assert_ne!(status, StatusCode::FORBIDDEN);
         cleanup(&file).await;
     }
 

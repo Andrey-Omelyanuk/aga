@@ -46,6 +46,9 @@ services:
       - LLM_API_URL=${LLM_API_URL:-http://host.docker.internal:11434/v1}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL=${LLM_MODEL:-qwen3.5:9b}
+      # SSH-ключ aga (git+ssh для воркстейшнов): приватный задаёт админ в .env;
+      # ядро прокидывает его в контейнеры ws (inject_ssh_key) при подъёме.
+      - AGA_SSH_PRIVATE_KEY=${AGA_SSH_PRIVATE_KEY:-}
       # Канонический адрес SPA dev-стенда — через прокси (dev.localhost),
       # туда же возвращается токен после SSO (auth_callback). Задаём явно,
       # а не из .env: там AGA_FRONT_URL=http://localhost:8081 (для make run),

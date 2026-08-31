@@ -73,6 +73,14 @@ src/
 - **Жизненный цикл воркстейшна:** при подъёме в ws может монтироваться именованный
   k8s-Secret (секреты для сторонних CLI, `secret` у воркстейшна) — хранится только
   имя, в pod рендерится volume+volumeMount; docker-бэкенд секрет игнорирует.
+  SSH-ключ aga (git+ssh-доступ воркстейшнов) задаёт админ в env
+  `AGA_SSH_PRIVATE_KEY` (OpenSSH-формат); ядро само проставляет
+  `secret=aga-ssh` (если в запросе не задан явный): в k8s создаёт Secret
+  `kubectl apply` (`ensure_ssh_secret`) и монтирует в под, в docker —
+  инжектит в `~/.ssh` контейнера после создания (`inject_ssh_key`).
+  Entrypoint воркстейшна раскладывает ключ из `/etc/secrets/*/id_ed25519` в
+  `~/.ssh` до git-клона. Публичный ключ отдаётся на `GET /settings/ssh-key`
+  (см. `ssh_key.rs`).
   Переключить ws на другой проект (`POST /workstations/:id/switch`) можно только на
   свободной станции (нет открытой сессии); сам ws не пересоздаётся — `/work/project`
   переписывается кодом нового проекта через exec (см. `ws_ops::replace_project`;

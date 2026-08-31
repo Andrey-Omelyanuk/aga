@@ -17,6 +17,14 @@ until docker info >/dev/null 2>&1; do
 done
 
 # Клон проекта и работа на своей ветке.
+# SSH-ключ aga (git+ssh): в k8s монтируется k8s-Secret в /etc/secrets/<name>/,
+# в dev-режиме ядро кладёт ключ в ~/.ssh напрямую (docker exec).
+if ls /etc/secrets/*/id_ed25519 >/dev/null 2>&1; then
+  mkdir -p ~/.ssh
+  cp /etc/secrets/*/id_ed25519 ~/.ssh/id_ed25519
+  chmod 600 ~/.ssh/id_ed25519
+  printf 'IdentitiesOnly yes\nStrictHostKeyChecking accept-new\n' > ~/.ssh/config
+fi
 mkdir -p /work
 cd /work
 if [ -n "$GIT_URL" ]; then

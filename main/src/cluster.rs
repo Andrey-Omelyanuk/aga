@@ -261,6 +261,82 @@ impl Cluster {
         Ok(())
     }
 
+    /// Манифест k8s-Secret с приватным SSH-ключом (data `id_ed25519`).
+    /// Секрет монтируется в под воркстейшна через `workstations.secret`
+    /// (см. `render_workstation_manifest`); entrypoint раскладывает ключ в
+    /// `~/.ssh` до git-клона.
+    pub fn render_ssh_secret_manifest(
+        &self,
+        name: &str,
+        private_key: &str,
+    ) -> Result<String, ClusterError> {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(private_key.as_bytes());
+        Ok(format!(
+            "apiVersion: v1\n\
+             kind: Secret\n\
+             metadata:\n\
+             \x20 name: {name}\n\
+             \x20 namespace: {ns}\n\
+             type: Opaque\n\
+             data:\n\
+             \x20 id_ed25519: {b64}\n",
+            ns = self.namespace,
+        ))
+    }
+
+    /// Создать/обновить k8s-Secret с приватным SSH-ключом (`kubectl apply`,
+    /// идемпотентно). Только для k8s-бэкенда.
+    pub async fn ensure_ssh_secret(
+        &self,
+        name: &str,
+        private_key: &str,
+    ) -> Result<(), ClusterError> {
+        let manifest = self.render_ssh_secret_manifest(name, private_key)?;
+        let mut child = Command::new(&self.kubectl)
+            .args(["apply", "-f", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(manifest.as_bytes()).await?;
+        }
+        check_output(child.wait_with_output().await?)?;
+        Ok(())
+    }
+
+    /// Положить приватный SSH-ключ в `~/.ssh` существующего контейнера
+    /// воркстейшна (docker). Dev-стенд поднимает ws-контейнеры заранее —
+    /// ядро переиспользует их, поэтому ключ инжектится при подъёме станции.
+    pub async fn inject_ssh_key(
+        &self,
+        container: &str,
+        private_key: &str,
+    ) -> Result<(), ClusterError> {
+        let mut child = Command::new("docker")
+            .args([
+                "exec",
+                "-i",
+                container,
+                "sh",
+                "-c",
+                "mkdir -p ~/.ssh && \
+                 cat > ~/.ssh/id_ed25519 && \
+                 chmod 600 ~/.ssh/id_ed25519 && \
+                 printf 'IdentitiesOnly yes\\nStrictHostKeyChecking accept-new\\n' > ~/.ssh/config",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(private_key.as_bytes()).await?;
+        }
+        check_output(child.wait_with_output().await?)?;
+        Ok(())
+    }
+
     /// Удалить воркстейшн (под в k8s или контейнер в docker).
     pub async fn delete_pod(&self, pod_name: &str) -> Result<(), ClusterError> {
         match self.backend {
@@ -406,6 +482,18 @@ mod tests {
             .unwrap();
         assert!(!plain.contains("secretName"));
         assert!(!plain.contains("volumeMounts"));
+    }
+
+    #[test]
+    fn ssh_secret_manifest_carries_base64_key_into_namespace() {
+        let c = cluster();
+        let m = c
+            .render_ssh_secret_manifest("aga-ssh", "private-key-bytes")
+            .unwrap();
+        assert!(m.contains("kind: Secret"));
+        assert!(m.contains("name: aga-ssh"));
+        assert!(m.contains("namespace: aga"));
+        assert!(m.contains("id_ed25519: cHJpdmF0ZS1rZXktYnl0ZXM="));
     }
 
     #[test]

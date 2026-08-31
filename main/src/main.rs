@@ -9,6 +9,7 @@ mod reactive;
 mod scope;
 mod seed;
 mod server;
+mod ssh_key;
 mod trace;
 mod workstation;
 mod ws_ops;

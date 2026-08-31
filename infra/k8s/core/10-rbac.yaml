@@ -5,7 +5,8 @@ metadata:
   namespace: aga
 ---
 # Минимум для управления воркстейшн-подами: ядро создаёт/удаляет поды
-# ws-<id> и делает kubectl exec для команд агента. Больше ничего.
+# ws-<id> и делает kubectl exec для команд агента. Secret `aga-ssh` (SSH-ключ
+# aga из env) ядро создаёт/обновляет kubectl apply.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -18,6 +19,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

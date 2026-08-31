@@ -50,6 +50,11 @@ spec:
           image: aga-core:latest
           imagePullPolicy: IfNotPresent
           command: ["/app/aga"]
+          envFrom:
+            # SSH-ключ aga (AGA_SSH_PRIVATE_KEY) — Secret aga-ssh-env, создаёт
+            # deploy.sh из .env (пусто, если ключ не задан).
+            - secretRef:
+                name: aga-ssh-env
           env:
             - name: AGA_CONFIG_PATH
               value: /etc/aga/roles.yaml

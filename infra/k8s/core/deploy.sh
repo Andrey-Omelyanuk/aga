@@ -66,6 +66,14 @@ $KUBECTL create configmap aga-roles -n "$NS" \
   --from-file=roles.yaml="$WORK/roles.yaml" \
   --dry-run=client -o yaml | $KUBECTL apply -f -
 
+echo "==> ssh secret (env ядра)"
+# SSH-ключ aga (git+ssh для воркстейшнов): приватный задаёт админ в
+# AGA_SSH_PRIVATE_KEY (из .env); не задан — пустой Secret, ядро работает без
+# ключа. Монтируется в под как env (см. 30-deployment-core.yaml envFrom).
+$KUBECTL create secret generic aga-ssh-env -n "$NS" \
+  --from-literal=AGA_SSH_PRIVATE_KEY="${AGA_SSH_PRIVATE_KEY:-}" \
+  --dry-run=client -o yaml | $KUBECTL apply -f -
+
 # realm Keycloak: тестовые участники и клиент aga.
 $KUBECTL create configmap aga-keycloak-realm -n "$NS" \
   --from-file=realm.json="$K8S_DIR/keycloak-realm.json" \

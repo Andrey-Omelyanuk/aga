@@ -13,6 +13,7 @@ const SessionsPage = lazy(() => import('./pages/app/sessions'));
 const PersonnelPage = lazy(() => import('./pages/app/personnel'));
 const FilesPage = lazy(() => import('./pages/app/files'));
 const ChatPage = lazy(() => import('./pages/app/chat'));
+const SettingsPage = lazy(() => import('./pages/app/settings'));
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <BrowserRouter>
@@ -35,6 +36,7 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
           <Route path="files" element={<FilesPage />} />
           <Route path="chat" element={<ChatPage />} />
           <Route path="chat/:id" element={<ChatPage />} />
+          <Route path="settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/projects" replace />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />

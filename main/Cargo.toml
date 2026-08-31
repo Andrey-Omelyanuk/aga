@@ -30,6 +30,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 regex = "1"
 base64 = "0.21"
+# Парсинг ssh-приватного ключа (OpenSSH) и вывод публичного (RustCrypto).
+ssh-key = "0.6.5"
 jsonwebtoken = "9"
 futures = "0.3"
 bytes = "1"
