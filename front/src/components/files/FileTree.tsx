@@ -60,7 +60,7 @@ export const FileTree = observer(() => {
   return (
     <div>
       {fileBrowser.entries.map((entry) => (
-        <TreeEntryView key={entry.path} entry={entry} onOpen={fileBrowser.openFile} />
+        <TreeEntryView key={entry.path} entry={entry} onOpen={(e) => fileBrowser.openFile(e)} />
       ))}
     </div>
   );

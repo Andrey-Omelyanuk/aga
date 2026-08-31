@@ -13,18 +13,31 @@ pub const SSH_PRIVATE_KEY_ENV: &str = "AGA_SSH_PRIVATE_KEY";
 /// воркстейшнов (см. `workstations.secret`).
 pub const SSH_SECRET_NAME: &str = "aga-ssh";
 
-/// Приватный ключ из env, если задан и не пуст. Литералы `\n` разворачиваются
-/// в переносы строк: в `.env` многострочный ключ записывается одной строкой
-/// (`make` не умеет include многострочные значения); реальные переносы тоже
-/// допустимы (docker/k8s env) — тогда изменений нет.
-pub fn private_key_from_env() -> Option<String> {
-    let value = std::env::var(SSH_PRIVATE_KEY_ENV).ok()?;
+/// Развернуть значение приватного ключа в пригодный для OpenSSH вид.
+/// Литералы `\n` -> переводы строк (в `.env` многострочный ключ записывается
+/// одной строкой; `make` не умеет include многострочные значения); реальные
+/// переносы оставляются как есть. OpenSSH требует, чтобы строка
+/// `-----END OPENSSH PRIVATE KEY-----` завершалась переводом строки — в
+/// `.env` финального `\n` после END нет, поэтому гарантируем завершающий `\n`.
+fn unfold_private_key(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
         None
     } else {
-        Some(value.replace("\\n", "\n"))
+        let unfolded = value.replace("\\n", "\n");
+        Some(if unfolded.ends_with('\n') {
+            unfolded
+        } else {
+            format!("{unfolded}\n")
+        })
     }
+}
+
+/// Приватный ключ из env, если задан и не пуст.
+pub fn private_key_from_env() -> Option<String> {
+    std::env::var(SSH_PRIVATE_KEY_ENV)
+        .ok()
+        .and_then(|value| unfold_private_key(&value))
 }
 
 /// Публичный ключ и SHA256-fingerprint из приватного (OpenSSH-формат).
@@ -59,21 +72,33 @@ WuBvbmQAW2oPWYtz3+xWAAAABHRlc3QB
 
     #[test]
     fn unfolds_literal_newlines_from_single_line_env() {
-        std::env::set_var(
-            SSH_PRIVATE_KEY_ENV,
+        let value = unfold_private_key(
             "-----BEGIN OPENSSH PRIVATE KEY-----\\nline\\n-----END OPENSSH PRIVATE KEY-----",
-        );
-        let value = private_key_from_env().unwrap();
+        )
+        .unwrap();
         assert!(value.contains("KEY-----\nline\n-----END"));
-        std::env::remove_var(SSH_PRIVATE_KEY_ENV);
     }
 
     #[test]
     fn keeps_real_newlines_untouched() {
-        std::env::set_var(SSH_PRIVATE_KEY_ENV, "a\nb");
-        let value = private_key_from_env().unwrap();
-        assert_eq!(value, "a\nb");
-        std::env::remove_var(SSH_PRIVATE_KEY_ENV);
+        // Гарантированный завершающий `\n` (требование OpenSSH) тоже добавлен.
+        assert_eq!(unfold_private_key("a\nb").unwrap(), "a\nb\n");
+    }
+
+    #[test]
+    fn private_key_always_ends_with_newline() {
+        // В `.env` ключ одной строкой, без `\n` после END: OpenSSH не грузит
+        // ключ без завершающего перевода строки ("error in libcrypto").
+        let value = unfold_private_key(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\\nline\\n-----END OPENSSH PRIVATE KEY-----",
+        )
+        .unwrap();
+        assert!(value.ends_with("KEY-----\n"));
+    }
+
+    #[test]
+    fn empty_env_value_means_not_configured() {
+        assert!(unfold_private_key("  ").is_none());
     }
 
     #[test]

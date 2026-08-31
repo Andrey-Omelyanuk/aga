@@ -6,15 +6,18 @@ use crate::project_files::PROJECT_ROOT;
 /// поэтому сам ws (под/сервис) не пересоздаётся — в отличие от `create_pod`.
 /// Клонируем во временный каталог и подменяем содержимое только при успехе:
 /// сбой clone (например, недоступный git_url) не уничтожает текущий проект.
-/// Каталог как таковой не удаляем (в dev `/work/project` — точка бинд-маунта),
-/// только его содержимое — так команда работает и в поде, и в контейнере.
+/// Временный каталог — `$$` (PID шелла exec): два параллельных switch одного
+/// ws не дерутся за общий `.new`. Каталог как таковой не удаляем (в dev
+/// `/work/project` — точка бинд-маунта), только его содержимое — так команда
+/// работает и в поде, и в контейнере.
 pub fn switch_project_command(git_url: &str, branch: &str) -> String {
-    let tmp = format!("{root}.new", root = PROJECT_ROOT);
+    // Временный каталог — `/work/project.new.<pid>`: `$$` вне кавычек, иначе
+    // шелл его не раскроет. PID у каждого `sh -c` свой — параллельные switch
+    // одного ws не дерутся за общий `.new`.
     format!(
-        "rm -rf '{tmp}' && git clone '{url}' '{tmp}' && git -C '{tmp}' checkout -B '{branch}' && find '{root}' -mindepth 1 -delete && cp -a '{tmp}/.' '{root}/' && rm -rf '{tmp}'",
-        tmp = tmp,
-        url = git_url,
+        "rm -rf '{root}.new.'$$ && git clone '{url}' '{root}.new.'$$ && git -C '{root}.new.'$$ checkout -B '{branch}' && find '{root}' -mindepth 1 -delete && cp -a '{root}.new.'$$/. '{root}/' && rm -rf '{root}.new.'$$",
         root = PROJECT_ROOT,
+        url = git_url,
         branch = branch
     )
 }
@@ -88,7 +91,12 @@ mod tests {
                     .find(&format!("find '{PROJECT_ROOT}' -mindepth 1 -delete"))
                     .unwrap()
         );
-        assert!(cmd.contains(&format!("cp -a '{PROJECT_ROOT}.new/.' '{PROJECT_ROOT}/'")));
+        // Временный каталог уникален на вызов (`$$` — PID шелла exec, вне
+        // кавычек): два параллельных switch не дерутся за общий путь.
+        assert!(cmd.contains(&format!(
+            "cp -a '{PROJECT_ROOT}.new.'$$/. '{PROJECT_ROOT}/'"
+        )));
+        assert!(cmd.contains(&format!("rm -rf '{PROJECT_ROOT}.new.'$$")));
     }
 
     #[test]

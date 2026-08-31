@@ -1326,6 +1326,22 @@ async fn switch_workstation(
     };
     let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
     let branch = Cluster::branch_name(id);
+    // SSH-ключ aga для git+ssh-клона: в k8s-поде ключ приходит из Secret при
+    // создании, в dev (docker) контейнеры ws поднимаются заранее и
+    // переиспользуются — ключ инжектится при подъёме станции (create_pod).
+    // switch не пересоздаёт контейнер, поэтому ключ нужен и здесь.
+    if let (Some(key), crate::cluster::Backend::Docker) = (
+        crate::ssh_key::private_key_from_env().as_ref(),
+        state.cluster.backend,
+    ) {
+        if let Err(e) = state
+            .cluster
+            .inject_ssh_key(&Cluster::pod_name(id), key)
+            .await
+        {
+            tracing::warn!("failed to inject ssh key into ws-{id}: {e}");
+        }
+    }
     // Смена проекта уже зафиксирована в БД (источник истины для списка).
     // Перезапись /work/project — лучшая попытка: в dev-стенде git_url может
     // быть плейсхолдером (воркстейшн работает с примонтированной копией),

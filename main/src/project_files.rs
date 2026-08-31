@@ -73,14 +73,16 @@ pub fn sanitize_rel(path: &str) -> Result<String, FileError> {
     Ok(cleaned.to_string())
 }
 
-/// Команда листинга папки: `find <root>/<rel> -maxdepth 1` с типом и путём.
-/// GNU find (`%y` — 'f'/'d', `%p` — полный путь) — на машине-воркстейшне Linux.
-fn listing_command(root: &str, rel: &str) -> String {
+/// Команды листинга папки. GNU-`find -printf` в BusyBox (alpine, образ
+/// воркстейшна `docker:dind`) отсутствует, поэтому типы получаем двумя
+/// проходами: папки (`-type d`) и файлы (`-type f`). `-maxdepth/-mindepth/
+/// -type/-print` есть и в GNU, и в BusyBox — команда переносима между ними.
+fn listing_commands(root: &str, rel: &str) -> [String; 2] {
     let target = join_root(root, rel);
-    format!(
-        "find '{}' -maxdepth 1 -mindepth 1 -printf '%y\\t%p\\n'",
-        target
-    )
+    [
+        format!("find '{}' -maxdepth 1 -mindepth 1 -type d -print", target),
+        format!("find '{}' -maxdepth 1 -mindepth 1 -type f -print", target),
+    ]
 }
 
 /// Команда чтения файла: base64 (бинарно-безопасно для текста и медиа),
@@ -153,25 +155,15 @@ pub fn mime_for(path: &str) -> String {
     base.to_string()
 }
 
-/// Список папки. `root` — путь к проекту на машине-воркстейшне (в проде
-/// PROJECT_ROOT); rel — относительный (санитизированный) путь.
-pub async fn tree(executor: &Executor, root: &str, rel: &str) -> Result<Tree, FileError> {
-    let rel = sanitize_rel(rel)?;
-    let out = match execute_via_executor(executor, &listing_command(root, &rel)).await {
-        Ok(out) => out,
-        Err(e) => return Err(exec_error_or_not_found(e)),
-    };
-    let mut entries: Vec<FileEntry> = Vec::new();
+/// Разобрать строки `find -print` (по одному пути в строке) в записи дерева
+/// заданного типа (`kind`).
+fn parse_find_lines(out: &str, root: &str, kind: &str, entries: &mut Vec<FileEntry>) {
     for line in out.lines() {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
-        let (kind, full) = match line.split_once('\t') {
-            Some((k, p)) => (k, p),
-            None => ("f", line),
-        };
-        let full = full.trim_end_matches('/');
+        let full = line.trim_end_matches('/');
         if full.is_empty() {
             continue;
         }
@@ -180,12 +172,25 @@ pub async fn tree(executor: &Executor, root: &str, rel: &str) -> Result<Tree, Fi
             .strip_prefix(root.trim_end_matches('/'))
             .and_then(|p| p.strip_prefix('/'))
             .unwrap_or(full);
-        let entry_kind = if kind == "d" { "dir" } else { "file" };
         entries.push(FileEntry {
             name,
             path: rel_path.to_string(),
-            kind: entry_kind.to_string(),
+            kind: kind.to_string(),
         });
+    }
+}
+
+/// Список папки. `root` — путь к проекту на машине-воркстейшне (в проде
+/// PROJECT_ROOT); rel — относительный (санитизированный) путь.
+pub async fn tree(executor: &Executor, root: &str, rel: &str) -> Result<Tree, FileError> {
+    let rel = sanitize_rel(rel)?;
+    let mut entries: Vec<FileEntry> = Vec::new();
+    for (command, kind) in listing_commands(root, &rel).into_iter().zip(["dir", "file"]) {
+        let out = match execute_via_executor(executor, &command).await {
+            Ok(out) => out,
+            Err(e) => return Err(exec_error_or_not_found(e)),
+        };
+        parse_find_lines(&out, root, kind, &mut entries);
     }
     entries.sort_by(|a, b| {
         a.kind
@@ -205,8 +210,11 @@ pub async fn read(executor: &Executor, root: &str, rel: &str) -> Result<FileCont
         Ok(out) => out,
         Err(e) => return Err(exec_error_or_not_found(e)),
     };
+    // `base64` CLI оборачивает вывод по 76 символов; декодер crate требует
+    // сплошную строку — убираем все пробельные символы.
+    let b64 = out.chars().filter(|c| !c.is_whitespace()).collect::<String>();
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(out.trim())
+        .decode(&b64)
         .map_err(|e| FileError::Exec(format!("base64 decode: {e}")))?;
     Ok(FileContent {
         bytes,
@@ -267,6 +275,19 @@ mod tests {
         assert_eq!(&f.mime, "text/plain; charset=utf-8");
         let text = String::from_utf8(f.bytes).unwrap();
         assert!(text.contains("fn main"));
+    }
+
+    #[tokio::test]
+    async fn large_text_file_with_wrapped_base64_reads_correctly() {
+        // Файл больше 57 байт: `base64` CLI оборачивает вывод по 76 символов,
+        // декодер должен собирать его из нескольких строк.
+        let (_dir, root) = temp_project();
+        let big = "строка для теста оборачивания base64. ".repeat(20);
+        std::fs::write(root.join("big.txt"), &big).unwrap();
+        let f = read(&Executor::Sh, root.to_str().unwrap(), "big.txt")
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(f.bytes).unwrap(), big);
     }
 
     #[tokio::test]

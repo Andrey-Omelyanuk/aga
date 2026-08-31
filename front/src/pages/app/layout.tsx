@@ -6,7 +6,7 @@ import { AppHeader } from '@/components/core/AppHeader';
 import { Toaster } from '@/components/core/Toaster';
 import { AppContext } from '@/store-hooks';
 import { Project } from '@/models/project';
-import { useObjectInput, useQuery } from '@/utils/mobx';
+import { useObjectInput, useQueryCacheSync } from '@/utils/mobx';
 import useMobX_ORM from '@/utils/useMobX_ORM';
 import me from '@/services/me';
 import LoginPage from './login';
@@ -19,7 +19,7 @@ const AppLayout = observer(() => {
     void me.init().then(() => setReady(true));
   }, []);
 
-  const [projects] = useQuery(Project, { autoupdate: true });
+  const [projects] = useQueryCacheSync(Project, { autoupdate: true });
   // Активный проект — ObjectInput с URL-sync (?project=): глобальный фильтр,
   // на который реактивно смотрят страницы воркстейшнов и сессий.
   const activeProject = useObjectInput(
