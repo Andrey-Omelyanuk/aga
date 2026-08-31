@@ -1,7 +1,7 @@
 import { observer } from 'mobx-react-lite';
 import { NavLink, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import { Link } from '@/components/ui/link';
+import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import me from '@/services/me';
 import { useApp } from '@/store-hooks';
@@ -61,10 +61,14 @@ export const AppHeader = observer(() => {
         ))}
       </nav>
       <span className="flex-1" />
-      {me.show_login && (
-        <Link href={me.loginUrl}>
-          <Button variant="outline">Войти через SSO</Button>
-        </Link>
+      {me.user && !me.anonymous && (
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-slate-700">{me.user.name}</span>
+          {me.user.is_super_user && <Badge variant="warn">admin</Badge>}
+          <Button variant="outline" size="sm" onClick={me.logout}>
+            Выйти
+          </Button>
+        </div>
       )}
     </header>
   );

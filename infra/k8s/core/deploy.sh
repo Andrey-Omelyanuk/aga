@@ -58,6 +58,7 @@ sso:
   jwks_url: http://keycloak:8080/realms/${REALM}/protocol/openid-connect/certs
   authorize_url: ${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/auth
   token_url: http://keycloak:8080/realms/${REALM}/protocol/openid-connect/token
+  end_session_url: ${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/logout
   client_id: aga
   client_secret: ${CLIENT_SECRET}
 EOF

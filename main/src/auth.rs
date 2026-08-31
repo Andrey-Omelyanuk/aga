@@ -14,6 +14,9 @@ pub struct JwtVerifier {
 #[derive(Debug, Deserialize)]
 pub struct Claims {
     pub sub: String,
+    /// Логин пользователя в Keycloak (alice/bob) — отображаемое имя учётки.
+    #[serde(default)]
+    pub preferred_username: Option<String>,
     #[serde(default)]
     pub realm_access: Option<RealmAccess>,
 }
@@ -87,6 +90,8 @@ pub async fn resolve_user(
                 .as_ref()
                 .map(|r| r.roles.iter().any(|r| r == "admin"))
                 .unwrap_or(false);
+            // Отображаемое имя — логин из Keycloak (preferred_username), не UUID sub.
+            let name = claims.preferred_username.as_deref().unwrap_or(&claims.sub);
             if let Some(user) = chat_store
                 .find_user_by_sso(&claims.sub)
                 .await
@@ -94,10 +99,15 @@ pub async fn resolve_user(
             {
                 // Роль в Keycloak могла измениться — обновляем флаг суперпользователя.
                 let _ = chat_store.set_super_user(user.id, is_admin).await;
+                // Имя тоже могло быть создано из sub (UUID) до появления
+                // preferred_username — приводим к логину.
+                if user.name != name {
+                    let _ = chat_store.update_user_name(user.id, name).await;
+                }
                 return Ok(user.id);
             }
             chat_store
-                .insert_user(&claims.sub, "human", is_admin, Some(&claims.sub), None)
+                .insert_user(name, "human", is_admin, Some(&claims.sub), None)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         }

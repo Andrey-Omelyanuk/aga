@@ -25,8 +25,8 @@ CARGO_IN_MAIN = cd main && $(CARGO)
         front-test storybook storybook-build \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
-        dev-prepare dev-up dev-down dev-logs dev-ps dev-reset dev-verify \
-        dev-seed k8s-seed
+dev-prepare dev-up dev-down dev-logs dev-ps dev-reset dev-verify \
+        dev-roles dev-seed k8s-seed
 
 help:
 	@echo "init        - Copy example files to working config (.env, roles.yaml)"
@@ -41,7 +41,8 @@ help:
 	@echo "front-test  - Run frontend unit tests (vitest)"
 	@echo "storybook   - Run Storybook dev server"
 	@echo "dev-prepare - Create empty git repos for ws-1/ws-2 (main/data/work/)"
-	@echo "dev-up      - Start dev stand (docker compose: core + ws-1 + ws-2)"
+	@echo "dev-roles   - Generate infra/dev-roles.yaml with SSO enabled (dev Keycloak)"
+	@echo "dev-up      - Start dev stand (docker compose: core + Keycloak + ws-1 + ws-2)"
 	@echo "dev-down    - Stop dev stand (docker compose down)"
 	@echo "dev-logs    - Follow dev stand logs"
 	@echo "dev-ps      - Show dev stand containers"
@@ -120,8 +121,24 @@ dev-prepare:
 	git -C main/data/work/ws-2 init -q
 	git -C main/data/work/ws-2 -c user.name=aga -c user.email=dev@aga commit -q --allow-empty -m init
 
-dev-up: dev-prepare
-	$(DEV_COMPOSE_CMD) up -d --build
+# Конфиг dev-стенда со включённым SSO: из main/config/roles.yaml (локальный,
+# sso выключен) генерируется infra/dev-roles.yaml, где sso-блок заменён на
+# dev-стендовый (Keycloak compose-стенда: jwks/token внутри сети, authorize —
+# через auth.localhost). Подход тот же, что в k8s core/deploy.sh.
+dev-roles:
+	@if [ ! -f main/config/roles.yaml ]; then echo "roles config not found: main/config/roles.yaml (run 'make init')" >&2; exit 1; fi
+	@awk '/^sso:/{exit} {print}' main/config/roles.yaml > infra/dev-roles.yaml
+	@printf 'sso:\n  enabled: true\n  jwks_url: http://keycloak:8080/realms/aga/protocol/openid-connect/certs\n  authorize_url: http://auth.localhost/realms/aga/protocol/openid-connect/auth\n  token_url: http://keycloak:8080/realms/aga/protocol/openid-connect/token\n  end_session_url: http://auth.localhost/realms/aga/protocol/openid-connect/logout\n  client_id: aga\n  client_secret: aga-secret\n' >> infra/dev-roles.yaml
+	@echo "dev-roles.yaml written (SSO enabled -> dev Keycloak)"
+
+dev-up: dev-prepare dev-roles
+	# dev-prepare пересоздаёт main/data/work/ws-*, а bind-mount держит старый
+	# inode каталога — работающие ws-контейнеры видят пустой /work/project.
+	# force-recreate перепривязывает их к свежим каталогам.
+	$(DEV_COMPOSE_CMD) up -d --build --force-recreate ws-1 ws-2
+	# Прокси монтирует nginx.conf bind'ом — compose не пересоздаёт его при смене
+	# файла; reload подхватывает новую конфигурацию (в т.ч. auth.localhost).
+	@docker exec aga-proxy nginx -s reload >/dev/null 2>&1 || true
 
 dev-down:
 	$(DEV_COMPOSE_CMD) down
@@ -137,13 +154,20 @@ dev-reset:
 	rm -f main/data/trace.db main/data/trace.db-wal main/data/trace.db-shm
 	$(MAKE) dev-up
 
-dev-verify:
-	@curl -fsS http://localhost:8080/users >/dev/null && echo "core OK"
+dev-verify: dev-roles
+	@echo "Waiting for Keycloak realm (auth.localhost)..."
+	@for i in $$(seq 1 60); do \
+		if curl -s --resolve auth.localhost:80:127.0.0.1 http://auth.localhost/realms/aga | grep -q '"realm"'; then break; fi; \
+		sleep 2; \
+	done
+	@test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/users)" = "401" && echo "core SSO: anonymous rejected OK"
+	@test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/auth/login)" = "307" && echo "core auth/login redirect OK"
 	@docker exec ws-1 sh -c "test -d /work/project/.git" && echo "ws-1 OK"
 	@docker exec ws-2 sh -c "test -d /work/project/.git" && echo "ws-2 OK"
 	@curl -fsS http://localhost:$${AGA_FRONT_PORT:-8081}/ >/dev/null && echo "front OK"
+	@curl -s --resolve auth.localhost:80:127.0.0.1 http://auth.localhost/realms/aga | grep -q '"realm"' && echo "proxy auth.localhost (keycloak) OK"
 	@curl -fsS --resolve dev.localhost:80:127.0.0.1 http://dev.localhost/ >/dev/null && echo "proxy dev.localhost OK"
-	@curl -fsS --resolve api.localhost:80:127.0.0.1 http://api.localhost/users >/dev/null && echo "proxy api.localhost OK"
+	@test "$$(curl -s -o /dev/null -w '%{http_code}' --resolve api.localhost:80:127.0.0.1 http://api.localhost/users)" = "401" && echo "proxy api.localhost (SSO) OK"
 
 # Восстановить тестовый набор в БД dev-стенда (контейнер aga-core).
 # Пересобирает образ ядра — seed-подкоманда живёт в бинаре /app/aga.

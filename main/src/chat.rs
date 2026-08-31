@@ -407,6 +407,16 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Обновить отображаемое имя человека (логин из Keycloak).
+    pub async fn update_user_name(&self, id: i64, name: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE chat_users SET name = ? WHERE id = ?")
+            .bind(name)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn is_participant(&self, chat_id: i64, user_id: i64) -> Result<bool, sqlx::Error> {
         let row = sqlx::query(
             "SELECT chat_id FROM chat_participants WHERE chat_id = ? AND chat_user_id = ?",

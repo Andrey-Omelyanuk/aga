@@ -11,5 +11,6 @@ sso:
   jwks_url: null          # https://keycloak/realms/<realm>/protocol/openid-connect/certs
   authorize_url: null     # .../protocol/openid-connect/auth  (для /auth/login)
   token_url: null         # .../protocol/openid-connect/token (для /auth/callback)
+  end_session_url: null   # .../protocol/openid-connect/logout (для /auth/logout)
   client_id: null
   client_secret: null

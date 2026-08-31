@@ -72,7 +72,16 @@ front/
   `window.API_ENDPOINT` (старт контейнера) или fallback по hostname
   (`api.localhost` / `localhost:8080`); request-interceptor добавляет
   `Authorization: Bearer <token>` из `localStorage[aga_token]`; на 401 —
-  `me.show_login = true` (кнопка «Войти через SSO»).
+  `me.show_login = true`.
+- **Вход (гейт):** `me.init()` читает токен из `#token=` в hash, сохраняет в
+  localStorage и пробует `GET /users/me` — это и проба доступа, и данные
+  текущего пользователя: 401 без токена → ядро требует SSO — layout показывает
+  полноэкранную страницу входа (`pages/app/login.tsx`), приложение скрыто;
+  200 без токена — локальный режим без SSO (аноним-супер), UI открыт.
+  С токеном та же проба валидирует его (просроченный удаляется → экран входа).
+  Текущий пользователь хранится в `me.user` и выводится в шапке (`AppHeader`)
+  с кнопкой «Выйти» (`me.logout()` → `/auth/logout` ядра: сброс HttpOnly-куки
+  и end-session Keycloak, если настроен).
 - **Модели:** класс + `@api('endpoint')` + `@model`; поля через `@id`/`@field`.
   `@api` назначает `defaultRepository.adapter = new HttpAdapter(endpoint)`
   (декоратор снизу-вверх: сначала `@model`, потом `@api`). Ручных registry нет.
@@ -96,7 +105,8 @@ front/
   participants}` — разворачивается в плоский объект модели). Реактивных агентов
   ждём опросом (`setInterval`, pub-sub-сервер пока не поднят).
 - **Вход:** `me.init()` читает токен из `#token=` в hash; после входа —
-  в localStorage; 401 — показываем «Войти через SSO».
+  в localStorage; без токена и с включённым SSO ядра — полноэкранная страница
+  входа (`pages/app/login.tsx`), приложение не рендерится (см. «Вход (гейт)» выше).
 
 ## Non-Obvious Rules
 - **`@api` работает через статику:** декоратор присваивает

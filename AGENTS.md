@@ -76,13 +76,16 @@ aga/
 - Локальная разработка: `make build`, `make run` (ядро, cargo в `main/`),
   `make run-front` (vite dev, `front/`), `make test`, `make lint`,
   `make fmt`.
-- Dev-стенд без кластера (ядро + веб-клиент + 2 воркстейшна в docker compose):
-  `make dev-prepare`, `make dev-up`, `make dev-down`, `make dev-logs`,
-  `make dev-ps`, `make dev-reset`, `make dev-verify`. Воркстейшны — контейнеры
-  `ws-1`/`ws-2` с пустыми git-репо (проект агент наполняет сам); ядро в
-  docker-режиме (`AGA_WS_BACKEND=docker`) переиспользует их; фронт — сервис
-  `front` (nginx, `:8081`); прокси `*.localhost` на `:80` (`dev.localhost` → front,
-  `api.localhost` → core) — как в k8s-стенде.
+- Dev-стенд без кластера (ядро + Keycloak + веб-клиент + 2 воркстейшна в
+  docker compose; SSO включён, как в стенде):
+  `make dev-prepare`, `make dev-roles`, `make dev-up`, `make dev-down`,
+  `make dev-logs`, `make dev-ps`, `make dev-reset`, `make dev-verify`.
+  Воркстейшны — контейнеры `ws-1`/`ws-2` с пустыми git-репо (проект агент
+  наполняет сам); ядро в docker-режиме (`AGA_WS_BACKEND=docker`) переиспользует
+  их; фронт — сервис `front` (vite, `:8081`); прокси `*.localhost` на `:80`
+  (`dev.localhost` → front, `api.localhost` → core, `auth.localhost` → Keycloak)
+  — как в k8s-стенде. `make dev-roles` генерирует `infra/dev-roles.yaml`
+  (roles.yaml со включённым SSO для dev-Keycloak).
 - Тестовый стенд — в k8s (minikube): `make k8s-up`, `make k8s-build`, `make k8s-load`,
   `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`; ручной
   доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси

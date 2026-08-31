@@ -133,8 +133,10 @@ pub fn create_router(state: AppState) -> Router {
         // === SSO (Keycloak): вход веб-клиента ===
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
+        .route("/auth/logout", get(auth_logout))
         // === Модель чата ===
         .route("/users", get(list_users))
+        .route("/users/me", get(me))
         .route("/users/:id", get(get_user))
         .route("/chats", get(list_chats).post(create_chat))
         .route("/chats/:id", get(get_chat))
@@ -704,6 +706,37 @@ async fn auth_callback(
     Ok(resp)
 }
 
+/// Выход: сбрасываем cookie `aga_token` (HttpOnly — JS его сам не удалит) и,
+/// если задан end-session эндпоинт Keycloak, редиректим туда (завершение
+/// SSO-сессии, возврат на фронт), иначе — просто на фронт. Веб-клиент перед
+/// этим удаляет токен из localStorage.
+async fn auth_logout(
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, StatusCode> {
+    let sso = state.config.sso.as_ref().filter(|s| s.enabled);
+    let target = match sso {
+        Some(s) => match s.end_session_url.as_deref() {
+            Some(end) => {
+                let mut url = url::Url::parse(end).map_err(|_| StatusCode::NOT_FOUND)?;
+                url.query_pairs_mut()
+                    .append_pair("client_id", s.client_id.as_deref().unwrap_or_default())
+                    .append_pair("post_logout_redirect_uri", &state.front_url);
+                url.to_string()
+            }
+            None => state.front_url.clone(),
+        },
+        None => state.front_url.clone(),
+    };
+    let mut resp = axum::response::Redirect::temporary(&target).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        "aga_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    Ok(resp)
+}
+
 // === Модель чата ===
 
 async fn list_users(
@@ -730,6 +763,22 @@ async fn get_user(
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// Текущий пользователь (по токену/куке). Веб-клиент берёт его из `/users/me`
+/// для отображения в шапке; он же — проба доступа (401 = нужен вход).
+async fn me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::chat::ChatUser>, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    state
+        .chat_store
+        .get_user(user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 #[derive(Deserialize)]
@@ -1846,6 +1895,7 @@ mod tests {
                 "http://auth.localhost/realms/aga/protocol/openid-connect/auth".into(),
             ),
             token_url: None,
+            end_session_url: None,
             client_id: Some("aga".into()),
             client_secret: None,
         });
@@ -1877,6 +1927,88 @@ mod tests {
         // Абсолютный redirect_uri на хосте SPA, иначе Keycloak после входа
         // вернёт браузер на свой хост (auth.localhost) и будет 404.
         assert_eq!(redirect_uri, "http://dev.localhost/auth/callback");
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn current_user_returned_by_users_me() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = get("/users/me", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let user: crate::chat::ChatUser = serde_json::from_str(&body).unwrap();
+        assert_eq!(user.name, "alice");
+        assert_eq!(user.kind, "human");
+        assert!(!user.is_super_user);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn users_me_requires_auth_with_sso() {
+        let (state, file) = test_state(true).await;
+        let headers = HeaderMap::new();
+        let (status, _) = get("/users/me", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn logout_clears_cookie_and_redirects_to_keycloak_end_session() {
+        let (mut state, file) = test_state(false).await;
+        state.config.sso = Some(crate::config::SsoConfig {
+            enabled: true,
+            jwks_url: None,
+            authorize_url: None,
+            token_url: None,
+            end_session_url: Some(
+                "http://auth.localhost/realms/aga/protocol/openid-connect/logout".into(),
+            ),
+            client_id: Some("aga".into()),
+            client_secret: None,
+        });
+        let router = create_router(state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/logout")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        // Cookie aga_token сброшен (HttpOnly-куку может стереть только сервер).
+        let set_cookie = resp
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.starts_with("aga_token="));
+        assert!(set_cookie.contains("Max-Age=0"));
+        // Редирект на end-session Keycloak с возвратом на фронт.
+        let location = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let url = url::Url::parse(location).unwrap();
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            url.host_str(),
+            Some("auth.localhost"),
+            "end_session: {location}"
+        );
+        assert!(pairs.contains(&("client_id".into(), "aga".into())));
+        assert!(pairs.contains(&(
+            "post_logout_redirect_uri".into(),
+            "http://dev.localhost".into()
+        )));
         cleanup(&file).await;
     }
 

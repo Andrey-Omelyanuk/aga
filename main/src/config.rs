@@ -22,6 +22,9 @@ pub struct SsoConfig {
     /// Адрес token-эндпоинта Keycloak (для `/auth/callback`).
     #[serde(default)]
     pub token_url: Option<String>,
+    /// Адрес end-session эндпоинта Keycloak (для `/auth/logout`).
+    #[serde(default)]
+    pub end_session_url: Option<String>,
     /// Идентификатор клиента aga в Keycloak.
     #[serde(default)]
     pub client_id: Option<String>,

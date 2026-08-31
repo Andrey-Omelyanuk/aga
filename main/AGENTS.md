@@ -45,7 +45,7 @@ src/
 ├── reactive.rs   # ReactiveRunner: реактивные агенты по @Agent.<role>, очередь на воркстейшн
 ├── seed.rs       # Тестовый набор (aga seed): очистка БД + детерминированная фикстура
 ├── auth.rs       # JwtVerifier (JWKS, RS256) + resolve_user: участник/админ из Keycloak или аноним-супер
-└── server.rs     # Axum Router + хендлеры API + SSE для human-запросов + /auth/login, /auth/callback
+└── server.rs     # Axum Router + хендлеры API + SSE для human-запросов + /auth/login, /auth/callback, /auth/logout, /users/me
 ```
 
 ## Patterns
@@ -91,7 +91,7 @@ src/
 - **Воркстейшнами из интерфейса не управляют:** создание/удаление — только суперпользователь (админ внешний, поднимает станции через k8s); участники видят список и состояние (`GET /workstations`), но `POST`/`DELETE` им запрещены (403). Сессию открывают на готовом воркстейшне (`POST /workstations/:id/session`), один воркстейшн — одна активная сессия.
 - **Сессия = корневой чат воркстейшна:** открывается только на воркстейшне в состоянии `ready` и когда активной сессии на нём нет (`open_workstation_session`). Закрыть сессию может только её владелец (или суперпользователь локального режима) — `close_workstation_session`; закрытие освобождает воркстейшн.
 - **Видимость открытая:** «все участники видят все проекты и сессии» — `list_chats_for_user` не фильтрует по участнику, `can_read` всегда true. Персональной видимости нет.
-- **SSO:** `JwtVerifier` проверяет подпись RS256 по JWKS; роли из realm-ролей Keycloak (`participant`/`admin`). Вход веб-клиента — `/auth/login` (редирект в Keycloak) и `/auth/callback` (обмен code→token). API принимает токен из `Authorization: Bearer` или cookie `aga_token` (см. `auth.rs`). Без SSO — аноним-суперпользователь.
+- **SSO:** `JwtVerifier` проверяет подпись RS256 по JWKS; роли из realm-ролей Keycloak (`participant`/`admin`). Вход веб-клиента — `/auth/login` (редирект в Keycloak), `/auth/callback` (обмен code→token), выход — `/auth/logout` (сброс cookie `aga_token`, при заданном `end_session_url` — редирект на end-session Keycloak). Имя учётки — `preferred_username` из JWT (логин), не UUID `sub`. Текущий пользователь — `GET /users/me`. API принимает токен из `Authorization: Bearer` или cookie `aga_token` (см. `auth.rs`). Без SSO — аноним-суперпользователь.
 - **Безопасность команд:** `is_command_allowed()` банит пайпы (`|`), редиректы (`>`, `<`) и конкатенацию (`;`, `&`) на уровне строки — это поверх проверки `allowed_commands`.
 - **Agent per task / per reactive-сообщение:** Agent создаётся на каждую задачу и каждый реактивный запуск; state не хранится между вызовами.
 - **Команды из LLM:** извлекаются из markdown-блоков <code>```bash</code>. Код-блок может содержать несколько команд (построчно). Пустые строки и комментарии (`#`) игнорируются.

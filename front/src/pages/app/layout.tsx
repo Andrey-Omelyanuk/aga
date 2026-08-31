@@ -9,6 +9,7 @@ import { Project } from '@/models/project';
 import { useObjectInput, useQuery } from '@/utils/mobx';
 import useMobX_ORM from '@/utils/useMobX_ORM';
 import me from '@/services/me';
+import LoginPage from './login';
 
 const AppLayout = observer(() => {
   useMobX_ORM();
@@ -33,6 +34,11 @@ const AppLayout = observer(() => {
 
   if (!ready) {
     return <div className="h-screen p-10 text-slate-400">Загрузка…</div>;
+  }
+
+  // SSO включён и токена нет — UI только для участников, приложение не показываем.
+  if (me.show_login && !me.anonymous) {
+    return <LoginPage />;
   }
 
   return (

@@ -63,17 +63,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sso_verifier = match config.sso.as_ref().filter(|s| s.enabled) {
         Some(sso) => match sso.jwks_url.as_deref() {
             Some(url) => {
+                // Keycloak (стенд и dev-стенд) стартует дольше ядра — тянем JWKS
+                // с ретраями, чтобы ядро не поднялось без SSO и не открыло
+                // анонимный доступ. Без JWKS при включённом SSO запуск запрещён.
                 tracing::info!("Загрузка JWKS из {}", url);
-                match fetch_jwks(url).await {
-                    Ok(jwks) => Some(
-                        auth::JwtVerifier::from_jwks_json(&jwks)
-                            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
-                    ),
-                    Err(e) => {
-                        tracing::error!("Не удалось загрузить JWKS из {url}: {e}");
-                        None
+                const ATTEMPTS: u32 = 30;
+                let mut fetched: Option<String> = None;
+                for attempt in 1..=ATTEMPTS {
+                    match fetch_jwks(url).await {
+                        Ok(jwks) => {
+                            fetched = Some(jwks);
+                            break;
+                        }
+                        Err(e) => {
+                            if attempt == ATTEMPTS {
+                                tracing::error!("Не удалось загрузить JWKS из {url}: {e}");
+                            } else {
+                                tracing::warn!(
+                                    "JWKS из {url} пока недоступен: {e}; попытка {attempt}/{ATTEMPTS}"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            }
+                        }
                     }
                 }
+                let jwks = fetched.ok_or_else(|| -> Box<dyn std::error::Error> {
+                    format!("SSO включён, но JWKS из {url} недоступен — запуск без SSO недопустим")
+                        .into()
+                })?;
+                Some(
+                    auth::JwtVerifier::from_jwks_json(&jwks)
+                        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+                )
             }
             None => {
                 tracing::warn!("SSO включён, но jwks_url не задан — работаем без SSO");
