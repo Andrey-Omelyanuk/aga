@@ -1,10 +1,15 @@
 import { createContext, useContext } from 'react';
-import type { AppStore } from './models/store';
+import { ObjectInput } from 'mobx-model-ui';
+import { Project } from '@/models/project';
 
-export const StoreContext = createContext<AppStore | null>(null);
+export interface AppContextValue {
+  activeProject: ObjectInput<Project>;
+}
 
-export function useStore(): AppStore {
-  const store = useContext(StoreContext);
-  if (!store) throw new Error('StoreContext.Provider is missing');
-  return store;
+export const AppContext = createContext<AppContextValue | null>(null);
+
+export function useApp(): AppContextValue {
+  const ctx = useContext(AppContext);
+  if (!ctx) throw new Error('AppContext.Provider is missing');
+  return ctx;
 }

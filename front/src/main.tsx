@@ -1,35 +1,39 @@
-import React from 'react';
+import { lazy, Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
-import { App } from './App';
-import { store } from './store';
-import { StoreContext } from './store-hooks';
-import { Projects } from './pages/Projects';
-import { Workstations } from './pages/Workstations';
-import { Sessions } from './pages/Sessions';
-import { Personnel } from './pages/Personnel';
-import { Files } from './pages/Files';
-import { Chat } from './pages/Chat';
-import './styles/globals.css';
+import NotFoundPage from './pages/404';
+import './index.css';
+
+const AppLayout = lazy(() => import('./pages/app/layout'));
+const ProjectsPage = lazy(() => import('./pages/app/projects'));
+const WorkstationsPage = lazy(() => import('./pages/app/workstations'));
+const SessionsPage = lazy(() => import('./pages/app/sessions'));
+const PersonnelPage = lazy(() => import('./pages/app/personnel'));
+const FilesPage = lazy(() => import('./pages/app/files'));
+const ChatPage = lazy(() => import('./pages/app/chat'));
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
-  <React.StrictMode>
-    <StoreContext.Provider value={store}>
-      <BrowserRouter>
-        <Routes>
-          <Route element={<App />}>
-            <Route index element={<Navigate to="/projects" replace />} />
-            <Route path="projects" element={<Projects />} />
-            <Route path="workstations" element={<Workstations />} />
-            <Route path="sessions" element={<Sessions />} />
-            <Route path="personnel" element={<Personnel />} />
-            <Route path="files" element={<Files />} />
-            <Route path="chat" element={<Chat />} />
-            <Route path="chat/:id" element={<Chat />} />
-            <Route path="*" element={<Navigate to="/projects" replace />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
-    </StoreContext.Provider>
-  </React.StrictMode>,
+  <BrowserRouter>
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <Suspense fallback={<div className="p-10 text-slate-400">Загрузка…</div>}>
+              <AppLayout />
+            </Suspense>
+          }
+        >
+          <Route index element={<Navigate to="/projects" replace />} />
+          <Route path="projects" element={<ProjectsPage />} />
+          <Route path="workstations" element={<WorkstationsPage />} />
+          <Route path="sessions" element={<SessionsPage />} />
+          <Route path="personnel" element={<PersonnelPage />} />
+          <Route path="files" element={<FilesPage />} />
+          <Route path="chat" element={<ChatPage />} />
+          <Route path="chat/:id" element={<ChatPage />} />
+          <Route path="*" element={<Navigate to="/projects" replace />} />
+        </Route>
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
+    </BrowserRouter>,
 );

@@ -20,6 +20,11 @@ spec:
           ports:
             - name: http
               containerPort: 80
+          # Адрес ядра подставляется в index.html при старте контейнера
+          # (replace-env.sh). Без API_ENDPOINT фронт фолбэчит на api.localhost.
+          env:
+            - name: API_ENDPOINT
+              value: "http://api.localhost"
           readinessProbe:
             httpGet:
               path: /
