@@ -60,6 +60,9 @@
   получает 401, `/auth/login` редиректит в Keycloak на `auth.localhost`),
   ws-1/ws-2 ready, фронт отвечает на `${AGA_FRONT_PORT:-8081}`, прокси отдаёт
   SPA на `dev.localhost`, API на `api.localhost`, Keycloak на `auth.localhost`.
+- Вход в Keycloak — тестовые учётки `alice`/`alice-pass` (participant) и
+  `bob`/`bob-pass` (admin); фиксированные `sso_subject` заданы в
+  `k8s/core/keycloak-realm.json` и совпадают с участниками сида (`aga seed`).
 - `make k8s-deploy` + `make k8s-wait` — стенд поднят, API отвечает.
 - `make k8s-verify` — интеграционная проверка стенда в локальном кластере.
 - Критерий: ядро отвечает на HTTP, фронт раздаёт SPA, воркстейшн поднимается

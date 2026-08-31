@@ -92,7 +92,10 @@ aga/
   в Docker, без tunnel) и остановка — `make k8s-dev-stop`.
 - Тестовый набор в БД ядра (сброс + детерминированная фикстура): `make dev-seed`
   (dev-стенд) / `make k8s-seed` (кластер); локально — `cargo run -- seed` в `main/`
-  (см. `main/src/seed.rs`).
+  (см. `main/src/seed.rs`). Участники набора — учётки Keycloak: `alice`/`alice-pass`
+  (participant) и `bob`/`bob-pass` (admin) с фиксированными `sso_subject`
+  (см. `infra/k8s/core/keycloak-realm.json`) — после сида вход через SSO находит
+  этих юзеров, и сессии/чаты принадлежат реальным учёткам.
 - Переменные окружения — `.env` в корне (см. `infra/.env.example`).
 
 ## Non-Obvious Rules

@@ -134,7 +134,9 @@ src/
   `sqlite_sequence` сбрасывается — ID стабильны между запусками. Запуск:
   `make dev-seed` (контейнер aga-core) / `make k8s-seed` (кластер); локально —
   `cargo run -- seed` в `main/`. `roles.yaml` для сида не нужен — подкоманда
-  отрабатывает до загрузки конфига.
+  отрабатывает до загрузки конфига. Участники `alice`/`bob` — учётки Keycloak
+  (фиксированные `sso_subject` из `infra/k8s/core/keycloak-realm.json`, пароли
+  `alice-pass`/`bob-pass`) — вход через SSO после сида находит именно их.
 - **Error handling в API:** большинство хендлеров при ошибке возвращают `500 INTERNAL_SERVER_ERROR` без деталей. Детали — в логах (tracing) и в БД (trace_entries с entry_type = "error").
 - **Просмотр содержимого проекта — только чтение:** `GET /workstations/:id/tree` и
   `GET /workstations/:id/file` читают ФС воркстейшна напрямую (exec `find`/`base64`

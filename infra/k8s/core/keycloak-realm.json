@@ -23,6 +23,7 @@
   "users": [
     {
       "username": "alice",
+      "id": "1a1a1a1a-1a1a-4a1a-8a1a-1a1a1a1a1a1a",
       "enabled": true,
       "email": "alice@aga.test",
       "emailVerified": true,
@@ -33,6 +34,7 @@
     },
     {
       "username": "bob",
+      "id": "2b2b2b2b-2b2b-4b2b-8b2b-2b2b2b2b2b2b",
       "enabled": true,
       "email": "bob@aga.test",
       "emailVerified": true,

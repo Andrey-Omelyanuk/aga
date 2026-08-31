@@ -12,14 +12,30 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     chat.clear_all().await?;
 
     // --- Юзеры: anonymous создаёт ChatStore, участники и агент — фикстура.
+    // Участники alice/bob — те же учётки, что в Keycloak (см.
+    // infra/k8s/core/keycloak-realm.json): фиксированные sso_subject = id из
+    // realm, пароли alice-pass / bob-pass. Вход через SSO находит этих юзеров,
+    // поэтому сессии/чаты сида принадлежат реальным учёткам.
     let anonymous = chat
         .insert_user("anonymous", "anonymous", true, None, None)
         .await?;
     let alice = chat
-        .insert_user("Alice", "human", false, None, Some("participant"))
+        .insert_user(
+            "alice",
+            "human",
+            false,
+            Some("1a1a1a1a-1a1a-4a1a-8a1a-1a1a1a1a1a1a"),
+            Some("participant"),
+        )
         .await?;
     let bob = chat
-        .insert_user("Bob", "human", false, None, Some("participant"))
+        .insert_user(
+            "bob",
+            "human",
+            true, // admin в Keycloak (realmRoles: admin + participant)
+            Some("2b2b2b2b-2b2b-4b2b-8b2b-2b2b2b2b2b2b"),
+            Some("participant"),
+        )
         .await?;
     let bot = chat
         .insert_user("Agent.Bot", "agent", false, None, Some("dev"))
@@ -243,7 +259,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     tracing::info!(
-        "Тестовый набор восстановлен: users={}, set={}, projects={}/{} ws, chats={}",
+        "Тестовый набор восстановлен: users={}, set={}, projects={}/{} ws, chats={}; \
+         вход в Keycloak: alice/alice-pass, bob/bob-pass",
         4,
         set_id,
         p1,
