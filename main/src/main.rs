@@ -7,6 +7,7 @@ mod llm;
 mod project_files;
 mod reactive;
 mod scope;
+mod seed;
 mod server;
 mod trace;
 mod workstation;
@@ -30,10 +31,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // Путь к БД читаем до конфига: seed работает без roles.yaml.
+    let db_path = env::var("AGA_DB_PATH").unwrap_or_else(|_| "./data/trace.db".to_string());
+
+    // `aga seed` — восстановить тестовый набор в БД (см. seed.rs).
+    if std::env::args().nth(1).as_deref() == Some("seed") {
+        return seed::seed(&db_path).await;
+    }
+
     // Загружаем конфигурацию из переменных окружения
     let config_path =
         env::var("AGA_CONFIG_PATH").unwrap_or_else(|_| "./config/roles.yaml".to_string());
-    let db_path = env::var("AGA_DB_PATH").unwrap_or_else(|_| "./data/trace.db".to_string());
     let llm_api_url =
         env::var("LLM_API_URL").unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
     let llm_api_key = env::var("LLM_API_KEY").ok();

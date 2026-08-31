@@ -43,6 +43,7 @@ src/
 ├── cluster.rs    # Cluster — воркстейшн: рендер манифеста пода (k8s) / docker-run (dev), wait_ready, delete
 ├── workstation.rs# executor_for_workstation: воркстейшн → kubectl exec / docker exec
 ├── reactive.rs   # ReactiveRunner: реактивные агенты по @Agent.<role>, очередь на воркстейшн
+├── seed.rs       # Тестовый набор (aga seed): очистка БД + детерминированная фикстура
 ├── auth.rs       # JwtVerifier (JWKS, RS256) + resolve_user: участник/админ из Keycloak или аноним-супер
 └── server.rs     # Axum Router + хендлеры API + SSE для human-запросов + /auth/login, /auth/callback
 ```
@@ -125,6 +126,15 @@ src/
 - **Реактивные агенты:** `@Agent.<имя>` в сообщении триггерит ReactiveRunner;
   конфиг запускаемого агента берётся из набора проекта чата (`agent_role_config`);
   очередь сериализуется per-workstation (ключ 0 = локальный хост).
+- **Тестовый набор (`aga seed`):** восстанавливает в БД детерминированную
+  фикстуру (юзеры, каталог способностей, набор агентов `dev-team`, проекты,
+  воркстейшны ws-1/ws-2, сессия с тредом и артефактом, общий чат с share,
+  выполненная задача с trace-записями + pending human-запрос). Семантика —
+  полный сброс: все таблицы очищаются (`clear_all` в TraceStore/ChatStore) и
+  `sqlite_sequence` сбрасывается — ID стабильны между запусками. Запуск:
+  `make dev-seed` (контейнер aga-core) / `make k8s-seed` (кластер); локально —
+  `cargo run -- seed` в `main/`. `roles.yaml` для сида не нужен — подкоманда
+  отрабатывает до загрузки конфига.
 - **Error handling в API:** большинство хендлеров при ошибке возвращают `500 INTERNAL_SERVER_ERROR` без деталей. Детали — в логах (tracing) и в БД (trace_entries с entry_type = "error").
 - **Просмотр содержимого проекта — только чтение:** `GET /workstations/:id/tree` и
   `GET /workstations/:id/file` читают ФС воркстейшна напрямую (exec `find`/`base64`

@@ -87,6 +87,9 @@ aga/
   `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`; ручной
   доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси
   в Docker, без tunnel) и остановка — `make k8s-dev-stop`.
+- Тестовый набор в БД ядра (сброс + детерминированная фикстура): `make dev-seed`
+  (dev-стенд) / `make k8s-seed` (кластер); локально — `cargo run -- seed` в `main/`
+  (см. `main/src/seed.rs`).
 - Переменные окружения — `.env` в корне (см. `infra/.env.example`).
 
 ## Non-Obvious Rules

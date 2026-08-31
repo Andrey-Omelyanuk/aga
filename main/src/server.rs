@@ -122,10 +122,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         // === Каталог способностей (скиллы и команды с версиями) ===
         .route("/skills", get(list_skills).post(create_skill))
-        .route(
-            "/skills/:id",
-            patch(rename_skill).delete(delete_skill),
-        )
+        .route("/skills/:id", patch(rename_skill).delete(delete_skill))
         .route("/skills/:id/versions", post(add_skill_version))
         .route("/commands", get(list_commands).post(create_command))
         .route(
@@ -1589,11 +1586,7 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).to_string())
     }
 
-    async fn delete_json(
-        uri: &str,
-        headers: &HeaderMap,
-        state: AppState,
-    ) -> (StatusCode, String) {
+    async fn delete_json(uri: &str, headers: &HeaderMap, state: AppState) -> (StatusCode, String) {
         let router = create_router(state);
         let mut builder = Request::builder().method("DELETE").uri(uri);
         if let Some(auth) = headers.get("authorization") {
@@ -2180,12 +2173,14 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         // Удаление убирает из списка; повторное — 404.
-        let (status, _) = delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
+        let (status, _) =
+            delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         let (status, body) = get("/skills", &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         assert!(!body.contains("review2"));
-        let (status, _) = delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
+        let (status, _) =
+            delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         // Команды — тот же каталог, те же правки.
         let (status, body) = post_json(
@@ -2210,7 +2205,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let (status, _) = delete_json(&format!("/commands/{cmd_id}"), &headers, state.clone()).await;
+        let (status, _) =
+            delete_json(&format!("/commands/{cmd_id}"), &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         cleanup(&file).await;
     }

@@ -979,6 +979,34 @@ impl TraceStore {
         }
         Ok(parts.join("\n\n"))
     }
+
+    /// Полностью очистить таблицы трассировки/проектов/наборов и сбросить
+    /// автоинкрементные счётчики (детерминированные ID после пересоздания).
+    /// Используется тестовым набором (`aga seed`) — восстанавливает «чистую»
+    /// БД с фиксированными идентификаторами.
+    pub(crate) async fn clear_all(&self) -> Result<(), sqlx::Error> {
+        // Дети раньше родителей (внешние ключи без каскада в части таблиц).
+        for table in [
+            "trace_entries",
+            "human_requests",
+            "tasks",
+            "project_agent_set",
+            "agent_capabilities",
+            "capability_versions",
+            "agents",
+            "agent_sets",
+            "capabilities",
+            "projects",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table}"))
+                .execute(&self.pool)
+                .await?;
+        }
+        sqlx::query("DELETE FROM sqlite_sequence")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 /// Переименовать `projects.compose_path` в `git_url` у старых БД.
@@ -1630,7 +1658,11 @@ mod tests {
         // Удаление каскадом: версии и данные агенту исчезают.
         assert!(store.delete_capability(skill).await.unwrap());
         assert!(store.get_capability(skill).await.unwrap().is_none());
-        assert!(store.list_capabilities(CapabilityKind::Skill).await.unwrap().is_empty());
+        assert!(store
+            .list_capabilities(CapabilityKind::Skill)
+            .await
+            .unwrap()
+            .is_empty());
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
         let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
         assert!(dev.skills.is_empty());

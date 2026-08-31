@@ -1017,6 +1017,29 @@ impl ChatStore {
             id = parent_id.unwrap();
         }
     }
+
+    /// Полностью очистить таблицы модели чата и сбросить автоинкрементные
+    /// счётчики (детерминированные ID после пересоздания). Используется
+    /// тестовым набором (`aga seed`).
+    pub(crate) async fn clear_all(&self) -> Result<(), sqlx::Error> {
+        // Дети раньше родителей (внешние ключи без каскада в части таблиц).
+        for table in [
+            "artifacts",
+            "messages",
+            "chat_participants",
+            "chats",
+            "workstations",
+            "chat_users",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table}"))
+                .execute(&self.pool)
+                .await?;
+        }
+        sqlx::query("DELETE FROM sqlite_sequence")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 fn user_from_row(r: &sqlx::sqlite::SqliteRow) -> ChatUser {

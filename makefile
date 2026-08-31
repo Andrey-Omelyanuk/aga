@@ -25,7 +25,8 @@ CARGO_IN_MAIN = cd main && $(CARGO)
         front-test storybook storybook-build \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
-        dev-prepare dev-up dev-down dev-logs dev-ps dev-reset dev-verify
+        dev-prepare dev-up dev-down dev-logs dev-ps dev-reset dev-verify \
+        dev-seed k8s-seed
 
 help:
 	@echo "init        - Copy example files to working config (.env, roles.yaml)"
@@ -46,6 +47,8 @@ help:
 	@echo "dev-ps      - Show dev stand containers"
 	@echo "dev-reset   - Recreate dev stand from scratch (fresh DB)"
 	@echo "dev-verify  - Check dev stand: core API + both workstations ready"
+	@echo "dev-seed    - Restore test dataset into dev stand DB (aga seed in core)"
+	@echo "k8s-seed    - Restore test dataset into cluster DB (aga seed via kubectl exec)"
 	@echo "k8s-up      - Start local cluster (minikube)"
 	@echo "k8s-down    - Delete local cluster (minikube delete)"
 	@echo "k8s-build   - Build core, front and workstation images"
@@ -141,6 +144,17 @@ dev-verify:
 	@curl -fsS http://localhost:$${AGA_FRONT_PORT:-8081}/ >/dev/null && echo "front OK"
 	@curl -fsS --resolve dev.localhost:80:127.0.0.1 http://dev.localhost/ >/dev/null && echo "proxy dev.localhost OK"
 	@curl -fsS --resolve api.localhost:80:127.0.0.1 http://api.localhost/users >/dev/null && echo "proxy api.localhost OK"
+
+# Восстановить тестовый набор в БД dev-стенда (контейнер aga-core).
+# Пересобирает образ ядра — seed-подкоманда живёт в бинаре /app/aga.
+dev-seed:
+	$(DEV_COMPOSE_CMD) up -d --build
+	docker exec aga-core /app/aga seed
+
+# Восстановить тестовый набор в БД кластера (PVC). Образ ядра должен быть
+# передеплоен с поддержкой seed (make k8s-build && make k8s-load && make k8s-deploy).
+k8s-seed:
+	$(KUBECTL) exec deploy/aga-core -n $(NS) -- /app/aga seed
 
 k8s-up:
 	minikube start
