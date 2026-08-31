@@ -1,0 +1,264 @@
+import { observer } from 'mobx-react-lite';
+import { useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { Card, CardMeta } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
+import http from '@/services/http';
+import { toaster } from '@/utils/toaster';
+import type { Agent, AgentCapability, CatalogItem } from '@/models/project';
+
+export interface AgentSetEditorProps {
+  setId: number;
+  name: string;
+  agents: Agent[];
+  skills: CatalogItem[];
+  commands: CatalogItem[];
+  onSaved: () => void;
+}
+
+const emptyAgent = (name: string): Agent => ({
+  name,
+  description: '',
+  tools: [],
+  max_iterations: 3,
+  temperature: 0.7,
+  parent_id: null,
+  parent: null,
+  skills: [],
+  commands: [],
+  territory: { folder: name, excludes: [] },
+});
+
+/** Редактор состава набора: агенты, их территория (по дереву), данные скиллы
+ * и команды с версиями, инструменты. Сохраняется целиком (PATCH). */
+export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
+  const { setId, skills, commands, onSaved } = props;
+  const [name, setName] = useState(props.name);
+  const [agents, setAgents] = useState<Agent[]>(() =>
+    props.agents.map((a) => ({
+      ...a,
+      tools: [...a.tools],
+      skills: a.skills.map((s) => ({ ...s })),
+      commands: a.commands.map((c) => ({ ...c })),
+      territory: { ...a.territory },
+      // Родитель хранится по имени (API принимает `parent`); из id выводим имя.
+      parent: a.parent_id != null
+        ? props.agents.find((p) => p.id === a.parent_id)?.name ?? null
+        : (a.parent ?? null),
+    })),
+  );
+  const [saving, setSaving] = useState(false);
+
+  const patchAgent = (index: number, patch: Partial<Agent>) => {
+    setAgents((prev) => prev.map((a, i) => (i === index ? { ...a, ...patch } : a)));
+  };
+
+  const addAgent = () => {
+    setAgents((prev) => [...prev, emptyAgent(`folder-${prev.length + 1}`)]);
+  };
+
+  const removeAgent = (index: number) => {
+    setAgents((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // Включение/выключение способности каталога на агенте; `kind` — skills/commands.
+  const toggleCapability = (
+    agentIndex: number,
+    kind: 'skills' | 'commands',
+    item: CatalogItem,
+    enabled: boolean,
+    pinned = '',
+  ) => {
+    setAgents((prev) =>
+      prev.map((a, i) => {
+        if (i !== agentIndex) return a;
+        const existing = a[kind].filter((c) => c.name !== item.name);
+        const next: AgentCapability[] = enabled
+          ? [...existing, { name: item.name, pinned_version: pinned || null }]
+          : existing;
+        return { ...a, [kind]: next };
+      }),
+    );
+  };
+
+  const setPinned = (
+    agentIndex: number,
+    kind: 'skills' | 'commands',
+    name: string,
+    version: string,
+  ) => {
+    setAgents((prev) =>
+      prev.map((a, i) =>
+        i === agentIndex
+          ? {
+              ...a,
+              [kind]: a[kind].map((c) =>
+                c.name === name ? { ...c, pinned_version: version || null } : c,
+              ),
+            }
+          : a,
+      ),
+    );
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const payloadAgents = agents.map((a) => ({
+        name: a.name,
+        description: a.description,
+        tools: a.tools,
+        max_iterations: a.max_iterations,
+        model: a.model ?? null,
+        temperature: a.temperature,
+        parent: a.parent ?? null,
+        skills: a.skills,
+        commands: a.commands,
+      }));
+      await http.patch(`/agent-sets/${setId}`, { name, agents: payloadAgents });
+      toaster.show({ message: 'Набор сохранён', intent: 'success' });
+      onSaved();
+    } catch {
+      toaster.show({ message: 'Не удалось сохранить набор', intent: 'danger' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const capabilityBlock = (
+    kind: 'skills' | 'commands',
+    items: CatalogItem[],
+    label: string,
+  ) => {
+    if (items.length === 0) {
+      return <div className="text-xs text-slate-400">Каталог «{label}» пуст</div>;
+    }
+    return (
+      <div className="space-y-1">
+        <div className="text-xs font-medium text-slate-500">{label}</div>
+        {agents.map((agent, ai) => (
+          <div key={`${label}-${ai}`} className="space-y-1">
+            {items.map((item) => {
+              const given = agent[kind].find((c) => c.name === item.name);
+              return (
+                <label key={item.name} className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(given)}
+                    onChange={(e) =>
+                      toggleCapability(ai, kind, item, e.target.checked)
+                    }
+                  />
+                  <span className="w-32 truncate">{item.name}</span>
+                  {given && (
+                    <Select
+                      className="h-7 text-xs"
+                      value={given.pinned_version ?? ''}
+                      onChange={(e) => setPinned(ai, kind, item.name, e.target.value)}
+                    >
+                      <option value="">последняя версия</option>
+                      {item.versions.map((v) => (
+                        <option key={v.version} value={v.version}>
+                          версия {v.version}
+                        </option>
+                      ))}
+                    </Select>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-2.5">
+      <div className="flex items-center gap-2">
+        <Input value={name} onChange={(e) => setName(e.target.value)} className="max-w-xs" />
+        <Button onClick={save} disabled={saving}>
+          Сохранить набор
+        </Button>
+      </div>
+
+      {agents.map((agent, i) => {
+        const parentOptions = agents
+          .map((a) => a.name)
+          .filter((n) => n !== agent.name);
+        return (
+          <Card key={i}>
+            <div className="flex items-center gap-2">
+              <Input
+                className="max-w-52"
+                value={agent.name}
+                onChange={(e) => patchAgent(i, { name: e.target.value })}
+                placeholder="папка агента (путь в проекте)"
+              />
+              <Select
+                className="max-w-44"
+                value={agent.parent ?? ''}
+                onChange={(e) => patchAgent(i, { parent: e.target.value || null })}
+              >
+                <option value="">— нет родителя —</option>
+                {parentOptions.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </Select>
+              <Button variant="ghost" size="sm" onClick={() => removeAgent(i)}>
+                Удалить агента
+              </Button>
+            </div>
+            <CardMeta>Территория: {agent.territory.folder || '(корень)'}</CardMeta>
+            {agent.territory.excludes.length > 0 && (
+              <CardMeta>
+                кроме:{' '}
+                {agent.territory.excludes.map((e) => (
+                  <Badge key={e} variant="warn">
+                    {e}
+                  </Badge>
+                ))}
+              </CardMeta>
+            )}
+            <div className="mt-2">
+              <textarea
+                className="min-h-[44px] w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                placeholder="Правила агента"
+                value={agent.description}
+                onChange={(e) => patchAgent(i, { description: e.target.value })}
+              />
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-xs font-medium text-slate-500">Инструменты</span>
+              <Input
+                className="max-w-md text-xs"
+                placeholder="git, make, docker"
+                value={agent.tools.join(', ')}
+                onChange={(e) =>
+                  patchAgent(i, {
+                    tools: e.target.value
+                      .split(',')
+                      .map((t) => t.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-4">
+              {capabilityBlock('skills', skills, 'Скиллы')}
+              {capabilityBlock('commands', commands, 'Команды')}
+            </div>
+          </Card>
+        );
+      })}
+
+      <Button variant="outline" onClick={addAgent}>
+        + Агент
+      </Button>
+    </div>
+  );
+});

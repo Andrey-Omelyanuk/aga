@@ -10,6 +10,11 @@ const config: StorybookConfig = {
   docs: {
     autodocs: 'tag',
   },
+  // react-docgen падает на моделях с декораторами (@api/@model из mobx-model-ui) —
+  // таблицы пропсов не генерируем, витрина компонентов остаётся.
+  typescript: {
+    reactDocgen: false,
+  },
 };
 
 export default config;

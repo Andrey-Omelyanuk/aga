@@ -9,6 +9,7 @@ import { SelectInput } from '@/components/core/inputs';
 
 export type TabName =
   | 'projects'
+  | 'agent-sets'
   | 'workstations'
   | 'sessions'
   | 'personnel'
@@ -17,6 +18,7 @@ export type TabName =
 
 const TABS: Array<{ tab: TabName; label: string; to: string }> = [
   { tab: 'projects', label: 'Проекты', to: '/projects' },
+  { tab: 'agent-sets', label: 'Наборы', to: '/agent-sets' },
   { tab: 'workstations', label: 'Воркстейшны', to: '/workstations' },
   { tab: 'sessions', label: 'Сессии', to: '/sessions' },
   { tab: 'personnel', label: 'Персонал', to: '/personnel' },
