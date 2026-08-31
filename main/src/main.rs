@@ -6,6 +6,7 @@ mod config;
 mod llm;
 mod project_files;
 mod reactive;
+mod scope;
 mod server;
 mod trace;
 mod workstation;

@@ -86,6 +86,8 @@ pub struct Agent {
     command_regex: Regex,
     ask_human_regex: Regex,
     executor: Executor,
+    /// Территория агента в воркстейшне: None — вне воркстейшна (границы нет).
+    scope: Option<crate::scope::Territory>,
 }
 
 impl Agent {
@@ -94,6 +96,7 @@ impl Agent {
         llm_client: LlmClient,
         trace_store: TraceStore,
         executor: Executor,
+        scope: Option<crate::scope::Territory>,
     ) -> Self {
         let command_regex = Regex::new(r"```(?:bash|sh)?\n(.*?)\n```").unwrap();
         let ask_human_regex = Regex::new(r"\[ASK_HUMAN\](.*?)\[/ASK_HUMAN\]").unwrap();
@@ -105,6 +108,7 @@ impl Agent {
             command_regex,
             ask_human_regex,
             executor,
+            scope,
         }
     }
 
@@ -190,6 +194,19 @@ impl Agent {
                     return Err(error.into());
                 }
 
+                // Граница территории: инструмент, меняющий файл вне территории
+                // агента, не выполняется — файл остаётся прежним.
+                if let Some(scope) = &self.scope {
+                    if !scope.write_allowed(&cmd) {
+                        let error =
+                            format!("Command '{}' writes outside the agent's territory", cmd);
+                        self.trace_store
+                            .add_entry(task_id, step, "error", &error, None)
+                            .await?;
+                        return Err(error.into());
+                    }
+                }
+
                 self.trace_store
                     .add_entry(task_id, step, "command", &cmd, None)
                     .await?;
@@ -222,7 +239,13 @@ impl Agent {
         &self,
         command: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        execute_via_executor(&self.executor, command).await
+        // cwd агента — его папка внутри проекта воркстейшна: относительные
+        // записи ложатся в его территорию.
+        let full = match &self.scope {
+            Some(scope) => crate::scope::wrap_command(&scope.folder, command),
+            None => command.to_string(),
+        };
+        execute_via_executor(&self.executor, &full).await
     }
 
     fn extract_commands(&self, text: &str) -> Vec<String> {
@@ -257,7 +280,7 @@ impl Agent {
         }
 
         self.role_config
-            .allowed_commands
+            .tools
             .iter()
             .any(|allowed| base_cmd == allowed || base_cmd.starts_with(&format!("{}-", allowed)))
     }
@@ -266,6 +289,35 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::LlmConfig;
+    use crate::trace::TraceStore;
+
+    async fn test_agent(tools: &[&str]) -> (Agent, std::path::PathBuf) {
+        let file = std::env::temp_dir().join(format!("aga_agent_test_{}.db", uuid::Uuid::new_v4()));
+        let store = TraceStore::new(&file.to_string_lossy()).await.unwrap();
+        let agent = Agent::with_executor(
+            RoleConfig {
+                prompt: "p".to_string(),
+                tools: tools.iter().map(|s| s.to_string()).collect(),
+                max_iterations: 3,
+                llm: LlmConfig {
+                    model: None,
+                    temperature: 0.7,
+                },
+            },
+            LlmClient::new("http://localhost:9", None, "test"),
+            store,
+            Executor::Sh,
+            None,
+        );
+        (agent, file)
+    }
+
+    async fn cleanup(file: &std::path::PathBuf) {
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+    }
 
     #[test]
     fn agent_commands_run_in_workstation_pod() {
@@ -281,5 +333,18 @@ mod tests {
             docker_exec_args("ws-7", "ls -la"),
             vec!["exec", "ws-7", "sh", "-c", "ls -la"]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_executes_only_tools_from_its_list() {
+        let (agent, file) = test_agent(&["git", "make"]).await;
+        // Инструменты списка — можно, с подкомандами тоже.
+        assert!(agent.is_command_allowed("git status"));
+        assert!(agent.is_command_allowed("make build"));
+        assert!(agent.is_command_allowed("git"));
+        // Всё остальное — нельзя.
+        assert!(!agent.is_command_allowed("rm -rf src"));
+        assert!(!agent.is_command_allowed("cargo test"));
+        cleanup(&file).await;
     }
 }

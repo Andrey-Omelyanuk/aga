@@ -70,6 +70,18 @@ pub struct CreateAgentSetRequest {
     pub agents: Vec<crate::trace::AgentSpec>,
 }
 
+#[derive(Deserialize)]
+pub struct CreateCapabilityRequest {
+    pub name: String,
+    pub versions: Vec<crate::trace::CapabilityVersion>,
+}
+
+#[derive(Deserialize)]
+pub struct AddCapabilityVersionRequest {
+    pub version: String,
+    pub content: String,
+}
+
 pub fn create_router(state: AppState) -> Router {
     // SPA (front/) живёт на другом origin — CORS пропускает его. Разрешаем
     // и dev.localhost (k8s-стенд и dev-прокси), и front_url из env (например
@@ -84,7 +96,7 @@ pub fn create_router(state: AppState) -> Router {
     }
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         .allow_headers([CONTENT_TYPE, AUTHORIZATION]);
     Router::new()
         .route("/trace/:task_id", get(get_trace))
@@ -99,8 +111,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/agent-sets", get(list_agent_sets).post(create_agent_set))
         .route(
             "/agent-sets/:id",
-            get(get_agent_set).delete(delete_agent_set),
+            get(get_agent_set)
+                .delete(delete_agent_set)
+                .patch(update_agent_set),
         )
+        // === Каталог способностей (скиллы и команды с версиями) ===
+        .route("/skills", get(list_skills).post(create_skill))
+        .route("/skills/:id/versions", post(add_skill_version))
+        .route("/commands", get(list_commands).post(create_command))
+        .route("/commands/:id/versions", post(add_command_version))
         // === SSO (Keycloak): вход веб-клиента ===
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
@@ -347,6 +366,136 @@ async fn delete_agent_set(
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// Полностью заменить состав набора (имя, агенты с их территорией,
+/// инструментами и данными скиллами/командами). Возвращает обновлённый набор.
+async fn update_agent_set(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateAgentSetRequest>,
+) -> Result<Json<crate::trace::AgentSet>, StatusCode> {
+    current_user(&state, &headers).await?;
+    match state
+        .trace_store
+        .update_agent_set(id, &payload.name, &payload.agents)
+        .await
+    {
+        Ok(true) => state
+            .trace_store
+            .get_agent_set(id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)
+            .map(Json),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn list_skills(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::trace::CapabilityItem>>, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .list_capabilities(crate::trace::CapabilityKind::Skill)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn create_skill(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateCapabilityRequest>,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    current_user(&state, &headers).await?;
+    let id = state
+        .trace_store
+        .create_capability(
+            crate::trace::CapabilityKind::Skill,
+            &payload.name,
+            &payload.versions,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .trace_store
+        .get_capability(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        .map(Json)
+}
+
+async fn add_skill_version(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AddCapabilityVersionRequest>,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .add_capability_version(id, &payload.version, &payload.content)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn list_commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::trace::CapabilityItem>>, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .list_capabilities(crate::trace::CapabilityKind::Command)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn create_command(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateCapabilityRequest>,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    current_user(&state, &headers).await?;
+    let id = state
+        .trace_store
+        .create_capability(
+            crate::trace::CapabilityKind::Command,
+            &payload.name,
+            &payload.versions,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .trace_store
+        .get_capability(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        .map(Json)
+}
+
+async fn add_command_version(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AddCapabilityVersionRequest>,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .add_capability_version(id, &payload.version, &payload.content)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn attach_agent_set(
@@ -1402,6 +1551,29 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    async fn patch_json(
+        uri: &str,
+        headers: &HeaderMap,
+        state: AppState,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        let router = create_router(state);
+        let mut builder = Request::builder().method("PATCH").uri(uri);
+        builder = builder.header("content-type", "application/json");
+        if let Some(auth) = headers.get("authorization") {
+            builder = builder.header("authorization", auth);
+        }
+        let resp = router
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
     #[tokio::test]
     async fn participant_sees_all_projects_via_api() {
         let (state, file) = test_state(true).await;
@@ -1631,11 +1803,13 @@ mod tests {
         serde_json::json!({
             "name": name,
             "description": format!("Правила {name}"),
-            "allowed_commands": ["git", "make"],
+            "tools": ["git", "make"],
             "max_iterations": 3,
             "model": null,
             "temperature": 0.7,
-            "parent": null
+            "parent": null,
+            "skills": [],
+            "commands": []
         })
     }
 
@@ -1673,11 +1847,13 @@ mod tests {
                 &[crate::trace::AgentSpec {
                     name: "dev".to_string(),
                     description: "Правила разработчика".to_string(),
-                    allowed_commands: vec!["git".to_string()],
+                    tools: vec!["git".to_string()],
                     max_iterations: 3,
                     model: None,
                     temperature: 0.7,
                     parent: None,
+                    skills: vec![],
+                    commands: vec![],
                 }],
             )
             .await
@@ -1712,11 +1888,13 @@ mod tests {
                 &[crate::trace::AgentSpec {
                     name: "dev-a".to_string(),
                     description: "a".to_string(),
-                    allowed_commands: vec![],
+                    tools: vec![],
                     max_iterations: 1,
                     model: None,
                     temperature: 0.5,
                     parent: None,
+                    skills: vec![],
+                    commands: vec![],
                 }],
             )
             .await
@@ -1728,11 +1906,13 @@ mod tests {
                 &[crate::trace::AgentSpec {
                     name: "dev-b".to_string(),
                     description: "b".to_string(),
-                    allowed_commands: vec![],
+                    tools: vec![],
                     max_iterations: 1,
                     model: None,
                     temperature: 0.5,
                     parent: None,
+                    skills: vec![],
+                    commands: vec![],
                 }],
             )
             .await
@@ -1761,6 +1941,113 @@ mod tests {
         .await;
         assert!(body.contains("dev-b"));
         assert!(!body.contains("dev-a"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn agent_set_detail_includes_territory_skills_commands_and_tools() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        // Каталог: скилл и команда с версиями.
+        let (status, body) = post_json(
+            "/skills",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "review",
+                "versions": [{"version": "1", "content": "Проверять диф"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let skill_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, _) = post_json(
+            "/commands",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "deploy",
+                "versions": [{"version": "1", "content": "Выкатывать"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Набор с деревом и данными агенту способностями.
+        let (status, body) = post_json(
+            "/agent-sets",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ops",
+                "agents": [{
+                    "name": "src",
+                    "description": "Разработка",
+                    "tools": ["git", "make"],
+                    "max_iterations": 3,
+                    "model": null,
+                    "temperature": 0.7,
+                    "parent": null,
+                    "skills": [{"name": "review", "pinned_version": null}],
+                    "commands": [{"name": "deploy", "pinned_version": "1"}]
+                }]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let set_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        // Состав набора: агенты, территория каждого, данные скиллы и команды
+        // с версиями, инструменты — всё в детали набора.
+        assert!(body.contains("territory"));
+        assert!(body.contains("folder"));
+        assert!(body.contains("src"));
+        assert!(body.contains("tools"));
+        assert!(body.contains("git"));
+        assert!(body.contains("skills"));
+        assert!(body.contains("review"));
+        assert!(body.contains("commands"));
+        assert!(body.contains("pinned_version"));
+        assert!(body.contains(&format!("\"id\":{skill_id}")));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn agent_set_update_persists_changes_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/agent-sets",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [agent_json("dev")] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let set_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        // Правка состава: новое имя и другой агент.
+        let (status, body) = patch_json(
+            &format!("/agent-sets/{set_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "ops2", "agents": [agent_json("api")] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("ops2"));
+        assert!(body.contains("api"));
+        // После обновления страницы состав прежний — изменения сохранились.
+        let (status, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("ops2"));
+        assert!(body.contains("api"));
+        assert!(!body.contains("dev"));
         cleanup(&file).await;
     }
 

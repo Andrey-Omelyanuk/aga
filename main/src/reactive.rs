@@ -8,8 +8,10 @@ use crate::chat::ChatStore;
 use crate::cluster::Cluster;
 use crate::config::{LlmConfig, RoleConfig};
 use crate::llm::LlmClient;
-use crate::trace::{AgentDef, AgentSet, TraceStore};
+use crate::scope::{territory_for, Territory};
+use crate::trace::{AgentSet, TraceStore};
 use crate::workstation::executor_for_workstation;
+
 /// Запускает реактивных агентов по сообщениям чата. Команды и запуски агентов
 /// одного воркстейшна сериализуются (по одному за раз).
 #[derive(Clone)]
@@ -21,26 +23,28 @@ pub struct ReactiveRunner {
     locks: Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>,
 }
 
-/// Собрать конфиг агента (правила, команды, LLM) из его определения в наборе.
-pub fn role_config_from_agent(agent: &AgentDef) -> RoleConfig {
-    RoleConfig {
-        prompt: agent.description.clone(),
-        allowed_commands: agent.allowed_commands.clone(),
+/// Собрать конфиг агента из набора: промпт = правила + данные агенту скиллы и
+/// команды (в зафиксированной или последней версии каталога), инструменты —
+/// отдельный список без версий; территория — папка узла в дереве набора.
+pub async fn resolve_agent(
+    store: &TraceStore,
+    set: &AgentSet,
+    name: &str,
+) -> Result<Option<(RoleConfig, Territory)>, sqlx::Error> {
+    let Some(agent) = set.agents.iter().find(|a| a.name == name) else {
+        return Ok(None);
+    };
+    let prompt = store.agent_prompt(agent).await?;
+    let config = RoleConfig {
+        prompt,
+        tools: agent.tools.clone(),
         max_iterations: agent.max_iterations,
         llm: LlmConfig {
             model: agent.model.clone(),
             temperature: agent.temperature,
         },
-    }
-}
-
-/// Найти агента по имени в наборе и вернуть его конфиг. Агент с таким именем
-/// запускается со своими правилами и LLM, независимо от других агентов набора.
-pub fn agent_role_config(set: &AgentSet, name: &str) -> Option<RoleConfig> {
-    set.agents
-        .iter()
-        .find(|a| a.name == name)
-        .map(role_config_from_agent)
+    };
+    Ok(Some((config, territory_for(set, agent))))
 }
 
 impl ReactiveRunner {
@@ -117,17 +121,28 @@ impl ReactiveRunner {
             tracing::error!("agent {name} not run: project {project_id} has no agent set");
             return;
         };
-        let Some(role_config) = agent_role_config(&set, name) else {
+        let Some((role_config, territory)) = resolve_agent(&self.trace_store, &set, name)
+            .await
+            .unwrap_or(None)
+        else {
             tracing::error!("agent {name} not found in set of project {project_id}");
             return;
         };
 
         let executor = executor_for_workstation(ws_id, &self.cluster);
+        // Территория действует в воркстейшне (есть под/контейнер с проектом);
+        // локальный запуск без воркстейшна границы не имеет.
+        let scope = if ws_id.is_some() {
+            Some(territory)
+        } else {
+            None
+        };
         let agent = Agent::with_executor(
             role_config,
             self.llm_client.clone(),
             self.trace_store.clone(),
             executor,
+            scope,
         );
 
         tracing::info!("reactive agent {name} starting for chat {chat_id}");
@@ -171,60 +186,151 @@ impl ReactiveRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trace::{AgentCapability, AgentSpec, CapabilityKind, CapabilityVersion};
 
-    fn agent_def(
-        name: &str,
-        description: &str,
-        commands: &[&str],
-        model: Option<&str>,
-        temperature: f32,
-    ) -> AgentDef {
-        AgentDef {
-            id: 1,
-            name: name.to_string(),
-            description: description.to_string(),
-            allowed_commands: commands.iter().map(|s| s.to_string()).collect(),
-            max_iterations: 4,
-            model: model.map(|s| s.to_string()),
-            temperature,
-            parent_id: None,
-        }
+    async fn store() -> (TraceStore, std::path::PathBuf) {
+        let file =
+            std::env::temp_dir().join(format!("aga_reactive_test_{}.db", uuid::Uuid::new_v4()));
+        let store = TraceStore::new(&file.to_string_lossy()).await.unwrap();
+        (store, file)
     }
 
-    #[test]
-    fn mentioned_agent_resolves_own_rules_commands_and_llm() {
-        // В чате @Agent.<имя> запускает именно этого агента: его правила идёт в
-        // промпт, команды — в белый список исполнения, LLM — свои.
-        let set = AgentSet {
-            id: 1,
-            name: "ops".to_string(),
-            agents: vec![
-                agent_def(
-                    "dev",
-                    "Правила разработчика",
-                    &["git", "make"],
-                    Some("model-dev"),
-                    0.1,
-                ),
-                agent_def("deploy", "Правила деплоера", &["docker"], None, 0.9),
-            ],
-        };
-        let dev = agent_role_config(&set, "dev").unwrap();
+    async fn cleanup(file: &std::path::PathBuf) {
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+    }
+
+    #[tokio::test]
+    async fn mentioned_agent_resolves_own_rules_commands_and_llm() {
+        let (store, file) = store().await;
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[
+                    AgentSpec {
+                        name: "dev".to_string(),
+                        description: "Правила разработчика".to_string(),
+                        tools: vec!["git".to_string(), "make".to_string()],
+                        max_iterations: 4,
+                        model: Some("model-dev".to_string()),
+                        temperature: 0.1,
+                        parent: None,
+                        skills: vec![],
+                        commands: vec![],
+                    },
+                    AgentSpec {
+                        name: "deploy".to_string(),
+                        description: "Правила деплоера".to_string(),
+                        tools: vec!["docker".to_string()],
+                        max_iterations: 4,
+                        model: None,
+                        temperature: 0.9,
+                        parent: None,
+                        skills: vec![],
+                        commands: vec![],
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+
+        // В чате @Agent.<имя> запускает именно этого агента: его правила идут в
+        // промпт, инструменты — в белый список исполнения, LLM — свои.
+        let (dev, _) = resolve_agent(&store, &set, "dev").await.unwrap().unwrap();
         assert_eq!(dev.prompt, "Правила разработчика");
-        assert_eq!(
-            dev.allowed_commands,
-            vec!["git".to_string(), "make".to_string()]
-        );
+        assert_eq!(dev.tools, vec!["git".to_string(), "make".to_string()]);
         assert_eq!(dev.llm.model.as_deref(), Some("model-dev"));
         assert_eq!(dev.llm.temperature, 0.1);
 
-        let deploy = agent_role_config(&set, "deploy").unwrap();
+        let (deploy, _) = resolve_agent(&store, &set, "deploy")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(deploy.prompt, "Правила деплоера");
-        assert_eq!(deploy.allowed_commands, vec!["docker".to_string()]);
+        assert_eq!(deploy.tools, vec!["docker".to_string()]);
         assert!(deploy.llm.model.is_none());
         assert_eq!(deploy.llm.temperature, 0.9);
 
-        // Несуществующего агента нет — отказа нет запрета, просто нет конфига.
-        assert!(agent_role_config(&set, "nosuch").is_none());
+        // Несуществующего агента нет — отказа нет, просто нет конфига.
+        assert!(resolve_agent(&store, &set, "nosuch")
+            .await
+            .unwrap()
+            .is_none());
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn mentioned_agent_applies_territory_skills_commands_and_tools() {
+        let (store, file) = store().await;
+        // Каталог: скилл и команда с версиями; вторая версия — новая.
+        let skill = store
+            .create_capability(
+                CapabilityKind::Skill,
+                "review",
+                &[CapabilityVersion {
+                    version: "1".to_string(),
+                    content: "Формат диффов".to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .add_capability_version(skill, "2", "Прогон тестов и правки")
+            .await
+            .unwrap();
+        store
+            .create_capability(
+                CapabilityKind::Command,
+                "deploy",
+                &[CapabilityVersion {
+                    version: "1".to_string(),
+                    content: "Выкатывать на стенд".to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[AgentSpec {
+                    name: "src/backend".to_string(),
+                    description: "Бэкенд".to_string(),
+                    tools: vec!["git".to_string(), "make".to_string()],
+                    max_iterations: 3,
+                    model: None,
+                    temperature: 0.7,
+                    parent: None,
+                    skills: vec![AgentCapability {
+                        name: "review".to_string(),
+                        pinned_version: None,
+                    }],
+                    commands: vec![AgentCapability {
+                        name: "deploy".to_string(),
+                        pinned_version: Some("1".to_string()),
+                    }],
+                }],
+            )
+            .await
+            .unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+
+        let (config, territory) = resolve_agent(&store, &set, "src/backend")
+            .await
+            .unwrap()
+            .unwrap();
+        // Промпт: правила + данные скилл (последняя версия) + команда (фикс. 1).
+        assert!(config.prompt.contains("Бэкенд"));
+        assert!(config.prompt.contains("Прогон тестов и правки"));
+        assert!(config.prompt.contains("Выкатывать на стенд"));
+        assert!(config.prompt.contains("review"));
+        assert!(!config.prompt.contains("Формат диффов")); // версия 1 скилла не используется
+                                                           // Инструменты — из списка агента.
+        assert_eq!(config.tools, vec!["git".to_string(), "make".to_string()]);
+        // Территория — папка узла в дереве набора.
+        assert_eq!(territory.folder, "src/backend");
+        cleanup(&file).await;
     }
 }

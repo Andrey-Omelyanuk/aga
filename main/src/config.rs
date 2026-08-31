@@ -33,7 +33,8 @@ pub struct SsoConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RoleConfig {
     pub prompt: String,
-    pub allowed_commands: Vec<String>,
+    /// Инструменты — список исполняемого в консоли воркстейшна, версий у них нет.
+    pub tools: Vec<String>,
     pub max_iterations: u32,
     pub llm: LlmConfig,
 }
