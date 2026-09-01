@@ -110,6 +110,10 @@ services:
     image: aga-workstation:dev
     build: ./k8s/workstation-image
     container_name: ws-1
+    # Rootful DinD (dockerd внутри работает root'ом); команды агента ядро
+    # выполняет через `docker exec -u 1000`, поэтому файлы проекта в bind-mount
+    # принадлежат хостовому пользователю (uid 1000). Docker-демон воркстейшна
+    # изолирован в собственном контейнере — ws-1 и ws-2 не конфликтуют.
     privileged: true
     volumes:
       - ../main/data/work/ws-1:/work/project

@@ -32,9 +32,13 @@ pub fn kubectl_exec_args(namespace: &str, pod: &str, command: &str) -> Vec<Strin
 
 /// Аргументы для `docker exec` в контейнер воркстейшна. В отличие от kubectl,
 /// docker exec разделитель `--` не понимает — команда идёт сразу после имени.
+/// Команды агента выполняются от uid/gid 1000 (владелец bind-mount на хосте dev),
+/// чтобы файлы проекта принадлежали хостовому пользователю, а не root.
 pub fn docker_exec_args(container: &str, command: &str) -> Vec<String> {
     vec![
         "exec".to_string(),
+        "-u".to_string(),
+        "1000:1000".to_string(),
         container.to_string(),
         "sh".to_string(),
         "-c".to_string(),
@@ -331,7 +335,7 @@ mod tests {
     fn agent_commands_run_in_workstation_container() {
         assert_eq!(
             docker_exec_args("ws-7", "ls -la"),
-            vec!["exec", "ws-7", "sh", "-c", "ls -la"]
+            vec!["exec", "-u", "1000:1000", "ws-7", "sh", "-c", "ls -la"]
         );
     }
 
