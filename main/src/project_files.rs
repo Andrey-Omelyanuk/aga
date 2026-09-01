@@ -192,6 +192,9 @@ pub async fn tree(executor: &Executor, root: &str, rel: &str) -> Result<Tree, Fi
         };
         parse_find_lines(&out, root, kind, &mut entries);
     }
+    // Служебная git-директория не содержимое проекта — из дерева её убираем
+    // (иначе у пустого репозитория единственной записью будет `.git`).
+    entries.retain(|e| e.name != ".git");
     entries.sort_by(|a, b| {
         a.kind
             .cmp(&b.kind)
@@ -230,6 +233,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("proj");
         std::fs::create_dir_all(root.join("src/pkg")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(root.join("README.md"), "# Проект\n\nПривет").unwrap();
         std::fs::write(
             root.join("src/main.rs"),
@@ -256,6 +260,8 @@ mod tests {
         let names: Vec<&str> = t.entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"src"));
         assert!(names.contains(&"README.md"));
+        // Служебная git-директория в дереве не показывается.
+        assert!(!names.contains(&".git"));
         // Папки идут первыми; у папки src относительный путь src.
         assert_eq!(t.entries[0].kind, "dir");
         assert!(t.entries.iter().any(|e| e.path == "src"));
