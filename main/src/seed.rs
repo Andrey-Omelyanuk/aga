@@ -1,5 +1,5 @@
 use crate::chat::ChatStore;
-use crate::trace::{AgentCapability, AgentSpec, CapabilityKind, CapabilityVersion, TraceStore};
+use crate::trace::{AgentCapability, AgentSpec, CapabilityKind, TraceStore};
 
 /// Тестовый набор: очищает БД и восстанавливает детерминированную фикстуру
 /// (фиксированные ID) для демо и отладки. Запуск — `aga seed` (см. main.rs),
@@ -42,21 +42,15 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let _ = anonymous;
 
-    // --- Каталог способностей: скиллы и команды с версиями.
+    // --- Каталог способностей: скиллы и команды с одним текущим содержимым.
+    // Создание пишет запись истории (актор — alice, участник из фикстуры).
     let review = trace
         .create_capability(
             CapabilityKind::Skill,
             "code-review",
-            &[
-                CapabilityVersion {
-                    version: "v1".into(),
-                    content: "Ревью по чеклисту: архитектура, безопасность, тесты.".into(),
-                },
-                CapabilityVersion {
-                    version: "v2".into(),
-                    content: "Ревью по чеклисту: архитектура, безопасность, тесты, перфора".into(),
-                },
-            ],
+            "Ревью по чеклисту: архитектура, безопасность, тесты, перфора",
+            alice,
+            "alice",
         )
         .await?;
     let _ = review;
@@ -64,30 +58,27 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .create_capability(
             CapabilityKind::Skill,
             "git-workflow",
-            &[CapabilityVersion {
-                version: "v1".into(),
-                content: "Ветки feature/*, коммиты по conventional-commits.".into(),
-            }],
+            "Ветки feature/*, коммиты по conventional-commits.",
+            alice,
+            "alice",
         )
         .await?;
     trace
         .create_capability(
             CapabilityKind::Command,
             "run-tests",
-            &[CapabilityVersion {
-                version: "v1".into(),
-                content: "Запуск юнит-тестов и линтера пакета.".into(),
-            }],
+            "Запуск юнит-тестов и линтера пакета.",
+            alice,
+            "alice",
         )
         .await?;
     trace
         .create_capability(
             CapabilityKind::Command,
             "deploy",
-            &[CapabilityVersion {
-                version: "v1".into(),
-                content: "Деплой сервиса в staging-окружение.".into(),
-            }],
+            "Деплой сервиса в staging-окружение.",
+            alice,
+            "alice",
         )
         .await?;
 
@@ -107,16 +98,13 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     skills: vec![
                         AgentCapability {
                             name: "code-review".into(),
-                            pinned_version: None,
                         },
                         AgentCapability {
                             name: "git-workflow".into(),
-                            pinned_version: None,
                         },
                     ],
                     commands: vec![AgentCapability {
                         name: "run-tests".into(),
-                        pinned_version: None,
                     }],
                 },
                 AgentSpec {
@@ -130,7 +118,6 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     skills: Vec::new(),
                     commands: vec![AgentCapability {
                         name: "deploy".into(),
-                        pinned_version: None,
                     }],
                 },
             ],

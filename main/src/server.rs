@@ -7,7 +7,7 @@ use axum::{
     },
     response::sse::{Event, Sse},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, post},
     Json, Router,
 };
 use futures_util::stream::{self, Stream};
@@ -39,6 +39,20 @@ pub struct AppState {
 /// участник из токена. Недействительный токен — 401.
 async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<i64, StatusCode> {
     auth::resolve_user(headers, &state.chat_store, state.sso_verifier.as_ref()).await
+}
+
+/// Текущий пользователь с именем для истории изменений каталога: имя
+/// фиксируется в момент правки, чтобы историю не исказили переименования.
+async fn current_actor(state: &AppState, headers: &HeaderMap) -> Result<(i64, String), StatusCode> {
+    let id = current_user(state, headers).await?;
+    let name = state
+        .chat_store
+        .get_user(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(|u| u.name)
+        .unwrap_or_else(|| format!("#{id}"));
+    Ok((id, name))
 }
 
 #[derive(Deserialize)]
@@ -73,18 +87,19 @@ pub struct CreateAgentSetRequest {
 #[derive(Deserialize)]
 pub struct CreateCapabilityRequest {
     pub name: String,
-    pub versions: Vec<crate::trace::CapabilityVersion>,
-}
-
-#[derive(Deserialize)]
-pub struct AddCapabilityVersionRequest {
-    pub version: String,
     pub content: String,
 }
 
 #[derive(Deserialize)]
-pub struct RenameCapabilityRequest {
-    pub name: String,
+pub struct UpdateCapabilityRequest {
+    pub name: Option<String>,
+    pub content: Option<String>,
+}
+
+/// Фильтр «Удалённые»: `?deleted=1` — только удалённые записи каталога.
+#[derive(Deserialize)]
+pub struct DeletedFilter {
+    pub deleted: Option<i64>,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -120,16 +135,24 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(delete_agent_set)
                 .patch(update_agent_set),
         )
-        // === Каталог способностей (скиллы и команды с версиями) ===
+        // === Каталог способностей (скиллы и команды) ===
+        // У записи одно текущее содержимое и история изменений (кто, когда и
+        // что сделал). ?deleted=1 — список «Удалённые» (история переживает
+        // удаление). Фиксации версий нет: агент всегда берёт последнее.
         .route("/skills", get(list_skills).post(create_skill))
-        .route("/skills/:id", patch(rename_skill).delete(delete_skill))
-        .route("/skills/:id/versions", post(add_skill_version))
+        .route(
+            "/skills/:id",
+            get(get_skill).patch(update_skill).delete(delete_skill),
+        )
+        .route("/skills/:id/history", get(capability_history))
         .route("/commands", get(list_commands).post(create_command))
         .route(
             "/commands/:id",
-            patch(rename_command).delete(delete_command),
+            get(get_command)
+                .patch(update_command)
+                .delete(delete_command),
         )
-        .route("/commands/:id/versions", post(add_command_version))
+        .route("/commands/:id/history", get(capability_history))
         // === SSO (Keycloak): вход веб-клиента ===
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
@@ -408,17 +431,41 @@ async fn update_agent_set(
     }
 }
 
+/// Общий список записей каталога вида: активные или «Удалённые» (`?deleted=1`).
+async fn list_capabilities(
+    kind: crate::trace::CapabilityKind,
+    state: &AppState,
+    headers: &HeaderMap,
+    deleted: Option<i64>,
+) -> Result<Json<Vec<crate::trace::CapabilityItem>>, StatusCode> {
+    current_user(state, headers).await?;
+    let items = match deleted {
+        Some(1) => state
+            .trace_store
+            .list_deleted_capabilities(kind)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        _ => state
+            .trace_store
+            .list_capabilities(kind, false)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    };
+    Ok(Json(items))
+}
+
 async fn list_skills(
     State(state): State<AppState>,
     headers: HeaderMap,
+    axum::extract::Query(filter): axum::extract::Query<DeletedFilter>,
 ) -> Result<Json<Vec<crate::trace::CapabilityItem>>, StatusCode> {
-    current_user(&state, &headers).await?;
-    state
-        .trace_store
-        .list_capabilities(crate::trace::CapabilityKind::Skill)
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    list_capabilities(
+        crate::trace::CapabilityKind::Skill,
+        &state,
+        &headers,
+        filter.deleted,
+    )
+    .await
 }
 
 async fn create_skill(
@@ -426,51 +473,27 @@ async fn create_skill(
     headers: HeaderMap,
     Json(payload): Json<CreateCapabilityRequest>,
 ) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
-    current_user(&state, &headers).await?;
-    let id = state
-        .trace_store
-        .create_capability(
-            crate::trace::CapabilityKind::Skill,
-            &payload.name,
-            &payload.versions,
-        )
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
-        .trace_store
-        .get_capability(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
-        .map(Json)
-}
-
-async fn add_skill_version(
-    Path(id): Path<i64>,
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<AddCapabilityVersionRequest>,
-) -> Result<StatusCode, StatusCode> {
-    current_user(&state, &headers).await?;
-    state
-        .trace_store
-        .add_capability_version(id, &payload.version, &payload.content)
-        .await
-        .map(|_| StatusCode::OK)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    create_capability(
+        crate::trace::CapabilityKind::Skill,
+        &state,
+        &headers,
+        payload,
+    )
+    .await
 }
 
 async fn list_commands(
     State(state): State<AppState>,
     headers: HeaderMap,
+    axum::extract::Query(filter): axum::extract::Query<DeletedFilter>,
 ) -> Result<Json<Vec<crate::trace::CapabilityItem>>, StatusCode> {
-    current_user(&state, &headers).await?;
-    state
-        .trace_store
-        .list_capabilities(crate::trace::CapabilityKind::Command)
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    list_capabilities(
+        crate::trace::CapabilityKind::Command,
+        &state,
+        &headers,
+        filter.deleted,
+    )
+    .await
 }
 
 async fn create_command(
@@ -478,14 +501,25 @@ async fn create_command(
     headers: HeaderMap,
     Json(payload): Json<CreateCapabilityRequest>,
 ) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
-    current_user(&state, &headers).await?;
+    create_capability(
+        crate::trace::CapabilityKind::Command,
+        &state,
+        &headers,
+        payload,
+    )
+    .await
+}
+
+async fn create_capability(
+    kind: crate::trace::CapabilityKind,
+    state: &AppState,
+    headers: &HeaderMap,
+    payload: CreateCapabilityRequest,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    let (actor, actor_name) = current_actor(state, headers).await?;
     let id = state
         .trace_store
-        .create_capability(
-            crate::trace::CapabilityKind::Command,
-            &payload.name,
-            &payload.versions,
-        )
+        .create_capability(kind, &payload.name, &payload.content, actor, &actor_name)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
@@ -497,33 +531,116 @@ async fn create_command(
         .map(Json)
 }
 
-async fn add_command_version(
+async fn get_skill(
     Path(id): Path<i64>,
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<AddCapabilityVersionRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
     current_user(&state, &headers).await?;
     state
         .trace_store
-        .add_capability_version(id, &payload.version, &payload.content)
+        .get_capability(id)
         .await
-        .map(|_| StatusCode::OK)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|c| c.kind == crate::trace::CapabilityKind::Skill)
+        .ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
 }
 
-async fn rename_skill(
+async fn get_command(
     Path(id): Path<i64>,
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<RenameCapabilityRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
     current_user(&state, &headers).await?;
-    match state.trace_store.rename_capability(id, &payload.name).await {
-        Ok(true) => Ok(StatusCode::OK),
-        Ok(false) => Err(StatusCode::NOT_FOUND),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    state
+        .trace_store
+        .get_capability(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|c| c.kind == crate::trace::CapabilityKind::Command)
+        .ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
+}
+
+/// Правка записи: имя и/или содержимое; каждое изменение пишет запись истории.
+async fn update_skill(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateCapabilityRequest>,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    update_capability(
+        crate::trace::CapabilityKind::Skill,
+        id,
+        &state,
+        &headers,
+        payload,
+    )
+    .await
+}
+
+async fn update_command(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateCapabilityRequest>,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    update_capability(
+        crate::trace::CapabilityKind::Command,
+        id,
+        &state,
+        &headers,
+        payload,
+    )
+    .await
+}
+
+async fn update_capability(
+    kind: crate::trace::CapabilityKind,
+    id: i64,
+    state: &AppState,
+    headers: &HeaderMap,
+    payload: UpdateCapabilityRequest,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    let (actor, actor_name) = current_actor(state, headers).await?;
+    let exists = state
+        .trace_store
+        .get_capability(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|c| c.kind == kind)
+        .is_some();
+    if !exists {
+        return Err(StatusCode::NOT_FOUND);
     }
+    if let Some(name) = payload.name.filter(|n| !n.trim().is_empty()) {
+        if !state
+            .trace_store
+            .rename_capability(id, &name, actor, &actor_name)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+    if let Some(content) = payload.content {
+        if !state
+            .trace_store
+            .update_capability_content(id, &content, actor, &actor_name)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+    state
+        .trace_store
+        .get_capability(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
 }
 
 async fn delete_skill(
@@ -531,26 +648,7 @@ async fn delete_skill(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    current_user(&state, &headers).await?;
-    match state.trace_store.delete_capability(id).await {
-        Ok(true) => Ok(StatusCode::OK),
-        Ok(false) => Err(StatusCode::NOT_FOUND),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn rename_command(
-    Path(id): Path<i64>,
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<RenameCapabilityRequest>,
-) -> Result<StatusCode, StatusCode> {
-    current_user(&state, &headers).await?;
-    match state.trace_store.rename_capability(id, &payload.name).await {
-        Ok(true) => Ok(StatusCode::OK),
-        Ok(false) => Err(StatusCode::NOT_FOUND),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
+    delete_capability(crate::trace::CapabilityKind::Skill, id, &state, &headers).await
 }
 
 async fn delete_command(
@@ -558,12 +656,59 @@ async fn delete_command(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    current_user(&state, &headers).await?;
-    match state.trace_store.delete_capability(id).await {
+    delete_capability(crate::trace::CapabilityKind::Command, id, &state, &headers).await
+}
+
+async fn delete_capability(
+    kind: crate::trace::CapabilityKind,
+    id: i64,
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    let (actor, actor_name) = current_actor(state, headers).await?;
+    let exists = state
+        .trace_store
+        .get_capability(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|c| c.kind == kind)
+        .is_some();
+    if !exists {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    match state
+        .trace_store
+        .delete_capability(id, actor, &actor_name)
+        .await
+    {
         Ok(true) => Ok(StatusCode::OK),
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// История изменений записи каталога: кто, когда и что сделал, по порядку.
+async fn capability_history(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::trace::CapabilityHistoryEntry>>, StatusCode> {
+    current_user(&state, &headers).await?;
+    if state
+        .trace_store
+        .get_capability(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    state
+        .trace_store
+        .capability_history(id)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn attach_agent_set(
@@ -2430,14 +2575,14 @@ mod tests {
     async fn agent_set_detail_includes_territory_skills_commands_and_tools() {
         let (state, file) = test_state(true).await;
         let headers = auth_headers("alice", &["participant"]);
-        // Каталог: скилл и команда с версиями.
+        // Каталог: скилл и команда с единственным содержимым.
         let (status, body) = post_json(
             "/skills",
             &headers,
             state.clone(),
             serde_json::json!({
                 "name": "review",
-                "versions": [{"version": "1", "content": "Проверять диф"}]
+                "content": "Проверять диф"
             }),
         )
         .await;
@@ -2451,12 +2596,12 @@ mod tests {
             state.clone(),
             serde_json::json!({
                 "name": "deploy",
-                "versions": [{"version": "1", "content": "Выкатывать"}]
+                "content": "Выкатывать"
             }),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        // Набор с деревом и данными агенту способностями.
+        // Набор с деревом и данными агенту способностями (по имени, без версии).
         let (status, body) = post_json(
             "/agent-sets",
             &headers,
@@ -2471,8 +2616,8 @@ mod tests {
                     "model": null,
                     "temperature": 0.7,
                     "parent": null,
-                    "skills": [{"name": "review", "pinned_version": null}],
-                    "commands": [{"name": "deploy", "pinned_version": "1"}]
+                    "skills": [{"name": "review"}],
+                    "commands": [{"name": "deploy"}]
                 }]
             }),
         )
@@ -2484,7 +2629,7 @@ mod tests {
         let (status, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         // Состав набора: агенты, территория каждого, данные скиллы и команды
-        // с версиями, инструменты — всё в детали набора.
+        // (по имени, без версии), инструменты — всё в детали набора.
         assert!(body.contains("territory"));
         assert!(body.contains("folder"));
         assert!(body.contains("src"));
@@ -2493,7 +2638,7 @@ mod tests {
         assert!(body.contains("skills"));
         assert!(body.contains("review"));
         assert!(body.contains("commands"));
-        assert!(body.contains("pinned_version"));
+        assert!(!body.contains("pinned_version"));
         assert!(body.contains(&format!("\"id\":{skill_id}")));
         cleanup(&file).await;
     }
@@ -2543,7 +2688,7 @@ mod tests {
             state.clone(),
             serde_json::json!({
                 "name": "review",
-                "versions": [{"version": "1", "content": "Проверять диф"}]
+                "content": "Проверять диф"
             }),
         )
         .await;
@@ -2551,8 +2696,8 @@ mod tests {
         let skill_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
             .as_i64()
             .unwrap();
-        // Переименование через PATCH сохраняет версии.
-        let (status, _) = patch_json(
+        // Переименование через PATCH сохраняет содержимое.
+        let (status, body) = patch_json(
             &format!("/skills/{skill_id}"),
             &headers,
             state.clone(),
@@ -2560,10 +2705,23 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("review2"));
+        assert!(body.contains("Проверять диф"));
+        // Правка содержимого через PATCH делает его текущим.
+        let (status, body) = patch_json(
+            &format!("/skills/{skill_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "content": "Проверять диф и тесты" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Проверять диф и тесты"));
         let (status, body) = get("/skills", &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("review2"));
-        assert!(body.contains("Проверять диф"));
+        assert!(body.contains("Проверять диф и тесты"));
+        assert!(!body.contains("пinned_version"));
         // Несуществующая способность — 404.
         let (status, _) = patch_json(
             "/skills/999",
@@ -2573,7 +2731,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        // Удаление убирает из списка; повторное — 404.
+        // Удаление убирает из активного списка; повторное — 404.
         let (status, _) =
             delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
@@ -2583,6 +2741,10 @@ mod tests {
         let (status, _) =
             delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        // Удалённая запись остаётся в списке «Удалённые» (?deleted=1).
+        let (status, body) = get("/skills?deleted=1", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("review2"));
         // Команды — тот же каталог, те же правки.
         let (status, body) = post_json(
             "/commands",
@@ -2590,7 +2752,7 @@ mod tests {
             state.clone(),
             serde_json::json!({
                 "name": "deploy",
-                "versions": [{"version": "1", "content": "Выкатывать"}]
+                "content": "Выкатывать"
             }),
         )
         .await;
@@ -2609,6 +2771,66 @@ mod tests {
         let (status, _) =
             delete_json(&format!("/commands/{cmd_id}"), &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn capability_history_shows_who_when_and_what_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/skills",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "review", "content": "v1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let skill_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        patch_json(
+            &format!("/skills/{skill_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "content": "v2" }),
+        )
+        .await;
+        patch_json(
+            &format!("/skills/{skill_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "review2" }),
+        )
+        .await;
+        delete_json(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
+        // История по одной записи: кто, когда и что сделал, по порядку.
+        let (status, body) = get(
+            &format!("/skills/{skill_id}/history"),
+            &headers,
+            state.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let actions: Vec<&str> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(actions, vec!["create", "update", "rename", "delete"]);
+        // Автор каждой правки — участник, сделавший её (alice).
+        let actor_names: Vec<&str> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["actor_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(actor_names, vec!["alice", "alice", "alice", "alice"]);
+        // История несуществующей записи — 404.
+        let (status, _) = get("/skills/999/history", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         cleanup(&file).await;
     }
 

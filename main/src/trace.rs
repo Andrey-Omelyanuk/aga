@@ -31,16 +31,16 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Способность из каталога (скилл или команда), данная агенту набора:
-/// версия не зафиксирована (последняя) или зафиксирована точно.
+/// Способность из каталога (скилл или команда), данная агенту набора: ссылка
+/// по имени на запись целиком. Версий нет — агент всегда берёт её последнее
+/// содержимое.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentCapability {
     pub name: String,
-    pub pinned_version: Option<String>,
 }
 
 /// Агент из AgentSet-а. Способности — скиллы и команды из общего каталога
-/// с версиями (данные агенту, с возможной фиксацией версии); инструменты —
+/// (имя записи; агент всегда использует последнее содержимое); инструменты —
 /// отдельный список исполняемого в консоли воркстейшна, без версий.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDef {
@@ -53,9 +53,9 @@ pub struct AgentDef {
     pub temperature: f32,
     /// Указание на родителя в дереве набора: агент наследует под-уровень папки.
     pub parent_id: Option<i64>,
-    /// Данные агенту скиллы (имя из каталога + зафиксированная версия).
+    /// Данные агенту скиллы (имя из каталога).
     pub skills: Vec<AgentCapability>,
-    /// Данные агенту команды (имя из каталога + зафиксированная версия).
+    /// Данные агенту команды (имя из каталога).
     pub commands: Vec<AgentCapability>,
     /// Территория по узлу в дереве набора: папка узла минус папки наследников.
     pub territory: crate::scope::Territory,
@@ -83,7 +83,7 @@ pub struct AgentSpec {
     pub commands: Vec<AgentCapability>,
 }
 
-/// Вид способности каталога: скилл или команда. Версии есть у обоих.
+/// Вид способности каталога: скилл или команда.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CapabilityKind {
@@ -100,19 +100,47 @@ impl CapabilityKind {
     }
 }
 
-/// Одна версия способности каталога.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapabilityVersion {
-    pub version: String,
-    pub content: String,
+/// Действие в истории изменений записи каталога.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CapabilityAction {
+    Create,
+    Update,
+    Rename,
+    Delete,
 }
 
-/// Запись каталога способностей со всеми её версиями.
+impl CapabilityAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CapabilityAction::Create => "create",
+            CapabilityAction::Update => "update",
+            CapabilityAction::Rename => "rename",
+            CapabilityAction::Delete => "delete",
+        }
+    }
+}
+
+/// Одна запись истории изменения записи каталога: кто, когда и что сделал.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityHistoryEntry {
+    pub id: i64,
+    pub action: CapabilityAction,
+    pub actor_id: i64,
+    pub actor_name: String,
+    pub created_at: DateTime<Utc>,
+    pub detail: Option<String>,
+}
+
+/// Запись каталога способностей с единственным текущим содержимым.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityItem {
     pub id: i64,
+    pub kind: CapabilityKind,
     pub name: String,
-    pub versions: Vec<CapabilityVersion>,
+    pub content: String,
+    /// Удалена ли запись (мягкое удаление): остаётся в списке «Удалённые».
+    pub deleted: bool,
 }
 
 pub struct TraceStore {
@@ -205,30 +233,54 @@ impl TraceStore {
         // список исполняемого в консоли воркстейшна, версий у них нет.
         migrate_agents_tools_column(&pool).await?;
 
-        // === Каталог способностей (скиллы и команды с версиями) ===
-        // Общий на всю систему: агенты набора ссылаются на записи по имени и
-        // могут зафиксировать версию; без фиксации берётся последняя.
+        // === Каталог способностей (скиллы и команды) ===
+        // Общий на всю систему: агенты набора ссылаются на записи по имени.
+        // У записи одно текущее содержимое (content); версий нет — агент всегда
+        // использует последнее содержимое. Удаление — мягкое (deleted=1), чтобы
+        // история изменений пережила удаление записи (запись остаётся в списке
+        // «Удалённые» и её историю можно открыть).
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS capabilities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL,
                 name TEXT NOT NULL,
-                UNIQUE (kind, name)
+                content TEXT NOT NULL DEFAULT '',
+                deleted INTEGER NOT NULL DEFAULT 0
             )
             "#,
         )
         .execute(&pool)
         .await?;
 
+        // Имя уникально среди активных записей вида (удалённые имя не занимают —
+        // после удаления запись можно пересоздать с тем же именем).
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_capabilities_active_name
+             ON capabilities(kind, name) WHERE deleted = 0",
+        )
+        .execute(&pool)
+        .await?;
+
+        // Миграция старых БД: единственное содержимое и мягкое удаление.
+        migrate_capabilities_columns(&pool).await?;
+
+        // История изменений каталога: каждая правка (создание, изменение
+        // содержимого, переименование, удаление) — отдельная запись «кто, когда
+        // и что сделал». Хранится отдельно от самих записей: переживает правки
+        // и удаление (удалённые записи не каскадят историю). Имя автора
+        // фиксируется в момент правки — историю не исказит переименование
+        // или удаление учётки.
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS capability_versions (
+            CREATE TABLE IF NOT EXISTS capability_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 capability_id INTEGER NOT NULL,
-                version TEXT NOT NULL,
-                content TEXT NOT NULL,
-                UNIQUE (capability_id, version),
+                action TEXT NOT NULL,
+                actor_id INTEGER NOT NULL,
+                actor_name TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                detail TEXT,
                 FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE
             )
             "#,
@@ -236,12 +288,17 @@ impl TraceStore {
         .execute(&pool)
         .await?;
 
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_capability_history ON capability_history(capability_id)")
+            .execute(&pool)
+            .await?;
+
+        // Данные агенту способности: имя записи каталога. Версий нет — имя
+        // ссылается на запись целиком, агент берёт её последнее содержимое.
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS agent_capabilities (
                 agent_id INTEGER NOT NULL,
                 capability_id INTEGER NOT NULL,
-                pinned_version TEXT,
                 PRIMARY KEY (agent_id, capability_id),
                 FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
                 FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE
@@ -250,10 +307,6 @@ impl TraceStore {
         )
         .execute(&pool)
         .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_capability_versions ON capability_versions(capability_id)")
-            .execute(&pool)
-            .await?;
 
         // === AgentSet (набор агентов на проект) ===
         // Роли заменены наборами: у набора свои агенты (дерево через parent_id),
@@ -657,14 +710,11 @@ impl TraceStore {
             return Ok(());
         };
         let capability_id: i64 = row.get("id");
-        sqlx::query(
-            "INSERT INTO agent_capabilities (agent_id, capability_id, pinned_version) VALUES (?, ?, ?)",
-        )
-        .bind(agent_id)
-        .bind(capability_id)
-        .bind(&cap.pinned_version)
-        .execute(&mut **tx)
-        .await?;
+        sqlx::query("INSERT INTO agent_capabilities (agent_id, capability_id) VALUES (?, ?)")
+            .bind(agent_id)
+            .bind(capability_id)
+            .execute(&mut **tx)
+            .await?;
         Ok(())
     }
 
@@ -690,7 +740,7 @@ impl TraceStore {
             let tools = serde_json::from_str(&tools_json).unwrap_or_else(|_| Vec::new());
             let agent_id: i64 = r.get("id");
             let caps = sqlx::query(
-                "SELECT c.kind, c.name, ac.pinned_version
+                "SELECT c.kind, c.name
                  FROM agent_capabilities ac JOIN capabilities c ON c.id = ac.capability_id
                  WHERE ac.agent_id = ? ORDER BY c.kind, c.name",
             )
@@ -703,7 +753,6 @@ impl TraceStore {
                 let kind: String = cap.get("kind");
                 let capability = AgentCapability {
                     name: cap.get("name"),
-                    pinned_version: cap.get("pinned_version"),
                 };
                 if kind == "skill" {
                     skills.push(capability);
@@ -795,171 +844,228 @@ impl TraceStore {
 
     // === Каталог способностей (скиллы и команды) ===
 
+    /// Список записей каталога одного вида: активные и (если `include_deleted`)
+    /// удалённые («Удалённые»), по порядку id.
     pub async fn list_capabilities(
         &self,
         kind: CapabilityKind,
+        include_deleted: bool,
     ) -> Result<Vec<CapabilityItem>, sqlx::Error> {
-        let rows = sqlx::query("SELECT id, name FROM capabilities WHERE kind = ? ORDER BY id")
+        let sql = if include_deleted {
+            "SELECT id, kind, name, content, deleted FROM capabilities WHERE kind = ? ORDER BY id"
+        } else {
+            "SELECT id, kind, name, content, deleted FROM capabilities WHERE kind = ? AND deleted = 0 ORDER BY id"
+        };
+        let rows = sqlx::query(sql)
             .bind(kind.as_str())
             .fetch_all(&self.pool)
             .await?;
-        let mut items = Vec::new();
-        for r in rows {
-            let id: i64 = r.get("id");
-            items.push(self.load_capability(id).await?.expect("row exists"));
-        }
-        Ok(items)
+        Ok(rows.iter().map(capability_from_row).collect())
+    }
+
+    /// Записи каталога с мягко удалёнными (для страницы «Удалённые»).
+    pub async fn list_deleted_capabilities(
+        &self,
+        kind: CapabilityKind,
+    ) -> Result<Vec<CapabilityItem>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, kind, name, content, deleted FROM capabilities WHERE kind = ? AND deleted = 1 ORDER BY id",
+        )
+        .bind(kind.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(capability_from_row).collect())
     }
 
     pub async fn get_capability(
         &self,
         capability_id: i64,
     ) -> Result<Option<CapabilityItem>, sqlx::Error> {
-        self.load_capability(capability_id).await
+        let row =
+            sqlx::query("SELECT id, kind, name, content, deleted FROM capabilities WHERE id = ?")
+                .bind(capability_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|r| capability_from_row(&r)))
     }
 
-    async fn load_capability(
-        &self,
-        capability_id: i64,
-    ) -> Result<Option<CapabilityItem>, sqlx::Error> {
-        let row = sqlx::query("SELECT id, name FROM capabilities WHERE id = ?")
-            .bind(capability_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        let Some(r) = row else {
-            return Ok(None);
-        };
-        let versions = sqlx::query(
-            "SELECT version, content FROM capability_versions WHERE capability_id = ? ORDER BY id",
-        )
-        .bind(capability_id)
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|v| CapabilityVersion {
-            version: v.get("version"),
-            content: v.get("content"),
-        })
-        .collect();
-        Ok(Some(CapabilityItem {
-            id: capability_id,
-            name: r.get("name"),
-            versions,
-        }))
-    }
-
+    /// Создать запись каталога с единственным текущим содержимым и записать
+    /// создание в историю. Возвращает id записи.
     pub async fn create_capability(
         &self,
         kind: CapabilityKind,
         name: &str,
-        versions: &[CapabilityVersion],
+        content: &str,
+        actor_id: i64,
+        actor_name: &str,
     ) -> Result<i64, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let result = sqlx::query("INSERT INTO capabilities (kind, name) VALUES (?, ?)")
+        let result = sqlx::query("INSERT INTO capabilities (kind, name, content) VALUES (?, ?, ?)")
             .bind(kind.as_str())
             .bind(name)
+            .bind(content)
             .execute(&mut *tx)
             .await?;
         let id = result.last_insert_rowid();
-        for v in versions {
-            sqlx::query(
-                "INSERT INTO capability_versions (capability_id, version, content) VALUES (?, ?, ?)",
-            )
-            .bind(id)
-            .bind(&v.version)
-            .bind(&v.content)
-            .execute(&mut *tx)
-            .await?;
-        }
+        sqlx::query(
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(CapabilityAction::Create.as_str())
+        .bind(actor_id)
+        .bind(actor_name)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(id)
     }
 
-    pub async fn add_capability_version(
+    /// Изменить содержимое записи: новое содержимое становится текущим, правка
+    /// записывается в историю. Возвращает false, если записи нет.
+    pub async fn update_capability_content(
         &self,
-        capability_id: i64,
-        version: &str,
+        id: i64,
         content: &str,
-    ) -> Result<(), sqlx::Error> {
+        actor_id: i64,
+        actor_name: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query("UPDATE capabilities SET content = ? WHERE id = ?")
+            .bind(content)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         sqlx::query(
-            "INSERT INTO capability_versions (capability_id, version, content) VALUES (?, ?, ?)",
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name) VALUES (?, ?, ?, ?)",
         )
-        .bind(capability_id)
-        .bind(version)
-        .bind(content)
-        .execute(&self.pool)
+        .bind(id)
+        .bind(CapabilityAction::Update.as_str())
+        .bind(actor_id)
+        .bind(actor_name)
+        .execute(&mut *tx)
         .await?;
-        Ok(())
+        tx.commit().await?;
+        Ok(true)
     }
 
-    /// Переименование способности каталога. Возвращает false, если способности нет.
-    pub async fn rename_capability(&self, id: i64, name: &str) -> Result<bool, sqlx::Error> {
+    /// Переименование записи каталога. Возвращает false, если записи нет.
+    pub async fn rename_capability(
+        &self,
+        id: i64,
+        name: &str,
+        actor_id: i64,
+        actor_name: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query("UPDATE capabilities SET name = ? WHERE id = ?")
             .bind(name)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name, detail) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(CapabilityAction::Rename.as_str())
+        .bind(actor_id)
+        .bind(actor_name)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
-    /// Удаление способности: версии и данные агенту удаляются каскадом.
-    /// Возвращает false, если способности нет.
-    pub async fn delete_capability(&self, id: i64) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query("DELETE FROM capabilities WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(result.rows_affected() > 0)
+    /// Мягкое удаление записи: остаётся в списке «Удалённые», история
+    /// сохраняется. Возвращает false, если записи нет или она уже удалена.
+    pub async fn delete_capability(
+        &self,
+        id: i64,
+        actor_id: i64,
+        actor_name: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let result =
+            sqlx::query("UPDATE capabilities SET deleted = 1 WHERE id = ? AND deleted = 0")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(CapabilityAction::Delete.as_str())
+        .bind(actor_id)
+        .bind(actor_name)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
-    /// Содержимое способности каталога: зафиксированная версия или последняя
-    /// (добавленная позже всех). Версия — текст; «последняя» — max id версии.
+    /// История изменений записи: кто, когда и что сделал, по порядку.
+    pub async fn capability_history(
+        &self,
+        capability_id: i64,
+    ) -> Result<Vec<CapabilityHistoryEntry>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, action, actor_id, actor_name, created_at, detail
+             FROM capability_history
+             WHERE capability_id = ? ORDER BY id",
+        )
+        .bind(capability_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| CapabilityHistoryEntry {
+                id: r.get("id"),
+                action: action_from_str(&r.get::<String, _>("action"))
+                    .unwrap_or(CapabilityAction::Update),
+                actor_id: r.get("actor_id"),
+                actor_name: r.get::<String, _>("actor_name"),
+                created_at: r.get("created_at"),
+                detail: r.get("detail"),
+            })
+            .collect())
+    }
+
+    /// Содержимое записи каталога: единственное текущее содержимое (версий
+    /// нет — агент всегда берёт последнее). Удалённая запись агенту не даётся.
     pub async fn resolve_capability(
         &self,
         kind: CapabilityKind,
         name: &str,
-        pinned: Option<&str>,
     ) -> Result<Option<String>, sqlx::Error> {
-        let row = match pinned {
-            Some(version) => {
-                sqlx::query(
-                    "SELECT v.content FROM capability_versions v
-                 JOIN capabilities c ON c.id = v.capability_id
-                 WHERE c.kind = ? AND c.name = ? AND v.version = ?",
-                )
-                .bind(kind.as_str())
-                .bind(name)
-                .bind(version)
-                .fetch_optional(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    "SELECT v.content FROM capability_versions v
-                 JOIN capabilities c ON c.id = v.capability_id
-                 WHERE c.kind = ? AND c.name = ?
-                 ORDER BY v.id DESC LIMIT 1",
-                )
-                .bind(kind.as_str())
-                .bind(name)
-                .fetch_optional(&self.pool)
-                .await?
-            }
-        };
+        let row = sqlx::query(
+            "SELECT content FROM capabilities WHERE kind = ? AND name = ? AND deleted = 0",
+        )
+        .bind(kind.as_str())
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.get("content")))
     }
 
     /// Промпт агента: его правила плюс данные ему скиллы и команды, раскрытые
-    /// в зафиксированной или последней версии.
+    /// в их единственном текущем содержимом.
     pub async fn agent_prompt(&self, agent: &AgentDef) -> Result<String, sqlx::Error> {
         let mut parts = vec![agent.description.clone()];
         for sk in &agent.skills {
             if let Some(content) = self
-                .resolve_capability(
-                    CapabilityKind::Skill,
-                    &sk.name,
-                    sk.pinned_version.as_deref(),
-                )
+                .resolve_capability(CapabilityKind::Skill, &sk.name)
                 .await?
             {
                 parts.push(format!("Скилл «{}»: {}", sk.name, content));
@@ -967,11 +1073,7 @@ impl TraceStore {
         }
         for cmd in &agent.commands {
             if let Some(content) = self
-                .resolve_capability(
-                    CapabilityKind::Command,
-                    &cmd.name,
-                    cmd.pinned_version.as_deref(),
-                )
+                .resolve_capability(CapabilityKind::Command, &cmd.name)
                 .await?
             {
                 parts.push(format!("Команда «{}»: {}", cmd.name, content));
@@ -992,7 +1094,7 @@ impl TraceStore {
             "tasks",
             "project_agent_set",
             "agent_capabilities",
-            "capability_versions",
+            "capability_history",
             "agents",
             "agent_sets",
             "capabilities",
@@ -1007,6 +1109,71 @@ impl TraceStore {
             .await?;
         Ok(())
     }
+}
+
+/// Запись каталога из строки SELECT (id, kind, name, content, deleted).
+fn capability_from_row(r: &sqlx::sqlite::SqliteRow) -> CapabilityItem {
+    let kind: String = r.get("kind");
+    CapabilityItem {
+        id: r.get("id"),
+        kind: if kind == "skill" {
+            CapabilityKind::Skill
+        } else {
+            CapabilityKind::Command
+        },
+        name: r.get("name"),
+        content: r.get("content"),
+        deleted: r.get::<i64, _>("deleted") != 0,
+    }
+}
+
+/// Действие истории по строке; неизвестное значение — правка содержимого.
+fn action_from_str(s: &str) -> Option<CapabilityAction> {
+    match s {
+        "create" => Some(CapabilityAction::Create),
+        "update" => Some(CapabilityAction::Update),
+        "rename" => Some(CapabilityAction::Rename),
+        "delete" => Some(CapabilityAction::Delete),
+        _ => None,
+    }
+}
+
+/// Перевести старые БД на новую модель каталога: у записей одно содержимое
+/// (`content`) и мягкое удаление (`deleted`), имя уникально среди активных.
+/// Содержимое берётся из последней версии; старый UNIQUE(kind, name) снимается,
+/// чтобы удалённую запись можно было пересоздать с тем же именем.
+async fn migrate_capabilities_columns(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let cols: Vec<String> = sqlx::query("PRAGMA table_info(capabilities)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    if !cols.iter().any(|c| c == "content") {
+        sqlx::query("ALTER TABLE capabilities ADD COLUMN content TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "UPDATE capabilities SET content = (
+                SELECT v.content FROM capability_versions v
+                WHERE v.capability_id = capabilities.id
+                ORDER BY v.id DESC LIMIT 1
+            )",
+        )
+        .execute(pool)
+        .await?;
+    }
+    if !cols.iter().any(|c| c == "deleted") {
+        sqlx::query("ALTER TABLE capabilities ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+        // Старые записи активны; UNIQUE(kind, name) снимаем — вместо него
+        // частичный индекс по активным (см. CREATE в TraceStore::new).
+        sqlx::query("DROP INDEX IF EXISTS sqlite_autoindex_capabilities_1")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Переименовать `projects.compose_path` в `git_url` у старых БД.
@@ -1327,17 +1494,9 @@ mod tests {
         let _ = std::fs::remove_file(&file);
     }
 
-    fn cap(name: &str, pinned: Option<&str>) -> AgentCapability {
+    fn cap(name: &str) -> AgentCapability {
         AgentCapability {
             name: name.to_string(),
-            pinned_version: pinned.map(|s| s.to_string()),
-        }
-    }
-
-    fn version(v: &str, content: &str) -> CapabilityVersion {
-        CapabilityVersion {
-            version: v.to_string(),
-            content: content.to_string(),
         }
     }
 
@@ -1383,19 +1542,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_have_no_versions_only_skills_and_commands_do() {
+    async fn tools_are_plain_list_capabilities_have_single_content() {
         let (path, file) = temp_db_path();
         let store = TraceStore::new(&path).await.unwrap();
         let skill = store
-            .create_capability(
-                CapabilityKind::Skill,
-                "review",
-                &[version("1", "v1"), version("2", "v2")],
-            )
+            .create_capability(CapabilityKind::Skill, "review", "v1", 1, "alice")
             .await
             .unwrap();
         let cmd = store
-            .create_capability(CapabilityKind::Command, "deploy", &[version("1", "c1")])
+            .create_capability(CapabilityKind::Command, "deploy", "c1", 1, "alice")
             .await
             .unwrap();
         let set_id = store
@@ -1409,8 +1564,8 @@ mod tests {
                     model: None,
                     temperature: 0.7,
                     parent: None,
-                    skills: vec![cap("review", None)],
-                    commands: vec![cap("deploy", None)],
+                    skills: vec![cap("review")],
+                    commands: vec![cap("deploy")],
                 }],
             )
             .await
@@ -1421,28 +1576,14 @@ mod tests {
         assert_eq!(dev.tools, vec!["git".to_string(), "make".to_string()]);
         assert_eq!(dev.skills.len(), 1);
         assert_eq!(dev.skills[0].name, "review");
-        assert!(dev.skills[0].pinned_version.is_none());
         assert_eq!(dev.commands[0].name, "deploy");
-        // Версии живут в каталоге — у скиллов и команд.
+        // У записи каталога одно текущее содержимое — версий и фиксации нет.
+        let skill_item = store.get_capability(skill).await.unwrap().unwrap();
+        assert_eq!(skill_item.content, "v1");
+        assert!(!skill_item.deleted);
         assert_eq!(
-            store
-                .get_capability(skill)
-                .await
-                .unwrap()
-                .unwrap()
-                .versions
-                .len(),
-            2
-        );
-        assert_eq!(
-            store
-                .get_capability(cmd)
-                .await
-                .unwrap()
-                .unwrap()
-                .versions
-                .len(),
-            1
+            store.get_capability(cmd).await.unwrap().unwrap().content,
+            "c1"
         );
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
@@ -1457,7 +1598,9 @@ mod tests {
             .create_capability(
                 CapabilityKind::Skill,
                 "review",
-                &[version("1", "Описание review")],
+                "Описание review",
+                1,
+                "alice",
             )
             .await
             .unwrap();
@@ -1465,7 +1608,9 @@ mod tests {
             .create_capability(
                 CapabilityKind::Skill,
                 "polish",
-                &[version("1", "Описание polish")],
+                "Описание polish",
+                1,
+                "alice",
             )
             .await
             .unwrap();
@@ -1473,7 +1618,9 @@ mod tests {
             .create_capability(
                 CapabilityKind::Command,
                 "deploy",
-                &[version("1", "Команда deploy")],
+                "Команда deploy",
+                1,
+                "alice",
             )
             .await
             .unwrap();
@@ -1481,7 +1628,9 @@ mod tests {
             .create_capability(
                 CapabilityKind::Command,
                 "rollback",
-                &[version("1", "Команда rollback")],
+                "Команда rollback",
+                1,
+                "alice",
             )
             .await
             .unwrap();
@@ -1496,16 +1645,16 @@ mod tests {
                     model: None,
                     temperature: 0.7,
                     parent: None,
-                    skills: vec![cap("review", None)],
-                    commands: vec![cap("deploy", None)],
+                    skills: vec![cap("review")],
+                    commands: vec![cap("deploy")],
                 }],
             )
             .await
             .unwrap();
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
         let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
-        assert_eq!(dev.skills, vec![cap("review", None)]);
-        assert_eq!(dev.commands, vec![cap("deploy", None)]);
+        assert_eq!(dev.skills, vec![cap("review")]);
+        assert_eq!(dev.commands, vec![cap("deploy")]);
         let prompt = store.agent_prompt(dev).await.unwrap();
         // В промпте только данные агенту способности.
         assert!(prompt.contains("Описание review"));
@@ -1518,15 +1667,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_without_pinned_version_uses_latest_skill_version() {
+    async fn agent_always_uses_latest_capability_content() {
         let (path, file) = temp_db_path();
         let store = TraceStore::new(&path).await.unwrap();
         let skill = store
-            .create_capability(
-                CapabilityKind::Skill,
-                "review",
-                &[version("1", "Формат диффов")],
-            )
+            .create_capability(CapabilityKind::Skill, "review", "Формат диффов", 1, "alice")
             .await
             .unwrap();
         let set_id = store
@@ -1540,7 +1685,7 @@ mod tests {
                     model: None,
                     temperature: 0.7,
                     parent: None,
-                    skills: vec![cap("review", None)],
+                    skills: vec![cap("review")],
                     commands: vec![],
                 }],
             )
@@ -1553,78 +1698,65 @@ mod tests {
             .await
             .unwrap()
             .contains("Формат диффов"));
-        // Новая версия каталога подхватывается без настройки агента.
+        // Правка содержимого подхватывается без настройки агента: версий и
+        // фиксации нет — агент всегда берёт единственное текущее содержимое.
         store
-            .add_capability_version(skill, "2", "Прогон тестов и правки")
+            .update_capability_content(skill, "Прогон тестов и правки", 1, "alice")
             .await
             .unwrap();
         let prompt = store.agent_prompt(dev).await.unwrap();
         assert!(prompt.contains("Прогон тестов и правки"));
         assert!(!prompt.contains("Формат диффов"));
-        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
-        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
-        let _ = std::fs::remove_file(&file);
-    }
-
-    #[tokio::test]
-    async fn agent_with_pinned_version_keeps_it_after_new_release() {
-        let (path, file) = temp_db_path();
-        let store = TraceStore::new(&path).await.unwrap();
-        let skill = store
-            .create_capability(
-                CapabilityKind::Skill,
-                "review",
-                &[version("1", "Формат диффов")],
-            )
-            .await
-            .unwrap();
-        let set_id = store
-            .create_agent_set(
-                "ops",
-                &[AgentSpec {
-                    name: "dev".to_string(),
-                    description: "Правила".to_string(),
-                    tools: vec![],
-                    max_iterations: 3,
-                    model: None,
-                    temperature: 0.7,
-                    parent: None,
-                    skills: vec![cap("review", Some("1"))],
-                    commands: vec![],
-                }],
-            )
-            .await
-            .unwrap();
-        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
-        let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
-        assert!(store
+        // Удалённая запись агенту не раскрывается.
+        store.delete_capability(skill, 1, "alice").await.unwrap();
+        assert!(!store
             .agent_prompt(dev)
             .await
             .unwrap()
-            .contains("Формат диффов"));
-        // Выход новой версии не трогает агента с зафиксированной версией.
-        store
-            .add_capability_version(skill, "2", "Прогон тестов и правки")
-            .await
-            .unwrap();
-        let prompt = store.agent_prompt(dev).await.unwrap();
-        assert!(prompt.contains("Формат диффов"));
-        assert!(!prompt.contains("Прогон тестов и правки"));
+            .contains("Прогон тестов и правки"));
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
     }
 
     #[tokio::test]
-    async fn capability_renamed_and_deleted_with_cascade() {
+    async fn capability_actions_written_to_history_with_author() {
         let (path, file) = temp_db_path();
         let store = TraceStore::new(&path).await.unwrap();
         let skill = store
-            .create_capability(
-                CapabilityKind::Skill,
-                "review",
-                &[version("1", "v1"), version("2", "v2")],
-            )
+            .create_capability(CapabilityKind::Skill, "review", "v1", 7, "alice")
+            .await
+            .unwrap();
+        store
+            .update_capability_content(skill, "v2", 7, "alice")
+            .await
+            .unwrap();
+        store
+            .rename_capability(skill, "review2", 8, "bob")
+            .await
+            .unwrap();
+        store.delete_capability(skill, 9, "carol").await.unwrap();
+        let history = store.capability_history(skill).await.unwrap();
+        // По порядку: создание, правка содержимого, переименование, удаление —
+        // каждая правка с автором и временем.
+        use CapabilityAction::*;
+        let actions: Vec<CapabilityAction> = history.iter().map(|h| h.action).collect();
+        assert_eq!(actions, vec![Create, Update, Rename, Delete]);
+        assert_eq!(history[0].actor_id, 7);
+        assert_eq!(history[2].actor_id, 8);
+        assert_eq!(history[3].actor_id, 9);
+        assert!(history[0].created_at <= history[3].created_at);
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn capability_renamed_and_deleted_with_history() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let skill = store
+            .create_capability(CapabilityKind::Skill, "review", "v1", 1, "alice")
             .await
             .unwrap();
         let set_id = store
@@ -1638,35 +1770,45 @@ mod tests {
                     model: None,
                     temperature: 0.7,
                     parent: None,
-                    skills: vec![cap("review", Some("1"))],
+                    skills: vec![cap("review")],
                     commands: vec![],
                 }],
             )
             .await
             .unwrap();
-        // Переименование: версии и данные агенту сохраняются.
-        assert!(store.rename_capability(skill, "review2").await.unwrap());
+        // Переименование: данные агенту сохраняются, содержимое на месте.
+        assert!(store
+            .rename_capability(skill, "review2", 1, "alice")
+            .await
+            .unwrap());
         let item = store.get_capability(skill).await.unwrap().unwrap();
         assert_eq!(item.name, "review2");
-        assert_eq!(item.versions.len(), 2);
+        assert_eq!(item.content, "v1");
+        assert!(!item.deleted);
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
         let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
         assert_eq!(dev.skills[0].name, "review2");
-        assert_eq!(dev.skills[0].pinned_version.as_deref(), Some("1"));
         // Переименование несуществующей способности — false.
-        assert!(!store.rename_capability(999, "x").await.unwrap());
-        // Удаление каскадом: версии и данные агенту исчезают.
-        assert!(store.delete_capability(skill).await.unwrap());
-        assert!(store.get_capability(skill).await.unwrap().is_none());
+        assert!(!store.rename_capability(999, "x", 1, "alice").await.unwrap());
+        // Мягкое удаление: запись остаётся в «Удалённых» с сохранённой историей.
+        assert!(store.delete_capability(skill, 1, "alice").await.unwrap());
+        let item = store.get_capability(skill).await.unwrap().unwrap();
+        assert!(item.deleted);
         assert!(store
-            .list_capabilities(CapabilityKind::Skill)
+            .list_capabilities(CapabilityKind::Skill, false)
             .await
             .unwrap()
             .is_empty());
-        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
-        let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
-        assert!(dev.skills.is_empty());
-        assert!(!store.delete_capability(999).await.unwrap());
+        let deleted = store
+            .list_deleted_capabilities(CapabilityKind::Skill)
+            .await
+            .unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].name, "review2");
+        // История переживает удаление: создание, переименование, удаление.
+        assert_eq!(store.capability_history(skill).await.unwrap().len(), 3);
+        // Повторное удаление — false.
+        assert!(!store.delete_capability(skill, 1, "alice").await.unwrap());
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
