@@ -11,7 +11,7 @@ const agents: Agent[] = [
     max_iterations: 3,
     temperature: 0.7,
     parent_id: null,
-    skills: [{ name: 'review', pinned_version: null }],
+    skills: [{ name: 'review' }],
     commands: [],
     territory: { folder: 'src', excludes: ['src/backend'] },
   },
@@ -24,7 +24,7 @@ const agents: Agent[] = [
     temperature: 0.7,
     parent_id: 10,
     skills: [],
-    commands: [{ name: 'deploy', pinned_version: '1' }],
+    commands: [{ name: 'deploy' }],
     territory: { folder: 'src/backend', excludes: [] },
   },
 ];
@@ -33,15 +33,13 @@ const skills: CatalogItem[] = [
   {
     id: 1,
     name: 'review',
-    versions: [
-      { version: '1', content: 'Проверять диф' },
-      { version: '2', content: 'Проверять диф и тесты' },
-    ],
+    content: 'Проверять диф и тесты',
+    deleted: false,
   },
 ];
 
 const commands: CatalogItem[] = [
-  { id: 1, name: 'deploy', versions: [{ version: '1', content: 'Выкатывать' }] },
+  { id: 1, name: 'deploy', content: 'Выкатывать', deleted: false },
 ];
 
 const meta = {

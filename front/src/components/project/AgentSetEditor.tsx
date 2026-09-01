@@ -8,7 +8,6 @@ import { Select } from '@/components/ui/select';
 import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
 import type { Agent, AgentCapability, CatalogItem } from '@/models/project';
-
 export interface AgentSetEditorProps {
   setId: number;
   name: string;
@@ -32,7 +31,7 @@ const emptyAgent = (name: string): Agent => ({
 });
 
 /** Редактор состава набора: агенты, их территория (по дереву), данные скиллы
- * и команды с версиями, инструменты. Сохраняется целиком (PATCH). */
+ * и команды по имени (без версии), инструменты. Сохраняется целиком (PATCH). */
 export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
   const { setId, skills, commands, onSaved } = props;
   const [name, setName] = useState(props.name);
@@ -85,37 +84,16 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
     kind: 'skills' | 'commands',
     item: CatalogItem,
     enabled: boolean,
-    pinned = '',
   ) => {
     setAgents((prev) =>
       prev.map((a, i) => {
         if (i !== agentIndex) return a;
         const existing = a[kind].filter((c) => c.name !== item.name);
         const next: AgentCapability[] = enabled
-          ? [...existing, { name: item.name, pinned_version: pinned || null }]
+          ? [...existing, { name: item.name }]
           : existing;
         return { ...a, [kind]: next };
       }),
-    );
-  };
-
-  const setPinned = (
-    agentIndex: number,
-    kind: 'skills' | 'commands',
-    name: string,
-    version: string,
-  ) => {
-    setAgents((prev) =>
-      prev.map((a, i) =>
-        i === agentIndex
-          ? {
-              ...a,
-              [kind]: a[kind].map((c) =>
-                c.name === name ? { ...c, pinned_version: version || null } : c,
-              ),
-            }
-          : a,
-      ),
     );
   };
 
@@ -163,25 +141,9 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                   <input
                     type="checkbox"
                     checked={Boolean(given)}
-                    onChange={(e) =>
-                      toggleCapability(ai, kind, item, e.target.checked)
-                    }
+                    onChange={(e) => toggleCapability(ai, kind, item, e.target.checked)}
                   />
                   <span className="w-32 truncate">{item.name}</span>
-                  {given && (
-                    <Select
-                      className="h-7 text-xs"
-                      value={given.pinned_version ?? ''}
-                      onChange={(e) => setPinned(ai, kind, item.name, e.target.value)}
-                    >
-                      <option value="">последняя версия</option>
-                      {item.versions.map((v) => (
-                        <option key={v.version} value={v.version}>
-                          версия {v.version}
-                        </option>
-                      ))}
-                    </Select>
-                  )}
                 </label>
               );
             })}

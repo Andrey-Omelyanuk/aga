@@ -24,8 +24,8 @@ pub struct ReactiveRunner {
 }
 
 /// Собрать конфиг агента из набора: промпт = правила + данные агенту скиллы и
-/// команды (в зафиксированной или последней версии каталога), инструменты —
-/// отдельный список без версий; территория — папка узла в дереве набора.
+/// команды (единственное содержимое каталога), инструменты — отдельный список
+/// без версий; территория — папка узла в дереве набора.
 pub async fn resolve_agent(
     store: &TraceStore,
     set: &AgentSet,
@@ -186,7 +186,7 @@ impl ReactiveRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::{AgentCapability, AgentSpec, CapabilityKind, CapabilityVersion};
+    use crate::trace::{AgentCapability, AgentSpec, CapabilityKind};
 
     async fn store() -> (TraceStore, std::path::PathBuf) {
         let file =
@@ -264,30 +264,23 @@ mod tests {
     #[tokio::test]
     async fn mentioned_agent_applies_territory_skills_commands_and_tools() {
         let (store, file) = store().await;
-        // Каталог: скилл и команда с версиями; вторая версия — новая.
+        // Каталог: скилл и команда с единственным текущим содержимым; правка
+        // содержимого делает его актуальным (версий и фиксации нет).
         let skill = store
-            .create_capability(
-                CapabilityKind::Skill,
-                "review",
-                &[CapabilityVersion {
-                    version: "1".to_string(),
-                    content: "Формат диффов".to_string(),
-                }],
-            )
+            .create_capability(CapabilityKind::Skill, "review", "Формат диффов", 1, "alice")
             .await
             .unwrap();
         store
-            .add_capability_version(skill, "2", "Прогон тестов и правки")
+            .update_capability_content(skill, "Прогон тестов и правки", 1, "alice")
             .await
             .unwrap();
         store
             .create_capability(
                 CapabilityKind::Command,
                 "deploy",
-                &[CapabilityVersion {
-                    version: "1".to_string(),
-                    content: "Выкатывать на стенд".to_string(),
-                }],
+                "Выкатывать на стенд",
+                1,
+                "alice",
             )
             .await
             .unwrap();
@@ -305,11 +298,9 @@ mod tests {
                     parent: None,
                     skills: vec![AgentCapability {
                         name: "review".to_string(),
-                        pinned_version: None,
                     }],
                     commands: vec![AgentCapability {
                         name: "deploy".to_string(),
-                        pinned_version: Some("1".to_string()),
                     }],
                 }],
             )
@@ -321,12 +312,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        // Промпт: правила + данные скилл (последняя версия) + команда (фикс. 1).
+        // Промпт: правила + данные скилл и команда (единственное содержимое).
         assert!(config.prompt.contains("Бэкенд"));
         assert!(config.prompt.contains("Прогон тестов и правки"));
         assert!(config.prompt.contains("Выкатывать на стенд"));
         assert!(config.prompt.contains("review"));
-        assert!(!config.prompt.contains("Формат диффов")); // версия 1 скилла не используется
+        assert!(!config.prompt.contains("Формат диффов")); // прежнее содержимое не используется
                                                            // Инструменты — из списка агента.
         assert_eq!(config.tools, vec!["git".to_string(), "make".to_string()]);
         // Территория — папка узла в дереве набора.

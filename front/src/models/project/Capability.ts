@@ -1,17 +1,22 @@
 import { Model, model, field, id, NUMBER, STRING } from 'mobx-model-ui';
 import { api } from '@/services/http-adapter';
-import type { CatalogVersion } from './AgentSet';
 
-/** Каталог способностей: скилл или команда с версиями. */
+/** Запись истории изменения скилла/команды: кто, когда и что сделал. */
+export interface CapabilityHistoryEntry {
+  id: number;
+  action: 'create' | 'update' | 'rename' | 'delete';
+  actor_id: number;
+  actor_name: string;
+  created_at: string;
+  detail?: string | null;
+}
+
+/** Каталог способностей: скилл или команда с единственным текущим содержимым. */
 abstract class Capability extends Model {
   abstract id: number;
   abstract name: string;
-  abstract versions: CatalogVersion[];
-
-  /** Версии каталога как строки для выпадающего списка. */
-  get versionNames(): string[] {
-    return this.versions.map((v) => v.version);
-  }
+  abstract content: string;
+  abstract deleted: boolean;
 }
 
 @api('skills')
@@ -19,7 +24,8 @@ abstract class Capability extends Model {
 export class Skill extends Capability {
   @id(NUMBER()) id!: number;
   @field(STRING()) name!: string;
-  @field() versions: CatalogVersion[] = [];
+  @field(STRING()) content!: string;
+  @field() deleted = false;
 }
 
 @api('commands')
@@ -27,5 +33,6 @@ export class Skill extends Capability {
 export class Command extends Capability {
   @id(NUMBER()) id!: number;
   @field(STRING()) name!: string;
-  @field() versions: CatalogVersion[] = [];
+  @field(STRING()) content!: string;
+  @field() deleted = false;
 }
