@@ -26,7 +26,7 @@ function renderEditor(agents: Agent[], skills: CatalogItem[], commands: CatalogI
 }
 
 describe('AgentSetEditor', () => {
-  it('shows composition: agents, their territory, given skills/commands with versions, tools', () => {
+  it('shows composition: agents, their territory, given skills/commands by name, tools', () => {
     const agent: Agent = {
       id: 10,
       name: 'src/backend',
@@ -35,22 +35,20 @@ describe('AgentSetEditor', () => {
       max_iterations: 3,
       temperature: 0.7,
       parent_id: null,
-      skills: [{ name: 'review', pinned_version: '1' }],
-      commands: [{ name: 'deploy', pinned_version: null }],
+      skills: [{ name: 'review' }],
+      commands: [{ name: 'deploy' }],
       territory: { folder: 'src/backend', excludes: ['src/backend/api'] },
     };
     const skills: CatalogItem[] = [
       {
         id: 1,
         name: 'review',
-        versions: [
-          { version: '1', content: 'Диф' },
-          { version: '2', content: 'Диф и тесты' },
-        ],
+        content: 'Проверять диф и тесты',
+        deleted: false,
       },
     ];
     const commands: CatalogItem[] = [
-      { id: 1, name: 'deploy', versions: [{ version: '1', content: 'Выкат' }] },
+      { id: 1, name: 'deploy', content: 'Выкат', deleted: false },
     ];
 
     const { container, root } = renderEditor([agent], skills, commands);
@@ -63,10 +61,11 @@ describe('AgentSetEditor', () => {
     // Инструменты — список, каждый элемент виден.
     expect(text).toContain('git');
     expect(text).toContain('make');
-    // Данные скиллы и команды с версиями.
+    // Данные скиллы и команды — по имени, без версии.
     expect(text).toContain('review');
-    expect(text).toContain('версия 1');
     expect(text).toContain('deploy');
+    // Фиксации версий в составе набора больше нет.
+    expect(text).not.toContain('версия');
 
     act(() => root.unmount());
   });

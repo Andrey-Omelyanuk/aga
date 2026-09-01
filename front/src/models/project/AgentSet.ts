@@ -3,7 +3,6 @@ import { api } from '@/services/http-adapter';
 
 export interface AgentCapability {
   name: string;
-  pinned_version?: string | null;
 }
 
 export interface Territory {
@@ -35,7 +34,8 @@ export interface CatalogVersion {
 export interface CatalogItem {
   id: number;
   name: string;
-  versions: CatalogVersion[];
+  content: string;
+  deleted: boolean;
 }
 
 @api('agent-sets')

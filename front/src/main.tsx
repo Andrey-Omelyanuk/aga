@@ -8,6 +8,7 @@ const AppLayout = lazy(() => import('./pages/app/layout'));
 const ProjectsPage = lazy(() => import('./pages/app/projects'));
 const AgentSetsPage = lazy(() => import('./pages/app/agentSets'));
 const CapabilitiesPage = lazy(() => import('./pages/app/capabilities'));
+const CapabilityHistoryPage = lazy(() => import('./pages/app/capabilityHistory'));
 const WorkstationsPage = lazy(() => import('./pages/app/workstations'));
 const SessionsPage = lazy(() => import('./pages/app/sessions'));
 const FilesPage = lazy(() => import('./pages/app/files'));
@@ -30,6 +31,8 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
           <Route path="projects" element={<ProjectsPage />} />
           <Route path="agent-sets" element={<AgentSetsPage />} />
           <Route path="capabilities" element={<CapabilitiesPage />} />
+          <Route path="skills/:id/history" element={<CapabilityHistoryPage />} />
+          <Route path="commands/:id/history" element={<CapabilityHistoryPage />} />
           <Route path="workstations" element={<WorkstationsPage />} />
           <Route path="sessions" element={<SessionsPage />} />
           <Route path="files" element={<FilesPage />} />
