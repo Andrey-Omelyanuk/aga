@@ -238,7 +238,7 @@ impl TraceStore {
         // У записи одно текущее содержимое (content); версий нет — агент всегда
         // использует последнее содержимое. Удаление — мягкое (deleted=1), чтобы
         // история изменений пережила удаление записи (запись остаётся в списке
-        // «Удалённые» и её историю можно открыть).
+        // «Удалённые» и её историю можно открыть). Имя уникально в пределах вида.
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS capabilities (
@@ -246,23 +246,17 @@ impl TraceStore {
                 kind TEXT NOT NULL,
                 name TEXT NOT NULL,
                 content TEXT NOT NULL DEFAULT '',
-                deleted INTEGER NOT NULL DEFAULT 0
+                deleted INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (kind, name)
             )
             "#,
         )
         .execute(&pool)
         .await?;
 
-        // Имя уникально среди активных записей вида (удалённые имя не занимают —
-        // после удаления запись можно пересоздать с тем же именем).
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_capabilities_active_name
-             ON capabilities(kind, name) WHERE deleted = 0",
-        )
-        .execute(&pool)
-        .await?;
-
         // Миграция старых БД: единственное содержимое и мягкое удаление.
+        // Простые ALTER — у старых таблиц та же UNIQUE(kind, name), конфликтов
+        // пересборки нет.
         migrate_capabilities_columns(&pool).await?;
 
         // История изменений каталога: каждая правка (создание, изменение
@@ -1139,9 +1133,8 @@ fn action_from_str(s: &str) -> Option<CapabilityAction> {
 }
 
 /// Перевести старые БД на новую модель каталога: у записей одно содержимое
-/// (`content`) и мягкое удаление (`deleted`), имя уникально среди активных.
-/// Содержимое берётся из последней версии; старый UNIQUE(kind, name) снимается,
-/// чтобы удалённую запись можно было пересоздать с тем же именем.
+/// (`content`) и мягкое удаление (`deleted`). Содержимое берётся из последней
+/// версии; UNIQUE(kind, name) в старой схеме уже есть и сохраняется.
 async fn migrate_capabilities_columns(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let cols: Vec<String> = sqlx::query("PRAGMA table_info(capabilities)")
         .fetch_all(pool)
@@ -1165,11 +1158,6 @@ async fn migrate_capabilities_columns(pool: &SqlitePool) -> Result<(), sqlx::Err
     }
     if !cols.iter().any(|c| c == "deleted") {
         sqlx::query("ALTER TABLE capabilities ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
-            .execute(pool)
-            .await?;
-        // Старые записи активны; UNIQUE(kind, name) снимаем — вместо него
-        // частичный индекс по активным (см. CREATE в TraceStore::new).
-        sqlx::query("DROP INDEX IF EXISTS sqlite_autoindex_capabilities_1")
             .execute(pool)
             .await?;
     }
@@ -1274,6 +1262,54 @@ mod tests {
         let project = store.get_project(id).await.unwrap().unwrap();
         assert_eq!(project.git_url, "https://example.com/r.git");
 
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn migrates_capabilities_to_single_content_and_soft_delete() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let (path, file) = temp_db_path();
+        let options = SqliteConnectOptions::from_str(&path)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        // Старая схема: capability_versions + UNIQUE(kind, name).
+        sqlx::query(
+            "CREATE TABLE capabilities (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL, UNIQUE (kind, name))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE capability_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, capability_id INTEGER NOT NULL, version TEXT NOT NULL, content TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO capabilities (kind, name) VALUES ('skill', 'review')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO capability_versions (capability_id, version, content) VALUES (1, 'v1', 'старое содержимое')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        // Открытие мигрирует: содержимое из последней версии, запись активна.
+        let store = TraceStore::new(&path).await.unwrap();
+        let item = store.get_capability(1).await.unwrap().unwrap();
+        assert_eq!(item.content, "старое содержимое");
+        assert!(!item.deleted);
+        assert_eq!(item.name, "review");
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
