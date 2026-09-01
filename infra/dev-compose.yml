@@ -4,14 +4,14 @@
 # воркстейшнов. SSO включён, как в k8s-стенде: вход через Keycloak
 # (auth.localhost), API и UI требуют токен.
 #
-# Управление — make dev-prepare / dev-up / dev-down / dev-logs / dev-ps /
+# Управление — make dev-up / dev-down / dev-logs / dev-ps /
 # dev-reset / dev-verify. Воркстейшны (ws-1, ws-2) поднимаются заранее и
 # переиспользуются ядром (AGA_WS_BACKEND=docker): POST /workstations находит
 # существующий контейнер ws-<id> и не пересоздаёт его.
 #
-# Проекты воркстейшнов — пустые git-репо (make dev-prepare инициализирует их
-# в main/data/work/ws-{1,2}); GIT_URL не задан, entrypoint клон пропускает и
-# работает с примонтированной копией. Проект агент наполняет сам в dev.
+# Проекты воркстейшнов — пустые git-репо в отдельных named volumes
+# (ws-1-data/ws-2-data, без доступа с хоста); GIT_URL не задан, entrypoint
+# инициализирует пустое репо сам. Проект агент наполняет сам в dev.
 name: aga-dev
 
 services:
@@ -111,12 +111,13 @@ services:
     build: ./k8s/workstation-image
     container_name: ws-1
     # Rootful DinD (dockerd внутри работает root'ом); команды агента ядро
-    # выполняет через `docker exec -u 1000`, поэтому файлы проекта в bind-mount
-    # принадлежат хостовому пользователю (uid 1000). Docker-демон воркстейшна
-    # изолирован в собственном контейнере — ws-1 и ws-2 не конфликтуют.
+    # выполняет через `docker exec -u 1000`, поэтому файлы проекта в volume
+    # принадлежат uid 1000. Проект в отдельном named volume (не bind-mount) —
+    # на хосте файлов воркстейшнов нет. Docker-демон воркстейшна изолирован
+    # в собственном контейнере — ws-1 и ws-2 не конфликтуют.
     privileged: true
     volumes:
-      - ../main/data/work/ws-1:/work/project
+      - ws-1-data:/work/project
     environment:
       - BRANCH=ws-1
     restart: "no"
@@ -127,10 +128,12 @@ services:
     container_name: ws-2
     privileged: true
     volumes:
-      - ../main/data/work/ws-2:/work/project
+      - ws-2-data:/work/project
     environment:
       - BRANCH=ws-2
     restart: "no"
 
 volumes:
   aga-data:
+  ws-1-data:
+  ws-2-data:

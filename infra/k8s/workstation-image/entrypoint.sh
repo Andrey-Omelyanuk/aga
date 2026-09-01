@@ -37,6 +37,16 @@ if [ -n "$GIT_URL" ]; then
   if [ -n "$BRANCH" ]; then
     git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
   fi
+else
+  # dev-режим: /work/project — отдельный volume (не bind-mount хоста), пустого
+  # git-репо нет — инициализируем сами (раньше это делал make dev-prepare).
+  # Проект агент наполняет сам. Владелец — uid/gid 1000 (хостовый пользователь
+  # dev и команды агента через `docker exec -u 1000`).
+  if [ ! -d project/.git ]; then
+    git init -q project
+    git -C project -c user.name=aga -c user.email=dev@aga commit -q --allow-empty -m init
+    chown -R 1000:1000 project
+  fi
 fi
 
 echo "workstation ready"

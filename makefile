@@ -25,7 +25,7 @@ CARGO_IN_MAIN = cd main && $(CARGO)
         front-test storybook storybook-build \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
-dev-prepare dev-up dev-down dev-logs dev-ps dev-reset dev-verify \
+dev-up dev-down dev-logs dev-ps dev-reset dev-verify \
         dev-roles dev-seed k8s-seed
 
 help:
@@ -40,7 +40,6 @@ help:
 	@echo "run-front   - Serve front locally (vite dev, port 8081)"
 	@echo "front-test  - Run frontend unit tests (vitest)"
 	@echo "storybook   - Run Storybook dev server"
-	@echo "dev-prepare - Create empty git repos for ws-1/ws-2 (main/data/work/)"
 	@echo "dev-roles   - Generate infra/dev-roles.yaml with SSO enabled (dev Keycloak)"
 	@echo "dev-up      - Start dev stand (docker compose: core + Keycloak + ws-1 + ws-2)"
 	@echo "dev-down    - Stop dev stand (docker compose down)"
@@ -104,22 +103,13 @@ run-front:
 
 # Dev-стенд (docker compose): ядро + 2 воркстейшна, без кластера.
 # Воркстейшны поднимаются заранее (ws-1/ws-2) и переиспользуются ядром в
-# docker-режиме (AGA_WS_BACKEND=docker). Проекты — пустые репо (dev-prepare).
+# docker-режиме (AGA_WS_BACKEND=docker). Проекты — пустые репо в named volumes
+# (entrypoint инициализирует их сам).
 # Стенд — по-прежнему k8s (make k8s-*); compose только для разработки.
 # --env-file .env — compose берёт LLM_API_URL и др. из корневого .env
 # (по умолчанию искал бы .env рядом с compose-файлом).
 DEV_COMPOSE = infra/dev-compose.yml
 DEV_COMPOSE_CMD = docker compose --env-file .env -f $(DEV_COMPOSE)
-
-# Воркстейшн — git-копия проекта (контракт: /work/project/.git). Тестовых
-# проектов нет — пустое репо, агент сам наполняет проект в dev.
-dev-prepare:
-	rm -rf main/data/work/ws-1 main/data/work/ws-2
-	mkdir -p main/data/work/ws-1 main/data/work/ws-2
-	git -C main/data/work/ws-1 init -q
-	git -C main/data/work/ws-1 -c user.name=aga -c user.email=dev@aga commit -q --allow-empty -m init
-	git -C main/data/work/ws-2 init -q
-	git -C main/data/work/ws-2 -c user.name=aga -c user.email=dev@aga commit -q --allow-empty -m init
 
 # Конфиг dev-стенда со включённым SSO: из main/config/roles.yaml (локальный,
 # sso выключен) генерируется infra/dev-roles.yaml, где sso-блок заменён на
@@ -131,10 +121,7 @@ dev-roles:
 	@printf 'sso:\n  enabled: true\n  jwks_url: http://keycloak:8080/realms/aga/protocol/openid-connect/certs\n  authorize_url: http://auth.localhost/realms/aga/protocol/openid-connect/auth\n  token_url: http://keycloak:8080/realms/aga/protocol/openid-connect/token\n  end_session_url: http://auth.localhost/realms/aga/protocol/openid-connect/logout\n  client_id: aga\n  client_secret: aga-secret\n' >> infra/dev-roles.yaml
 	@echo "dev-roles.yaml written (SSO enabled -> dev Keycloak)"
 
-dev-up: dev-prepare dev-roles
-	# dev-prepare пересоздаёт main/data/work/ws-*, а bind-mount держит старый
-	# inode каталога — работающие ws-контейнеры видят пустой /work/project.
-	# force-recreate перепривязывает их к свежим каталогам.
+dev-up: dev-roles
 	$(DEV_COMPOSE_CMD) up -d --build --force-recreate ws-1 ws-2
 	# Прокси монтирует nginx.conf bind'ом — compose не пересоздаёт его при смене
 	# файла; reload подхватывает новую конфигурацию (в т.ч. auth.localhost).

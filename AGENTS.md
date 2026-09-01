@@ -78,10 +78,11 @@ aga/
   `make fmt`.
 - Dev-стенд без кластера (ядро + Keycloak + веб-клиент + 2 воркстейшна в
   docker compose; SSO включён, как в стенде):
-  `make dev-prepare`, `make dev-roles`, `make dev-up`, `make dev-down`,
+  `make dev-roles`, `make dev-up`, `make dev-down`,
   `make dev-logs`, `make dev-ps`, `make dev-reset`, `make dev-verify`.
-  Воркстейшны — контейнеры `ws-1`/`ws-2` с пустыми git-репо (проект агент
-  наполняет сам); ядро в docker-режиме (`AGA_WS_BACKEND=docker`) переиспользует
+  Воркстейшны — контейнеры `ws-1`/`ws-2` с пустыми git-репо в отдельных named
+  volumes (проект агент наполняет сам); ядро в docker-режиме
+  (`AGA_WS_BACKEND=docker`) переиспользует
   их; фронт — сервис `front` (vite, `:8081`); прокси `*.localhost` на `:80`
   (`dev.localhost` → front, `api.localhost` → core, `auth.localhost` → Keycloak)
   — как в k8s-стенде. `make dev-roles` генерирует `infra/dev-roles.yaml`

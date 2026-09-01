@@ -8,8 +8,8 @@ use crate::project_files::PROJECT_ROOT;
 /// сбой clone (например, недоступный git_url) не уничтожает текущий проект.
 /// Временный каталог — `$$` (PID шелла exec): два параллельных switch одного
 /// ws не дерутся за общий `.new`. Каталог как таковой не удаляем (в dev
-/// `/work/project` — точка бинд-маунта), только его содержимое — так команда
-/// работает и в поде, и в контейнере.
+/// `/work/project` — точка монтирования named volume), только его содержимое —
+/// так команда работает и в поде, и в контейнере.
 pub fn switch_project_command(git_url: &str, branch: &str) -> String {
     // Временный каталог — `/work/project.new.<pid>`: `$$` вне кавычек, иначе
     // шелл его не раскроет. PID у каждого `sh -c` свой — параллельные switch
@@ -46,7 +46,7 @@ pub async fn replace_project(
 /// Очистить каталог проекта воркстейшна до пустого git-репо: станция
 /// отпущена, кода прежнего проекта на ней быть не должно (следующая занятие
 /// клонирует свой проект заново). Удаляем только содержимое — в dev
-/// `/work/project` это точка бинд-маунта, её саму удалить нельзя.
+/// `/work/project` это точка монтирования named volume, её саму удалить нельзя.
 pub fn release_workspace_command() -> String {
     format!(
         "find '{root}' -mindepth 1 -delete && git -C '{root}' init -q",
@@ -84,7 +84,7 @@ mod tests {
         assert!(cmd.contains("checkout -B 'ws-5'"));
         // Клонирование идёт во временный каталог, содержимое текущего проекта
         // очищается только после успешного clone — сбой не оставляет ws без
-        // проекта. Корень `/work/project` не удаляется (bind-mount в dev).
+        // проекта. Корень `/work/project` не удаляется (точка монтирования volume).
         assert!(
             cmd.find("git clone").unwrap()
                 < cmd
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn release_command_clears_project_to_empty_repo() {
         let cmd = release_workspace_command();
-        // Очищается содержимое, а не сам каталог (bind-mount в dev).
+        // Очищается содержимое, а не сам каталог (точка монтирования volume в dev).
         assert!(cmd.contains(&format!("find '{PROJECT_ROOT}' -mindepth 1 -delete")));
         assert!(cmd.contains(&format!("git -C '{PROJECT_ROOT}' init -q")));
     }

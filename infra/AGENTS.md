@@ -28,7 +28,8 @@
   `${KEYCLOAK_PORT:-8082}:8080`),
   nginx-прокси `*.localhost` (`proxy`, `dev-proxy/nginx.conf`, host-порт
   `${AGA_PROXY_PORT:-80}`) + 2 воркстейшна (`ws-1`, `ws-2`, privileged, пустые
-  git-репо в `main/data/work/`). Прокси маршрутизирует как ingress в k8s:
+  git-репо в отдельных named volumes `ws-1-data`/`ws-2-data` — на хосте файлов
+  воркстейшнов нет). Прокси маршрутизирует как ingress в k8s:
   `dev.localhost` → front, `api.localhost` → core, `auth.localhost` → Keycloak.
   Конфиг ядра — `infra/dev-roles.yaml` (генерируется `make dev-roles` из
   `main/config/roles.yaml`, sso-блок — стендовый, Keycloak этого compose).
