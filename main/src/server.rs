@@ -625,9 +625,15 @@ fn sso_redirect_uri(headers: &HeaderMap) -> Option<String> {
 
 /// Начать вход: редирект на authorize-эндпоинт Keycloak. Токен после входа
 /// возвращается веб-клиенту (front_url/#token=...) — см. auth_callback.
+///
+/// Параметры `prompt=none` и `silent=1` — silent-флоу обновления токена из
+/// скрытого iframe: `prompt=none` заставляет Keycloak вернуть код (или ошибку)
+/// без формы входа, а `silent` echo-ится в redirect_uri, чтобы колбэк ответил
+/// страницей postMessage, а не редиректом на фронт.
 async fn auth_login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::response::Redirect, StatusCode> {
     let sso = state
         .config
@@ -640,17 +646,27 @@ async fn auth_login(
     // Куда Keycloak вернёт после входа — абсолютный адрес из заголовка Host
     // (Origin при обычной навигации браузер не шлёт).
     let redirect_uri = sso_redirect_uri(&headers).ok_or(StatusCode::NOT_FOUND)?;
+    let redirect_uri = if params.contains_key("silent") {
+        format!("{redirect_uri}?silent=1")
+    } else {
+        redirect_uri
+    };
     let mut url = url::Url::parse(authorize_url).map_err(|_| StatusCode::NOT_FOUND)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", &redirect_uri)
         .append_pair("scope", "openid");
+    if params.get("prompt").map(String::as_str) == Some("none") {
+        url.query_pairs_mut().append_pair("prompt", "none");
+    }
     Ok(axum::response::Redirect::temporary(url.as_str()))
 }
 
 /// Обработчик возврата из Keycloak: обменять code на токен и вернуть его
-/// веб-клиенту (redirect на front_url с токеном в фрагменте URL).
+/// веб-клиенту (redirect на front_url с токеном в фрагменте URL). В silent-флоу
+/// (параметр `silent=1`) вместо редиректа отвечает HTML-страницей, которая
+/// передаёт токен родителю через postMessage (см. silent_auth_response).
 async fn auth_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -662,6 +678,16 @@ async fn auth_callback(
         .as_ref()
         .filter(|s| s.enabled)
         .ok_or(StatusCode::NOT_FOUND)?;
+    let silent = params.contains_key("silent");
+    // prompt=none без активной SSO-сессии: Keycloak возвращает error
+    // (login_required) вместо кода — в silent-флоу сообщаем родителю, в
+    // обычном — 400.
+    if params.contains_key("error") {
+        if silent {
+            return Ok(silent_auth_response(&state, None).into_response());
+        }
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let code = params.get("code").ok_or(StatusCode::BAD_REQUEST)?;
     let token_url = sso.token_url.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let client_id = sso.client_id.as_deref().ok_or(StatusCode::NOT_FOUND)?;
@@ -693,12 +719,24 @@ async fn auth_callback(
         .and_then(|v| v.as_str())
         .ok_or(StatusCode::BAD_GATEWAY)?;
 
+    // Cookie ставим в обоих случаях — прямые api.localhost-клиенты тоже свежие.
+    let cookie = format!("aga_token={token}; Path=/; HttpOnly; SameSite=Lax");
+    if silent {
+        let mut resp = silent_auth_response(&state, Some(token)).into_response();
+        resp.headers_mut().insert(
+            axum::http::header::SET_COOKIE,
+            cookie
+                .parse()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        );
+        return Ok(resp);
+    }
+
     // Веб-клиент (front/) получает токен фрагментом URL — фрагмент не уходит
-    // на сервер и не остаётся в логах. Cookie ставим для прямых api.localhost-клиентов.
+    // на сервер и не остаётся в логах.
     let mut resp =
         axum::response::Redirect::temporary(&format!("{}/#token={}", state.front_url, token))
             .into_response();
-    let cookie = format!("aga_token={token}; Path=/; HttpOnly; SameSite=Lax");
     resp.headers_mut().insert(
         axum::http::header::SET_COOKIE,
         cookie
@@ -706,6 +744,27 @@ async fn auth_callback(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
     Ok(resp)
+}
+
+/// HTML-ответ для silent-обновления токена: еслиrame (наш же веб-клиент)
+/// получает токен и передаёт его родителю через postMessage. Ошибка (нет
+/// активной SSO-сессии) — сообщение `aga_sso_error` без токена.
+fn silent_auth_response(state: &AppState, token: Option<&str>) -> axum::response::Response {
+    let payload = match token {
+        Some(t) => serde_json::json!({ "type": "aga_sso_token", "token": t }),
+        None => serde_json::json!({ "type": "aga_sso_error" }),
+    };
+    let html = format!(
+        "<!DOCTYPE html><html><body><script>window.parent.postMessage({payload}, {origin});</script></body></html>",
+        payload = serde_json::to_string(&payload).unwrap(),
+        origin = serde_json::to_string(&state.front_url).unwrap(),
+    );
+    let mut resp = axum::response::Response::new(axum::body::Body::from(html));
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    resp
 }
 
 /// Выход: сбрасываем cookie `aga_token` (HttpOnly — JS его сам не удалит) и,
@@ -2023,6 +2082,120 @@ mod tests {
         // Абсолютный redirect_uri на хосте SPA, иначе Keycloak после входа
         // вернёт браузер на свой хост (auth.localhost) и будет 404.
         assert_eq!(redirect_uri, "http://dev.localhost/auth/callback");
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn login_silent_echoes_silent_into_redirect_uri_and_prompt_none() {
+        let (mut state, file) = test_state(false).await;
+        state.config.sso = Some(crate::config::SsoConfig {
+            enabled: true,
+            jwks_url: None,
+            authorize_url: Some(
+                "http://auth.localhost/realms/aga/protocol/openid-connect/auth".into(),
+            ),
+            token_url: None,
+            end_session_url: None,
+            client_id: Some("aga".into()),
+            client_secret: None,
+        });
+        let router = create_router(state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/login?prompt=none&silent=1")
+                    .header("Host", "dev.localhost")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = resp
+            .headers()
+            .get(axum::http::header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let url = url::Url::parse(location).unwrap();
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        // redirect_uri эхоит silent=1, чтобы колбэк ответил postMessage-страницей.
+        assert!(pairs.contains(&(
+            "redirect_uri".into(),
+            "http://dev.localhost/auth/callback?silent=1".into()
+        )));
+        // prompt=none: Keycloak без формы входа.
+        assert!(pairs.contains(&("prompt".into(), "none".into())));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn callback_silent_error_returns_post_message_page() {
+        let (mut state, file) = test_state(false).await;
+        state.config.sso = Some(crate::config::SsoConfig {
+            enabled: true,
+            jwks_url: None,
+            authorize_url: None,
+            token_url: None,
+            end_session_url: None,
+            client_id: Some("aga".into()),
+            client_secret: None,
+        });
+        let router = create_router(state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/callback?silent=1&error=login_required")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(content_type.starts_with("text/html"));
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("aga_sso_error"), "html: {html}");
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn callback_with_error_returns_bad_request_outside_silent_flow() {
+        let (mut state, file) = test_state(false).await;
+        state.config.sso = Some(crate::config::SsoConfig {
+            enabled: true,
+            jwks_url: None,
+            authorize_url: None,
+            token_url: None,
+            end_session_url: None,
+            client_id: Some("aga".into()),
+            client_secret: None,
+        });
+        let router = create_router(state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/auth/callback?error=login_required")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         cleanup(&file).await;
     }
 
