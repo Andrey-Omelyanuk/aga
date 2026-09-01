@@ -1,6 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useParams } from 'react-router-dom';
 import { Card, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/tabs';
@@ -18,7 +18,9 @@ const ACTION_LABEL: Record<CapabilityHistoryEntry['action'], string> = {
 };
 
 const CapabilityHistoryPage = observer(() => {
-  const { kind, id } = useParams<{ kind: RouteKind; id: string }>();
+  const { id } = useParams<{ id: string }>();
+  // Вид способности — из пути (/skills/:id/history, /commands/:id/history).
+  const kind = useLocation().pathname.split('/')[1] as RouteKind;
   const [history, setHistory] = useState<CapabilityHistoryEntry[] | null>(null);
   const [error, setError] = useState(false);
 
