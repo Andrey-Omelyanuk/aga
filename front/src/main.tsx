@@ -10,10 +10,10 @@ const AgentSetsPage = lazy(() => import('./pages/app/agentSets'));
 const CapabilitiesPage = lazy(() => import('./pages/app/capabilities'));
 const WorkstationsPage = lazy(() => import('./pages/app/workstations'));
 const SessionsPage = lazy(() => import('./pages/app/sessions'));
-const PersonnelPage = lazy(() => import('./pages/app/personnel'));
 const FilesPage = lazy(() => import('./pages/app/files'));
 const ChatPage = lazy(() => import('./pages/app/chat'));
 const SettingsPage = lazy(() => import('./pages/app/settings'));
+const ProfilePage = lazy(() => import('./pages/app/profile'));
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <BrowserRouter>
@@ -32,11 +32,11 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
           <Route path="capabilities" element={<CapabilitiesPage />} />
           <Route path="workstations" element={<WorkstationsPage />} />
           <Route path="sessions" element={<SessionsPage />} />
-          <Route path="personnel" element={<PersonnelPage />} />
           <Route path="files" element={<FilesPage />} />
           <Route path="chat" element={<ChatPage />} />
           <Route path="chat/:id" element={<ChatPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="profile" element={<ProfilePage />} />
           <Route path="*" element={<Navigate to="/projects" replace />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />

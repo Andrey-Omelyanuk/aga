@@ -6,7 +6,7 @@ import { Page } from '@/components/core/Page';
 import { User } from '@/models/core';
 import { useQuery } from '@/utils/mobx';
 
-const PersonnelPage = observer(() => {
+export const PersonnelPanel = observer(() => {
   const [users] = useQuery(User, { autoupdate: true });
 
   return (
@@ -24,5 +24,3 @@ const PersonnelPage = observer(() => {
     </Page>
   );
 });
-
-export default PersonnelPage;
