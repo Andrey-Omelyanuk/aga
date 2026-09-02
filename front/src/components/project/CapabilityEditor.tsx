@@ -3,10 +3,11 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { EmptyState } from '@/components/ui/tabs';
+import { EmptyState, Tabs } from '@/components/ui/tabs';
 import { Link } from 'react-router-dom';
 import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
+import { Markdown } from '@/components/core/Markdown';
 import type { CatalogItem } from '@/models/project';
 
 export type CapabilityKind = 'skills' | 'commands';
@@ -31,6 +32,7 @@ interface CapabilityCardProps {
 const CapabilityCard = observer(({ kind, item, disabled, onChanged }: CapabilityCardProps) => {
   const [name, setName] = useState(item.name);
   const [content, setContent] = useState(item.content);
+  const [mode, setMode] = useState<'edit' | 'view'>('edit');
   const [busy, setBusy] = useState(false);
 
   const save = async () => {
@@ -88,13 +90,31 @@ const CapabilityCard = observer(({ kind, item, disabled, onChanged }: Capability
         </Link>
       </div>
       <div className="mt-2">
-        <CardTitle>Содержимое</CardTitle>
-        <textarea
-          className={textareaClass}
-          placeholder="Содержимое скилла/команды (агент берёт его всегда)"
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-        />
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <CardTitle>Содержимое</CardTitle>
+          <Tabs
+            tabs={[
+              { value: 'edit', label: 'Правка' },
+              { value: 'view', label: 'Просмотр' },
+            ]}
+            value={mode}
+            onChange={setMode}
+          />
+        </div>
+        {mode === 'view' ? (
+          content.trim() ? (
+            <Markdown content={content} />
+          ) : (
+            <EmptyState>Содержимое пусто</EmptyState>
+          )
+        ) : (
+          <textarea
+            className={textareaClass}
+            placeholder="Содержимое скилла/команды (markdown; агент берёт его всегда)"
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+          />
+        )}
       </div>
     </Card>
   );

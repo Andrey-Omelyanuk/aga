@@ -517,9 +517,22 @@ async fn create_capability(
     payload: CreateCapabilityRequest,
 ) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
     let (actor, actor_name) = current_actor(state, headers).await?;
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // Имя в пределах вида уникально (в т.ч. среди удалённых) — дубль это 409.
+    if state
+        .trace_store
+        .capability_name_taken(kind, &name, 0)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     let id = state
         .trace_store
-        .create_capability(kind, &payload.name, &payload.content, actor, &actor_name)
+        .create_capability(kind, &name, &payload.content, actor, &actor_name)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
@@ -604,24 +617,38 @@ async fn update_capability(
     payload: UpdateCapabilityRequest,
 ) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
     let (actor, actor_name) = current_actor(state, headers).await?;
-    let exists = state
+    let current = state
         .trace_store
         .get_capability(id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .filter(|c| c.kind == kind)
-        .is_some();
-    if !exists {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    if let Some(name) = payload.name.filter(|n| !n.trim().is_empty()) {
-        if !state
-            .trace_store
-            .rename_capability(id, &name, actor, &actor_name)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        {
-            return Err(StatusCode::NOT_FOUND);
+        .ok_or(StatusCode::NOT_FOUND)?;
+    // Имя меняем только если оно реально изменилось: правка содержимого с тем же
+    // именем не должна писать в историю «переименовал». Совпадение с уже занятым
+    // именем (активным или удалённым) — 409, а не 500.
+    if let Some(name) = payload
+        .name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+    {
+        if name != current.name {
+            if state
+                .trace_store
+                .capability_name_taken(kind, &name, id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                return Err(StatusCode::CONFLICT);
+            }
+            if !state
+                .trace_store
+                .rename_capability(id, &name, actor, &actor_name)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                return Err(StatusCode::NOT_FOUND);
+            }
         }
     }
     if let Some(content) = payload.content {
@@ -2831,6 +2858,80 @@ mod tests {
         // История несуществующей записи — 404.
         let (status, _) = get("/skills/999/history", &headers, state.clone()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn capability_edit_skips_rename_when_name_unchanged_and_conflicts_return_409() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/skills",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "review", "content": "v1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let skill_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        // Фронт всегда шлёт имя: правка содержимого с тем же именем не должна
+        // писать в историю лишнее «переименовал».
+        let (status, _) = patch_json(
+            &format!("/skills/{skill_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "review", "content": "v2" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get(
+            &format!("/skills/{skill_id}/history"),
+            &headers,
+            state.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let actions: Vec<&str> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(actions, vec!["create", "update"]);
+        // Переименование в занятое имя — 409, а не 500.
+        let (status, _) = post_json(
+            "/skills",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "taken", "content": "x" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = patch_json(
+            &format!("/skills/{skill_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "taken" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        // Имя не поменялось — содержимое на месте.
+        let (status, body) = get(&format!("/skills/{skill_id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"name\":\"review\""));
+        assert!(body.contains("v2"));
+        // Создание с занятым именем — тоже 409.
+        let (status, _) = post_json(
+            "/skills",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "taken", "content": "y" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
         cleanup(&file).await;
     }
 
