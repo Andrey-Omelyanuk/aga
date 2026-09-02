@@ -1,7 +1,9 @@
 import { Model, model, field, id, NUMBER, STRING } from 'mobx-model-ui';
 import { api } from '@/services/http-adapter';
 
-/** Запись истории изменения скилла/команды: кто, когда и что сделал. */
+/** Запись истории изменения скилла/команды: кто, когда и что сделал.
+ * `content` — содержимое записи после действия: по соседним записям
+ * страница истории строит дифф. */
 export interface CapabilityHistoryEntry {
   id: number;
   action: 'create' | 'update' | 'rename' | 'delete';
@@ -9,6 +11,7 @@ export interface CapabilityHistoryEntry {
   actor_name: string;
   created_at: string;
   detail?: string | null;
+  content?: string;
 }
 
 /** Каталог способностей: скилл или команда с единственным текущим содержимым. */

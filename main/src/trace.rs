@@ -122,6 +122,8 @@ impl CapabilityAction {
 }
 
 /// Одна запись истории изменения записи каталога: кто, когда и что сделал.
+/// `content` — содержимое записи после действия: по соседним записям строится
+/// дифф на странице истории.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityHistoryEntry {
     pub id: i64,
@@ -130,6 +132,7 @@ pub struct CapabilityHistoryEntry {
     pub actor_name: String,
     pub created_at: DateTime<Utc>,
     pub detail: Option<String>,
+    pub content: String,
 }
 
 /// Запись каталога способностей с единственным текущим содержимым.
@@ -275,12 +278,16 @@ impl TraceStore {
                 actor_name TEXT NOT NULL DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 detail TEXT,
+                content TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE CASCADE
             )
             "#,
         )
         .execute(&pool)
         .await?;
+
+        // Миграция старых БД: содержимое записи после действия (для диффа).
+        migrate_capability_history_content(&pool).await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_capability_history ON capability_history(capability_id)")
             .execute(&pool)
@@ -883,6 +890,27 @@ impl TraceStore {
         Ok(row.map(|r| capability_from_row(&r)))
     }
 
+    /// Занято ли имя в пределах вида (активными или удалёнными записями).
+    /// Исключает сам id — правка с тем же именем не конфликтует. Удалённые
+    /// записи имя занимают (UNIQUE(kind, name)), поэтому переименование в имя
+    /// удалённой записи тоже запрещено.
+    pub async fn capability_name_taken(
+        &self,
+        kind: CapabilityKind,
+        name: &str,
+        exclude_id: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS c FROM capabilities WHERE kind = ? AND name = ? AND id != ?",
+        )
+        .bind(kind.as_str())
+        .bind(name)
+        .bind(exclude_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("c") > 0)
+    }
+
     /// Создать запись каталога с единственным текущим содержимым и записать
     /// создание в историю. Возвращает id записи.
     pub async fn create_capability(
@@ -902,12 +930,13 @@ impl TraceStore {
             .await?;
         let id = result.last_insert_rowid();
         sqlx::query(
-            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name) VALUES (?, ?, ?, ?)",
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name, content) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(CapabilityAction::Create.as_str())
         .bind(actor_id)
         .bind(actor_name)
+        .bind(content)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -934,12 +963,13 @@ impl TraceStore {
             return Ok(false);
         }
         sqlx::query(
-            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name) VALUES (?, ?, ?, ?)",
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name, content) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(CapabilityAction::Update.as_str())
         .bind(actor_id)
         .bind(actor_name)
+        .bind(content)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -955,6 +985,15 @@ impl TraceStore {
         actor_name: &str,
     ) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
+        let content: Option<String> =
+            sqlx::query_scalar("SELECT content FROM capabilities WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(content) = content else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
         let result = sqlx::query("UPDATE capabilities SET name = ? WHERE id = ?")
             .bind(name)
             .bind(id)
@@ -965,13 +1004,14 @@ impl TraceStore {
             return Ok(false);
         }
         sqlx::query(
-            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name, detail) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name, detail, content) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(CapabilityAction::Rename.as_str())
         .bind(actor_id)
         .bind(actor_name)
         .bind(name)
+        .bind(content)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -987,6 +1027,15 @@ impl TraceStore {
         actor_name: &str,
     ) -> Result<bool, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
+        let content: Option<String> =
+            sqlx::query_scalar("SELECT content FROM capabilities WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(content) = content else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
         let result =
             sqlx::query("UPDATE capabilities SET deleted = 1 WHERE id = ? AND deleted = 0")
                 .bind(id)
@@ -997,12 +1046,13 @@ impl TraceStore {
             return Ok(false);
         }
         sqlx::query(
-            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name) VALUES (?, ?, ?, ?)",
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name, content) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(CapabilityAction::Delete.as_str())
         .bind(actor_id)
         .bind(actor_name)
+        .bind(content)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1015,7 +1065,7 @@ impl TraceStore {
         capability_id: i64,
     ) -> Result<Vec<CapabilityHistoryEntry>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, action, actor_id, actor_name, created_at, detail
+            "SELECT id, action, actor_id, actor_name, created_at, detail, content
              FROM capability_history
              WHERE capability_id = ? ORDER BY id",
         )
@@ -1032,6 +1082,7 @@ impl TraceStore {
                 actor_name: r.get::<String, _>("actor_name"),
                 created_at: r.get("created_at"),
                 detail: r.get("detail"),
+                content: r.get::<String, _>("content"),
             })
             .collect())
     }
@@ -1132,6 +1183,24 @@ fn action_from_str(s: &str) -> Option<CapabilityAction> {
     }
 }
 
+/// Миграция старых БД: история каталога хранит содержимое записи после
+/// действия (`content`) — по нему страница истории строит дифф. Старые записи
+/// получают пустое содержимое (снапшотов тогда не было).
+async fn migrate_capability_history_content(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let cols: Vec<String> = sqlx::query("PRAGMA table_info(capability_history)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    if !cols.iter().any(|c| c == "content") {
+        sqlx::query("ALTER TABLE capability_history ADD COLUMN content TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Перевести старые БД на новую модель каталога: у записей одно содержимое
 /// (`content`) и мягкое удаление (`deleted`). Содержимое берётся из последней
 /// версии; UNIQUE(kind, name) в старой схеме уже есть и сохраняется.
@@ -1146,15 +1215,27 @@ async fn migrate_capabilities_columns(pool: &SqlitePool) -> Result<(), sqlx::Err
         sqlx::query("ALTER TABLE capabilities ADD COLUMN content TEXT NOT NULL DEFAULT ''")
             .execute(pool)
             .await?;
-        sqlx::query(
-            "UPDATE capabilities SET content = (
-                SELECT v.content FROM capability_versions v
-                WHERE v.capability_id = capabilities.id
-                ORDER BY v.id DESC LIMIT 1
-            )",
+        // Наполнение из последней версии. Таблицы версий может не быть вообще
+        // (старая схема без версий) — тогда остаётся пустое содержимое; если
+        // версий для записи нет, COALESCE не даёт NULL нарушить NOT NULL.
+        let has_versions = sqlx::query(
+            "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name = 'capability_versions'",
         )
-        .execute(pool)
-        .await?;
+        .fetch_one(pool)
+        .await?
+        .get::<i64, _>("c")
+            > 0;
+        if has_versions {
+            sqlx::query(
+                "UPDATE capabilities SET content = COALESCE((
+                    SELECT v.content FROM capability_versions v
+                    WHERE v.capability_id = capabilities.id
+                    ORDER BY v.id DESC LIMIT 1
+                ), '')",
+            )
+            .execute(pool)
+            .await?;
+        }
     }
     if !cols.iter().any(|c| c == "deleted") {
         sqlx::query("ALTER TABLE capabilities ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0")
@@ -1302,6 +1383,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // Запись без версий: миграция не должна падать — остаётся пустое содержимое.
+        sqlx::query("INSERT INTO capabilities (kind, name) VALUES ('skill', 'orphan')")
+            .execute(&pool)
+            .await
+            .unwrap();
         pool.close().await;
 
         // Открытие мигрирует: содержимое из последней версии, запись активна.
@@ -1310,6 +1396,55 @@ mod tests {
         assert_eq!(item.content, "старое содержимое");
         assert!(!item.deleted);
         assert_eq!(item.name, "review");
+        let orphan = store.get_capability(2).await.unwrap().unwrap();
+        assert_eq!(orphan.content, "");
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn migrates_capability_history_content_column() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let (path, file) = temp_db_path();
+        let options = SqliteConnectOptions::from_str(&path)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        // Старая схема: история без снапшотов содержимого.
+        sqlx::query(
+            "CREATE TABLE capability_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                capability_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                actor_id INTEGER NOT NULL,
+                actor_name TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                detail TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name) VALUES (1, 'update', 2, 'alice')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        // Открытие добавляет столбец content: старая запись получает пустое
+        // содержимое (снапшота не было) и не ломает чтение.
+        let store = TraceStore::new(&path).await.unwrap();
+        let history = store.capability_history(1).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].action, CapabilityAction::Update);
+        assert_eq!(history[0].content, "");
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
@@ -1782,6 +1917,54 @@ mod tests {
         assert_eq!(history[2].actor_id, 8);
         assert_eq!(history[3].actor_id, 9);
         assert!(history[0].created_at <= history[3].created_at);
+        // Каждая запись хранит содержимое после действия — по соседним записям
+        // страница истории строит дифф: create -> v1, update -> v2, rename/delete
+        // содержимое не меняют.
+        let contents: Vec<&str> = history.iter().map(|h| h.content.as_str()).collect();
+        assert_eq!(contents, vec!["v1", "v2", "v2", "v2"]);
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn capability_name_taken_includes_active_and_deleted_but_not_self() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let skill = store
+            .create_capability(CapabilityKind::Skill, "review", "v1", 1, "alice")
+            .await
+            .unwrap();
+        // Своё же имя не считается занятым — правка с тем же именем проходит.
+        assert!(!store
+            .capability_name_taken(CapabilityKind::Skill, "review", skill)
+            .await
+            .unwrap());
+        // Другая активная запись с тем же именем — занято.
+        assert!(store
+            .create_capability(CapabilityKind::Skill, "taken", "x", 1, "alice")
+            .await
+            .unwrap()
+            > 0);
+        assert!(store
+            .capability_name_taken(CapabilityKind::Skill, "taken", skill)
+            .await
+            .unwrap());
+        // Имя свободно в другом виде (команды не мешают скиллам).
+        assert!(!store
+            .capability_name_taken(CapabilityKind::Command, "taken", 0)
+            .await
+            .unwrap());
+        // Мягко удалённая запись имя занимает.
+        let taken_id = store
+            .create_capability(CapabilityKind::Skill, "gone", "x", 1, "alice")
+            .await
+            .unwrap();
+        store.delete_capability(taken_id, 1, "alice").await.unwrap();
+        assert!(store
+            .capability_name_taken(CapabilityKind::Skill, "gone", skill)
+            .await
+            .unwrap());
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);

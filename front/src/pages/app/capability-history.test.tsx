@@ -13,10 +13,10 @@ import CapabilityHistoryPage from '@/pages/app/capabilityHistory';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const entries = [
-  { id: 1, action: 'create', actor_id: 2, actor_name: 'alice', created_at: '2026-09-01T10:00:00Z', detail: null },
-  { id: 2, action: 'update', actor_id: 2, actor_name: 'alice', created_at: '2026-09-01T11:00:00Z', detail: null },
-  { id: 3, action: 'rename', actor_id: 3, actor_name: 'bob', created_at: '2026-09-01T12:00:00Z', detail: 'review2' },
-  { id: 4, action: 'delete', actor_id: 4, actor_name: 'carol', created_at: '2026-09-01T13:00:00Z', detail: null },
+  { id: 1, action: 'create', actor_id: 2, actor_name: 'alice', created_at: '2026-09-01T10:00:00Z', detail: null, content: 'v1' },
+  { id: 2, action: 'update', actor_id: 2, actor_name: 'alice', created_at: '2026-09-01T11:00:00Z', detail: null, content: 'v2' },
+  { id: 3, action: 'rename', actor_id: 3, actor_name: 'bob', created_at: '2026-09-01T12:00:00Z', detail: 'review2', content: 'v2' },
+  { id: 4, action: 'delete', actor_id: 4, actor_name: 'carol', created_at: '2026-09-01T13:00:00Z', detail: null, content: 'v2' },
 ];
 
 async function renderHistory() {
@@ -56,6 +56,12 @@ describe('CapabilityHistoryPage', () => {
     expect(text).toContain('bob');
     expect(text).toContain('carol');
     expect(text).toContain('review2');
+
+    // Дифф по соседним записям: создание показывает +v1, правка — -v1/+v2,
+    // переименование и удаление содержимое не меняют (дифф пуст).
+    expect(text).toContain('+v1');
+    expect(text).toContain('-v1');
+    expect(text).toContain('+v2');
 
     act(() => root.unmount());
   });

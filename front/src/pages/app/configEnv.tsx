@@ -1,9 +1,8 @@
 import { SshKeyPanel } from '@/components/settings/SshKeyPanel';
-import { PersonnelPanel } from '@/components/settings/PersonnelPanel';
 import { getSshKey } from '@/services/settings';
 import { useObject } from '@/utils/mobx';
 
-const SettingsPage = () => {
+const ConfigEnvPage = () => {
   const [info, loading] = useObject(getSshKey);
 
   if (loading) {
@@ -13,10 +12,8 @@ const SettingsPage = () => {
   return (
     <div className="max-w-2xl">
       {info && <SshKeyPanel info={info} />}
-      <h2 className="mb-2 mt-6 text-sm font-semibold text-slate-800">Персонал</h2>
-      <PersonnelPanel />
     </div>
   );
 };
 
-export default SettingsPage;
+export default ConfigEnvPage;
