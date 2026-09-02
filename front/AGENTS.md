@@ -19,8 +19,11 @@ shadcn/ui.
   через blob-URL); вкладка «Config» (второе топ-меню с вариантами страниц: Env —
   публичный SSH-ключ aga (копирование; ключ задаёт админ в env ядра), Users —
   персонал, Skills и Commands — каталог скиллов/команд с единственным текущим
-  содержимым (правка перезаписывает его и пишется в историю), у формы —
-  переключатель «Правка/Просмотр»: markdown рендерится компонентом
+  содержимым (правка перезаписывает его и пишется в историю): слева столбец со
+  всеми записями (клик переключает, у каждой — удаление через попап
+  подтверждения `ConfirmDialog` и переход к истории), справа — редактор
+  выбранной записи с переключателем «Правка/Просмотр»: markdown рендерится
+  компонентом
   `Markdown` (`react-markdown` + GFM + `rehype-highlight`, тёмные код-блоки
   со светлой подсветкой github-dark; переиспользуем его везде, где нужен
   рендер markdown и кода), список «Удалённые»
@@ -70,7 +73,8 @@ front/
 │   │   │                #   inputs/ (StringInput, SelectInput, DeleteObjectButton)
 │   │   ├── project/ workstation/ chat/ files/   # доменные компоненты
 │   │   │                # project/: AgentSetList + AgentSetEditor (страница «Наборы»)
-│   │   └── ui/          # shadcn/ui-примитивы (Button, Input, Select, ...)
+│   │   └── ui/          # shadcn/ui-примитивы (Button, Input, Select, ...,
+│   │                    #   ConfirmDialog — попап подтверждения разрушающих действий)
 │   ├── pages/
 │   │   ├── app/         # layout.tsx + projects/agentSets/workstations/sessions/
 │   │   │                #   personnel/files/chat/settings
@@ -151,8 +155,9 @@ front/
   (`html.test.ts`, `file-browser.test.ts`), состав набора на странице
   (`project/agent-set.test.tsx` — агент, его территория, данные скиллы/команды
   по имени без версии и инструменты видны в редакторе), редактор каталога
-  (`project/capability-editor.test.tsx` — единственное содержимое, ссылка на
-  историю, список «Удалённые» с открываемой историей), страница истории
+  (`project/capability-editor.test.tsx` — список слева, выбор записи открывает
+  редактор справа, ссылка на историю, список «Удалённые» с открываемой
+  историей), страница истории
   (`pages/app/capability-history.test.tsx` — изменения одной записи по порядку:
   кто, когда и что сделал). Запуск: `npm test`.
 - Сборка: `npm run build` (tsc --noEmit + vite build) без ошибок.

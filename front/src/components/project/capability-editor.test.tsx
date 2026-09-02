@@ -25,18 +25,28 @@ function renderEditor(
   return { container, root };
 }
 
+function clickItem(container: HTMLElement, name: string) {
+  const row = [...container.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === name,
+  );
+  expect(row, `row for ${name}`).toBeDefined();
+  act(() => row!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+}
+
 describe('CapabilityEditor', () => {
-  it('shows single content per item and a history link', () => {
+  it('lists skills on the left and edits the selected one on the right', () => {
     const items: CatalogItem[] = [
       { id: 1, name: 'review', content: 'Проверять диф и тесты', deleted: false },
     ];
     const { container, root } = renderEditor(items, []);
     const text = container.textContent ?? '';
 
-    // Имя записи — в поле ввода карточки.
-    const nameInput = container.querySelector('input[value="review"]');
-    expect(nameInput).not.toBeNull();
-    expect(text).toContain('Проверять диф и тесты');
+    // Список слева содержит имя записи.
+    expect(text).toContain('review');
+    // Редактор появляется после выбора записи.
+    clickItem(container, 'review');
+    expect(container.querySelector('input[value="review"]')).not.toBeNull();
+    expect(container.textContent).toContain('Проверять диф и тесты');
     // История открывается на конкретную запись.
     expect(container.querySelector('a[href="/skills/1/history"]')).not.toBeNull();
 
