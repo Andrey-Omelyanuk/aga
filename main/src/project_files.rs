@@ -185,7 +185,10 @@ fn parse_find_lines(out: &str, root: &str, kind: &str, entries: &mut Vec<FileEnt
 pub async fn tree(executor: &Executor, root: &str, rel: &str) -> Result<Tree, FileError> {
     let rel = sanitize_rel(rel)?;
     let mut entries: Vec<FileEntry> = Vec::new();
-    for (command, kind) in listing_commands(root, &rel).into_iter().zip(["dir", "file"]) {
+    for (command, kind) in listing_commands(root, &rel)
+        .into_iter()
+        .zip(["dir", "file"])
+    {
         let out = match execute_via_executor(executor, &command).await {
             Ok(out) => out,
             Err(e) => return Err(exec_error_or_not_found(e)),
@@ -215,7 +218,10 @@ pub async fn read(executor: &Executor, root: &str, rel: &str) -> Result<FileCont
     };
     // `base64` CLI оборачивает вывод по 76 символов; декодер crate требует
     // сплошную строку — убираем все пробельные символы.
-    let b64 = out.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let b64 = out
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&b64)
         .map_err(|e| FileError::Exec(format!("base64 decode: {e}")))?;

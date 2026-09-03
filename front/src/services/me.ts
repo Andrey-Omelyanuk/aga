@@ -1,7 +1,16 @@
+import axios from 'axios';
 import { makeObservable, observable, runInAction } from 'mobx';
 import { waitIsTrue } from 'mobx-model-ui';
 import { API_BASE, TOKEN_KEY, setOnAuthError, setOnUnauthorized } from './http';
 import http from './http';
+
+// Refresh-токен Keycloak: живёт дольше access-токена и позволяет обновлять его
+// молча через /auth/refresh ядра, не завися от SSO-куки в кросс-сайтовом iframe.
+export const REFRESH_KEY = 'aga_refresh';
+
+// Отдельный клиент для /auth/refresh: без response-интерцептора http.ts, чтобы
+// 401 на недействительном refresh-токене не уходил в рекурсивный refresh.
+const authHttp = axios.create({ baseURL: API_BASE });
 
 export interface MeUser {
   id: number;
@@ -52,7 +61,10 @@ class Me {
       user = data;
       anonymous = !this.isAuthenticated;
     } catch {
-      if (this.isAuthenticated) localStorage.removeItem(TOKEN_KEY);
+      if (this.isAuthenticated) {
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(REFRESH_KEY);
+      }
     }
     runInAction(() => {
       this.user = user;
@@ -68,10 +80,11 @@ class Me {
   }
 
   logout(): void {
-    // Удаляем токен и уходим на /auth/logout ядра: оно сбрасывает HttpOnly-куку
+    // Удаляем токены и уходим на /auth/logout ядра: оно сбрасывает HttpOnly-куку
     // aga_token и редиректит на end-session Keycloak (если настроен) → фронт.
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(REFRESH_KEY);
     runInAction(() => {
       this.user = null;
       this.show_login = true;
@@ -79,8 +92,8 @@ class Me {
     window.location.href = this.logoutUrl;
   }
 
-  // Обработчик 401 (из http.ts): молча обновляем токен в скрытом iframe через
-  // Keycloak (prompt=none). True — новый токен сохранён, запрос повторится.
+  // Обработчик 401 (из http.ts): молча обновляем access-токен по refresh-токену
+  // через /auth/refresh ядра. True — новый токен сохранён, запрос повторится.
   private authError = async (): Promise<boolean> => {
     if (!this.isAuthenticated) return false;
     const token = await this.refresh();
@@ -89,34 +102,27 @@ class Me {
     return true;
   };
 
-  // Silent-обновление: скрытый iframe на /auth/login?prompt=none&silent=1.
-  // Ядро отвечает страницей, которая передаёт новый токен через postMessage
-  // (aga_sso_token) или сообщает об отсутствии активной SSO-сессии
-  // (aga_sso_error). Возвращает новый токен или null.
-  refresh(): Promise<string | null> {
-    return new Promise((resolve) => {
-      const iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.setAttribute('aria-hidden', 'true');
-      iframe.src = `${API_BASE}/auth/login?prompt=none&silent=1`;
-      let settled = false;
-      const done = (token: string | null): void => {
-        if (settled) return;
-        settled = true;
-        window.removeEventListener('message', onMessage);
-        iframe.remove();
-        resolve(token);
-      };
-      const onMessage = (event: MessageEvent): void => {
-        if (event.source !== iframe.contentWindow) return;
-        const data = event.data as { type?: string; token?: string } | null;
-        if (data?.type === 'aga_sso_token' && typeof data.token === 'string') done(data.token);
-        else if (data?.type === 'aga_sso_error') done(null);
-      };
-      window.addEventListener('message', onMessage);
-      document.body.appendChild(iframe);
-      window.setTimeout(() => done(null), 10000);
-    });
+  // Обновление токена: ядро меняет refresh-токен на свежую пару у Keycloak
+  // (grant_type=refresh_token). Возвращает новый access-токен или null.
+  // Кросс-сайтовые куки и silent-iframe не участвуют — браузерная блокировка
+  // third-party cookies на обновление не влияет.
+  async refresh(): Promise<string | null> {
+    const refreshToken = localStorage.getItem(REFRESH_KEY);
+    if (!refreshToken) return null;
+    try {
+      const { data } = await authHttp.post('/auth/refresh', { refresh_token: refreshToken });
+      const token = data?.access_token;
+      if (typeof token === 'string') {
+        localStorage.setItem(TOKEN_KEY, token);
+        if (typeof data.refresh_token === 'string') {
+          localStorage.setItem(REFRESH_KEY, data.refresh_token);
+        }
+        return token;
+      }
+    } catch {
+      // Недействительный/истёкший refresh-токен — нужен повторный вход.
+    }
+    return null;
   }
 
   // Плановое обновление до истечения токена (за 30 секунд), чтобы 401 не
@@ -139,12 +145,17 @@ class Me {
   }
 
   private readTokenFromHash(): void {
-    const match = location.hash.match(/^#token=(.+)$/);
-    if (match) {
-      localStorage.setItem(TOKEN_KEY, match[1]);
-      if (window.history.replaceState) {
-        window.history.replaceState(null, '', location.pathname + location.search);
-      }
+    const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const token = params.get('token');
+    if (!token) return;
+    localStorage.setItem(TOKEN_KEY, token);
+    // Refresh-токен (второй параметр фрагмента) нужен для молчаливого
+    // обновления access-токена после входа.
+    const refresh = params.get('refresh');
+    if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
+    else localStorage.removeItem(REFRESH_KEY);
+    if (window.history.replaceState) {
+      window.history.replaceState(null, '', location.pathname + location.search);
     }
   }
 }

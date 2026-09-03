@@ -89,13 +89,16 @@ front/
   `window.API_ENDPOINT` (старт контейнера) или fallback по hostname
   (`api.localhost` / `localhost:8080`); request-interceptor добавляет
   `Authorization: Bearer <token>` из `localStorage[aga_token]`; на 401 —
-  `me.show_login = true`.
-- **Вход (гейт):** `me.init()` читает токен из `#token=` в hash, сохраняет в
-  localStorage и пробует `GET /users/me` — это и проба доступа, и данные
+  `me.refresh()` молча обновляет токен по refresh-токену (`/auth/refresh` ядра),
+  при неудаче — `me.show_login = true`.
+- **Вход (гейт):** `me.init()` читает токены из фрагмента URL
+  (`#token=...&refresh=...`), сохраняет в localStorage и пробует `GET /users/me`
+  — это и проба доступа, и данные
   текущего пользователя: 401 без токена → ядро требует SSO — layout показывает
   полноэкранную страницу входа (`pages/app/login.tsx`), приложение скрыто;
   200 без токена — локальный режим без SSO (аноним-супер), UI открыт.
-  С токеном та же проба валидирует его (просроченный удаляется → экран входа).
+  С токеном та же проба валидирует его (просроченный сначала молча
+  обновляется; если refresh-токена нет или он истёк — удаляется → экран входа).
   Текущий пользователь хранится в `me.user` и выводится в шапке (`AppHeader`)
   с кнопкой «Выйти» (`me.logout()` → `/auth/logout` ядра: сброс HttpOnly-куки
   и end-session Keycloak, если настроен).
@@ -121,9 +124,12 @@ front/
   `loadChatDetail(id)` (`GET /chats/:id` отдаёт обёртку `{chat, messages,
   participants}` — разворачивается в плоский объект модели). Реактивных агентов
   ждём опросом (`setInterval`, pub-sub-сервер пока не поднят).
-- **Вход:** `me.init()` читает токен из `#token=` в hash; после входа —
+- **Вход:** `me.init()` читает токены из фрагмента URL (`#token=...&refresh=...`);
+  после входа —
   в localStorage; без токена и с включённым SSO ядра — полноэкранная страница
   входа (`pages/app/login.tsx`), приложение не рендерится (см. «Вход (гейт)» выше).
+  Обновление access-токена — `/auth/refresh` по refresh-токену (`aga_refresh`),
+  не через кросс-сайтовый silent-iframe (браузеры блокируют third-party cookies).
 
 ## Non-Obvious Rules
 - **`@api` работает через статику:** декоратор присваивает

@@ -156,6 +156,7 @@ pub fn create_router(state: AppState) -> Router {
         // === SSO (Keycloak): вход веб-клиента ===
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
+        .route("/auth/refresh", post(auth_refresh))
         .route("/auth/logout", get(auth_logout))
         // === Модель чата ===
         .route("/users", get(list_users))
@@ -890,6 +891,9 @@ async fn auth_callback(
         .get("access_token")
         .and_then(|v| v.as_str())
         .ok_or(StatusCode::BAD_GATEWAY)?;
+    // Refresh-токен живёт дольше access-токена: веб-клиент обновляет им токен
+    // молча (`/auth/refresh`), не завися от SSO-куки Keycloak в iframe.
+    let refresh_token = json.get("refresh_token").and_then(|v| v.as_str());
 
     // Cookie ставим в обоих случаях — прямые api.localhost-клиенты тоже свежие.
     let cookie = format!("aga_token={token}; Path=/; HttpOnly; SameSite=Lax");
@@ -904,11 +908,15 @@ async fn auth_callback(
         return Ok(resp);
     }
 
-    // Веб-клиент (front/) получает токен фрагментом URL — фрагмент не уходит
-    // на сервер и не остаётся в логах.
-    let mut resp =
-        axum::response::Redirect::temporary(&format!("{}/#token={}", state.front_url, token))
-            .into_response();
+    // Веб-клиент (front/) получает токены фрагментом URL — фрагмент не уходит
+    // на сервер и не остаётся в логах. Refresh-токен — вторым параметром,
+    // чтобы обновлять access-токен без повторного входа.
+    let fragment = match refresh_token {
+        Some(rt) => format!("#token={token}&refresh={rt}"),
+        None => format!("#token={token}"),
+    };
+    let mut resp = axum::response::Redirect::temporary(&format!("{}{fragment}", state.front_url))
+        .into_response();
     resp.headers_mut().insert(
         axum::http::header::SET_COOKIE,
         cookie
@@ -964,6 +972,75 @@ async fn auth_logout(
     resp.headers_mut().insert(
         axum::http::header::SET_COOKIE,
         "aga_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    Ok(resp)
+}
+
+#[derive(Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+/// Молча обновить access-токен: веб-клиент шлёт refresh-токен, ядро меняет его
+/// у Keycloak (`grant_type=refresh_token`) и возвращает свежие токены JSON'ом
+/// плюс кладёт access-токен в cookie `aga_token` (прямые api.localhost-клиенты).
+/// В отличие от silent-iframe, браузерные куки и их кросс-сайтовая блокировка
+/// не участвуют. Недействительный/истёкший refresh-токен — 401.
+async fn auth_refresh(
+    State(state): State<AppState>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<axum::response::Response, StatusCode> {
+    let sso = state
+        .config
+        .sso
+        .as_ref()
+        .filter(|s| s.enabled)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let token_url = sso.token_url.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let client_id = sso.client_id.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+    let client_secret = sso.client_secret.as_deref().ok_or(StatusCode::NOT_FOUND)?;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(token_url)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &payload.refresh_token),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ])
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    if !resp.status().is_success() {
+        // Keycloak отвечает 400 с error=invalid_grant, когда refresh-токен
+        // недействителен или уже использован — для клиента это «войдите заново».
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let token = json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    // Keycloak ротирует refresh-токен — возвращаем новый, чтобы клиент сохранил.
+    let new_refresh = json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&payload.refresh_token);
+
+    let body = Json(serde_json::json!({
+        "access_token": token,
+        "refresh_token": new_refresh,
+        "expires_in": json.get("expires_in"),
+    }))
+    .into_response();
+    let mut resp = body;
+    let cookie = format!("aga_token={token}; Path=/; HttpOnly; SameSite=Lax");
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        cookie
             .parse()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
@@ -2450,6 +2527,123 @@ mod tests {
             "post_logout_redirect_uri".into(),
             "http://dev.localhost".into()
         )));
+        cleanup(&file).await;
+    }
+
+    /// Мок token-эндпоинта Keycloak на случайном порту: успешный обмен
+    /// (свежие токены) или 400 invalid_grant.
+    async fn mock_token_server(success: bool) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move |_: axum::extract::Request| async move {
+                if success {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "access_token": "fresh.access.token",
+                            "refresh_token": "fresh.refresh.token",
+                            "expires_in": 300,
+                        })),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(serde_json::json!({ "error": "invalid_grant" })),
+                    )
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/token"), handle)
+    }
+
+    fn sso_with_token_url(token_url: String) -> crate::config::SsoConfig {
+        crate::config::SsoConfig {
+            enabled: true,
+            jwks_url: None,
+            authorize_url: None,
+            token_url: Some(token_url),
+            end_session_url: None,
+            client_id: Some("aga".into()),
+            client_secret: Some("aga-secret".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_exchanges_token_and_sets_cookie() {
+        let (mut state, file) = test_state(false).await;
+        let (token_url, _server) = mock_token_server(true).await;
+        state.config.sso = Some(sso_with_token_url(token_url));
+        let router = create_router(state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/refresh")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"refresh_token":"stale.refresh.token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.starts_with("aga_token="));
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["access_token"], "fresh.access.token");
+        assert_eq!(json["refresh_token"], "fresh.refresh.token");
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_invalid_token() {
+        let (mut state, file) = test_state(false).await;
+        let (token_url, _server) = mock_token_server(false).await;
+        state.config.sso = Some(sso_with_token_url(token_url));
+        let router = create_router(state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/refresh")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"refresh_token":"stale.refresh.token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn refresh_requires_sso_config() {
+        let (state, file) = test_state(false).await;
+        let router = create_router(state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/refresh")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"refresh_token":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         cleanup(&file).await;
     }
 

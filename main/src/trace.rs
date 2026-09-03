@@ -1941,11 +1941,13 @@ mod tests {
             .await
             .unwrap());
         // Другая активная запись с тем же именем — занято.
-        assert!(store
-            .create_capability(CapabilityKind::Skill, "taken", "x", 1, "alice")
-            .await
-            .unwrap()
-            > 0);
+        assert!(
+            store
+                .create_capability(CapabilityKind::Skill, "taken", "x", 1, "alice")
+                .await
+                .unwrap()
+                > 0
+        );
         assert!(store
             .capability_name_taken(CapabilityKind::Skill, "taken", skill)
             .await
