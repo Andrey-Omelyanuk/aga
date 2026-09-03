@@ -13,7 +13,8 @@ use axum::{
 use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::auth;
@@ -30,7 +31,9 @@ pub struct AppState {
     pub chat_store: ChatStore,
     pub reactive: ReactiveRunner,
     pub cluster: Cluster,
-    pub sso_verifier: Option<auth::JwtVerifier>,
+    /// Верификатор JWT против JWKS; обновляется фоновой задачей (Keycloak
+    /// пересоздаёт ключ подписи при переимпорте realm). None — SSO выключен.
+    pub sso_verifier: Arc<RwLock<Option<auth::JwtVerifier>>>,
     /// Origin веб-клиента (front/): CORS-источник и адрес возврата токена после SSO.
     pub front_url: String,
 }
@@ -38,7 +41,8 @@ pub struct AppState {
 /// Текущий пользователь: без SSO — аноним-суперпользователь; с SSO —
 /// участник из токена. Недействительный токен — 401.
 async fn current_user(state: &AppState, headers: &HeaderMap) -> Result<i64, StatusCode> {
-    auth::resolve_user(headers, &state.chat_store, state.sso_verifier.as_ref()).await
+    let verifier = state.sso_verifier.read().await;
+    auth::resolve_user(headers, &state.chat_store, verifier.as_ref()).await
 }
 
 /// Текущий пользователь с именем для истории изменений каталога: имя
@@ -1994,11 +1998,11 @@ mod tests {
             chat_store.clone(),
             cluster.clone(),
         );
-        let sso_verifier = if sso {
+        let sso_verifier = Arc::new(RwLock::new(if sso {
             Some(auth::JwtVerifier::from_jwks_json(auth::TEST_JWKS).unwrap())
         } else {
             None
-        };
+        }));
         let state = AppState {
             config,
             trace_store,

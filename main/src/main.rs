@@ -15,11 +15,42 @@ mod workstation;
 mod ws_ops;
 
 use std::env;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Скачать JWKS-документ по URL (тело — JSON).
 async fn fetch_jwks(url: &str) -> Result<String, reqwest::Error> {
     reqwest::get(url).await?.text().await
+}
+
+/// Как часто перечитывать JWKS (сек). Keycloak пересоздаёт ключ подписи при
+/// рестарте/переимпорте realm — ядро живёт дольше и без перечитывания
+/// отвергло бы все свежие токены (SSO-петля входа).
+const JWKS_REFRESH_SECS: u64 = 300;
+
+/// Фоновая задача: периодически тянет JWKS заново и подменяет верификатор.
+/// Сбой не фатален — оставляем прежний ключ и логируем.
+async fn refresh_jwks_loop(
+    url: String,
+    verifier: Arc<RwLock<Option<auth::JwtVerifier>>>,
+) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(JWKS_REFRESH_SECS));
+    // Первый тик срабатывает сразу — пропускаем, JWKS уже загружен при старте.
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        match fetch_jwks(&url).await {
+            Ok(jwks) => match auth::JwtVerifier::from_jwks_json(&jwks) {
+                Ok(fresh) => {
+                    *verifier.write().await = Some(fresh);
+                    tracing::info!("JWKS обновлён из {url}");
+                }
+                Err(e) => tracing::warn!("Не удалось разобрать обновлённый JWKS из {url}: {e}"),
+            },
+            Err(e) => tracing::warn!("Не удалось обновить JWKS из {url}: {e}"),
+        }
+    }
 }
 
 #[tokio::main]
@@ -60,8 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("ChatStore ok");
 
     // Верификатор JWT против JWKS. Включён только когда SSO включён и задан
-    // jwks_url; иначе запросы работают под аноним-суперпользователем.
-    let sso_verifier = match config.sso.as_ref().filter(|s| s.enabled) {
+    // jwks_url; иначе запросы работают под аноним-суперпользователем. Обёрнут
+    // в RwLock — фоновая задача refresh_jwks_loop периодически подменяет его
+    // свежим JWKS (Keycloak меняет ключ подписи при переимпорте realm).
+    let (sso_verifier, sso_jwks_url) = match config.sso.as_ref().filter(|s| s.enabled) {
         Some(sso) => match sso.jwks_url.as_deref() {
             Some(url) => {
                 // Keycloak (стенд и dev-стенд) стартует дольше ядра — тянем JWKS
@@ -92,18 +125,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     format!("SSO включён, но JWKS из {url} недоступен — запуск без SSO недопустим")
                         .into()
                 })?;
-                Some(
-                    auth::JwtVerifier::from_jwks_json(&jwks)
-                        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
-                )
+                let verifier = auth::JwtVerifier::from_jwks_json(&jwks)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                (Some(verifier), Some(url.to_string()))
             }
             None => {
                 tracing::warn!("SSO включён, но jwks_url не задан — работаем без SSO");
-                None
+                (None, None)
             }
         },
-        None => None,
+        None => (None, None),
     };
+    let sso_verifier = Arc::new(RwLock::new(sso_verifier));
+    if let Some(url) = sso_jwks_url {
+        tokio::spawn(refresh_jwks_loop(url, sso_verifier.clone()));
+    }
 
     // Origin веб-клиента (front/): CORS-источник и адрес возврата токена после SSO.
     let front_url =
