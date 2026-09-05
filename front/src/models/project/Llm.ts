@@ -1,9 +1,11 @@
-import { Model, model, field, id, NUMBER, STRING } from 'mobx-model-ui';
+import { Model, model, field, id, BOOLEAN, NUMBER, STRING } from 'mobx-model-ui';
 import { api } from '@/services/http-adapter';
 
-/** Подключение к LLM: название, url API и ключ доступа. Агент набора
- *  ссылается на подключение (llm_id); без подключения агент работает на
- *  дефолтной LLM из env. Ключ отдаётся как есть, маскировки нет. */
+/** Подключение к LLM: название, url API, ключ доступа и модель (model_name —
+ *  «model» зарезервировано базовым классом mobx-модели). Агент набора ссылается
+ *  на подключение (llm_id); одно подключение — дефолтное (is_default): к нему
+ *  ходят агенты без своего подключения. Ключ отдаётся как есть, без маскировки.
+ *  Дефолтной LLM из env нет. */
 @api('llms')
 @model
 export class Llm extends Model {
@@ -11,4 +13,6 @@ export class Llm extends Model {
   @field(STRING()) name!: string;
   @field(STRING()) api_url!: string;
   @field(STRING()) api_key?: string | null;
+  @field(STRING()) model_name!: string;
+  @field(BOOLEAN()) is_default!: boolean;
 }

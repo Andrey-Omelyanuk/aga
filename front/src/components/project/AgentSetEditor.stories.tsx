@@ -48,6 +48,8 @@ const connections: Llm[] = [
     name: 'ollama-local',
     api_url: 'http://llm:11434/v1',
     api_key: 'secret',
+    model_name: 'qwen3:0.6b',
+    is_default: true,
   },
 ] as Llm[];
 

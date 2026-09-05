@@ -197,7 +197,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                 }
                 title="Подключение к LLM"
               >
-                <option value="">— LLM из env —</option>
+                <option value="">— дефолтная LLM —</option>
                 {connections.map((c) => (
                   <option key={c.id} value={String(c.id)}>
                     {c.name}

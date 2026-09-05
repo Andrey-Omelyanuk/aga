@@ -12,8 +12,9 @@ const ConfigLlmPage = observer(() => {
       <div className="max-w-3xl">
         <h2 className="mb-1 text-lg font-semibold text-slate-800">Подключения к LLM</h2>
         <p className="mb-4 text-sm text-slate-500">
-          Название, url API и ключ доступа. Агент набора выбирает подключение; без
-          него агент работает на дефолтной LLM из env.
+          Название, url API, ключ доступа и модель. Агент набора выбирает
+          подключение; одно из подключений — дефолтная LLM, к ней ходят агенты
+          без своего подключения.
         </p>
         <LlmList connections={connections.items} onChanged={() => connections.shadowLoad()} />
       </div>
