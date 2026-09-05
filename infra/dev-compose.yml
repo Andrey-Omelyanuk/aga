@@ -107,6 +107,22 @@ services:
         - "${AGA_FRONT_PORT:-8081}:80"
       restart: "no"
 
+  # Centrifugo — реальное время для чата (websocket). Общий канал `common`
+  # доступен только аутентифицированным: веб-клиент берёт connection-JWT у ядра
+  # (/connection-jwt/, право на канал в токене), ядро публикует по HTTP API с
+  # api_key. Секреты должны совпадать с центрифуго-блоком dev-roles.yaml
+  # (генерируется из main/config/roles.yaml).
+  centrifugo:
+    image: centrifugo/centrifugo:v6
+    container_name: aga-centrifugo
+    environment:
+      - CENTRIFUGO_TOKEN_HMAC_SECRET_KEY=aga-hmac-secret
+      - CENTRIFUGO_API_KEY=aga-api-key
+      # SPA живёт на dev.localhost (прокси) — это и есть Origin websocket-соединения.
+      - CENTRIFUGO_ALLOWED_ORIGINS=http://dev.localhost
+      - CENTRIFUGO_LOG_LEVEL=info
+    restart: "no"
+
   # Прокси *.localhost как в k8s-стенде: dev.localhost → front (SPA),
   # api.localhost → core (API). Браузер сам резолвит *.localhost в
   # 127.0.0.1/::1 (RFC 6761), порт 80 — как в стенде. Конфиг: dev-proxy/nginx.conf.

@@ -18,6 +18,7 @@ use tokio::sync::{mpsc, RwLock};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::auth;
+use crate::centrifuge::CentrifugeClient;
 use crate::chat::{parse_command, Chat, ChatCommand, ChatStore, Message, SessionError};
 use crate::cluster::Cluster;
 use crate::config::Config;
@@ -31,6 +32,8 @@ pub struct AppState {
     pub chat_store: ChatStore,
     pub reactive: ReactiveRunner,
     pub cluster: Cluster,
+    /// Клиент Centrifugo (реальное время для чата). Не настроен — `disabled()`.
+    pub centrifuge: CentrifugeClient,
     /// Верификатор JWT против JWKS; обновляется фоновой задачей (Keycloak
     /// пересоздаёт ключ подписи при переимпорте realm). None — SSO выключен.
     pub sso_verifier: Arc<RwLock<Option<auth::JwtVerifier>>>,
@@ -195,6 +198,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/users", get(list_users))
         .route("/users/me", get(me))
         .route("/users/:id", get(get_user))
+        .route("/connection-jwt/", get(connection_jwt))
         .route("/chats", get(list_chats).post(create_chat))
         .route("/chats/:id", get(get_chat))
         .route("/chats/:id/close", post(close_chat))
@@ -1251,6 +1255,29 @@ async fn me(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+#[derive(Serialize)]
+struct ConnectionJwtResponse {
+    token: String,
+}
+
+/// Connection-JWT для веб-клиента Centrifuge. Только для аутентифицированных
+/// (current_user → 401 без токена); Centrifugo не настроен — 404, клиент
+/// деградирует молча.
+async fn connection_jwt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ConnectionJwtResponse>, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    if !state.centrifuge.is_configured() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let token = state
+        .centrifuge
+        .connection_jwt(user_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(ConnectionJwtResponse { token }))
+}
+
 #[derive(Deserialize)]
 pub struct CreateChatRequest {
     #[serde(default)]
@@ -1470,6 +1497,11 @@ async fn send_message(
             }
         }
 
+        state
+            .centrifuge
+            .publish(crate::centrifuge::message_payload(chat_id, message.id))
+            .await;
+
         Ok(Json(SendMessageResponse {
             message,
             created_chat,
@@ -1579,7 +1611,13 @@ async fn share_message(
         .share_message(payload.target_chat_id, id, user_id)
         .await
     {
-        Ok(Some(msg)) => Ok(Json(msg)),
+        Ok(Some(msg)) => {
+            state
+                .centrifuge
+                .publish(crate::centrifuge::message_payload(msg.chat_id, msg.id))
+                .await;
+            Ok(Json(msg))
+        }
         Ok(None) => Err(StatusCode::BAD_REQUEST),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -2138,7 +2176,10 @@ mod tests {
         let chat_store = crate::chat::ChatStore::new(path.to_str().unwrap())
             .await
             .unwrap();
-        let config = Config { sso: None };
+        let config = Config {
+            sso: None,
+            centrifuge: None,
+        };
         let llm_client = LlmClient::new();
         let cluster = Cluster {
             backend: crate::cluster::Backend::K8s,
@@ -2148,11 +2189,18 @@ mod tests {
             image: "img".into(),
             wait_timeout_secs: 1,
         };
+        let centrifuge = CentrifugeClient::from_config(&crate::config::CentrifugeConfig {
+            api_url: "http://centrifugo:8000".into(),
+            api_key: "key".into(),
+            secret: "secret".into(),
+            channel: "common".into(),
+        });
         let reactive = ReactiveRunner::new(
             llm_client.clone(),
             trace_store.clone(),
             chat_store.clone(),
             cluster.clone(),
+            centrifuge.clone(),
         );
         let sso_verifier = Arc::new(RwLock::new(if sso {
             Some(auth::JwtVerifier::from_jwks_json(auth::TEST_JWKS).unwrap())
@@ -2165,6 +2213,7 @@ mod tests {
             chat_store,
             reactive,
             cluster,
+            centrifuge,
             sso_verifier,
             front_url: "http://dev.localhost".into(),
         };
@@ -2426,6 +2475,48 @@ mod tests {
         // Без SSO списки работают — ручки не требуют токена.
         let (status, _) = get("/projects", &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn authenticated_user_gets_connection_jwt() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = get("/connection-jwt/", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let token = value["token"].as_str().unwrap();
+        // Токен подписан тем же HMAC-секретом, что знает Centrifugo.
+        let data = jsonwebtoken::decode::<serde_json::Value>(
+            token,
+            &jsonwebtoken::DecodingKey::from_secret(b"secret"),
+            &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
+        )
+        .unwrap();
+        // sub — id участника (chat_users.id), а не его SSO-субъект.
+        let user_id: i64 = data.claims["sub"].as_str().unwrap().parse().unwrap();
+        assert!(user_id > 0);
+        assert_eq!(data.claims["channels"][0], "common");
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn connection_jwt_requires_authentication() {
+        let (state, file) = test_state(true).await;
+        let headers = HeaderMap::new();
+        let (status, _) = get("/connection-jwt/", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn connection_jwt_missing_when_centrifuge_not_configured() {
+        let (mut state, file) = test_state(false).await;
+        // Центрифуго не настроен (клиент-заглушка) — токена нет.
+        state.centrifuge = CentrifugeClient::disabled();
+        let headers = HeaderMap::new();
+        let (status, _) = get("/connection-jwt/", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         cleanup(&file).await;
     }
 

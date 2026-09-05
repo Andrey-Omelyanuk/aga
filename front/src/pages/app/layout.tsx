@@ -9,6 +9,7 @@ import { Project } from '@/models/project';
 import { useObjectInput, useQueryCacheSync } from '@/utils/mobx';
 import useMobX_ORM from '@/utils/useMobX_ORM';
 import me from '@/services/me';
+import pub_sub from '@/services/pub-sub';
 import LoginPage from './login';
 
 const AppLayout = observer(() => {
@@ -17,6 +18,9 @@ const AppLayout = observer(() => {
   const [ready, setReady] = useState(false);
   useEffect(() => {
     void me.init().then(() => setReady(true));
+    // Реальное время: подключаемся к центрифуго после входа. Неудача
+    // деградирует молча (чат без автообновления, см. историю).
+    void pub_sub.init();
   }, []);
 
   const [projects] = useQueryCacheSync(Project, { autoupdate: true });

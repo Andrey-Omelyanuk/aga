@@ -1,5 +1,6 @@
 mod agent;
 mod auth;
+mod centrifuge;
 mod chat;
 mod cluster;
 mod config;
@@ -107,6 +108,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Загрузка конфигурации из {}", config_path);
     let config = config::Config::load(&config_path)?;
 
+    // Centrifugo (реальное время для чата). Не задан — клиент-заглушка: чат без
+    // автообновления, /connection-jwt/ отдаёт 404.
+    let centrifuge = match config.centrifuge.as_ref() {
+        Some(cfg) => {
+            tracing::info!(
+                "Centrifugo: api_url={} channel={}",
+                cfg.api_url,
+                cfg.channel
+            );
+            centrifuge::CentrifugeClient::from_config(cfg)
+        }
+        None => {
+            tracing::warn!("Centrifugo не настроен — чат без автообновления");
+            centrifuge::CentrifugeClient::disabled()
+        }
+    };
+
     tracing::info!("Инициализация базы данных: {}", db_path);
     let trace_store = trace::TraceStore::new(&db_path).await?;
     tracing::info!("TraceStore ok");
@@ -192,6 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trace_store.clone(),
         chat_store.clone(),
         cluster.clone(),
+        centrifuge.clone(),
     );
 
     // Создаём состояние приложения
@@ -201,6 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         chat_store,
         reactive,
         cluster,
+        centrifuge,
         sso_verifier,
         front_url,
     };

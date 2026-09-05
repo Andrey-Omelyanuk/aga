@@ -36,7 +36,9 @@ infra/k8s/
 │   ├── 40-service-core.yaml  # NodePort 30080 (API)
 │   ├── 50-deployment-keycloak.yaml
 │   ├── 60-service-keycloak.yaml  # NodePort 30081 (вход в браузере)
-│   ├── 70-ingress.yaml       # dev.localhost→front, api.localhost→core, auth.localhost→Keycloak
+│   ├── 52-deployment-centrifugo.yaml  # Centrifugo (реальное время для чата)
+│   ├── 54-service-centrifugo.yaml     # NodePort 30083
+│   ├── 70-ingress.yaml       # dev.localhost→front, api.localhost→core, auth.localhost→Keycloak, pub-sub.localhost→centrifugo
 │   └── keycloak-realm.json   # тестовый realm (участники alice/bob)
 ├── front/                    # стенд веб-клиента
 │   ├── deploy.sh
@@ -86,6 +88,11 @@ infra/k8s/
   (их дергает только ядро).
 - SPA и API разнесены: `dev.localhost` → сервис `aga-front` (nginx, порт 80),
   `api.localhost` → сервис `aga` (ядро, порт 8080). Ядро статику не раздаёт.
+- Centrifugo (`pub-sub.localhost`): общий канал `common` для аутентифицированных.
+  Секреты в `52-deployment-centrifugo.yaml` (`aga-api-key`/`aga-hmac-secret`)
+  должны совпадать с центрифуго-блоком roles.yaml ядра (дефолты
+  `config.example.yml`); при смене править оба места. Веб-клиент берёт
+  connection-JWT у ядра (`/connection-jwt/`), публикует ядро по HTTP API с api_key.
 - Воркстейшн-поды используют локально загруженные образы (`IfNotPresent` +
   тег `latest` + `minikube image load`), иначе kubelet тянет из реестра.
   `minikube image load` не обновляет уже существующий тег — после пересборки
