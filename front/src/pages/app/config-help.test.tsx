@@ -103,6 +103,26 @@ describe('ConfigHelpPage', () => {
     act(() => root.unmount());
   });
 
+  it('shows an ERP diagram of config entity relationships', async () => {
+    const { container, root } = await renderHelp();
+    const diagram = container.querySelector('[data-testid="er-diagram"]');
+    expect(diagram).not.toBeNull();
+    const text = diagram?.textContent ?? '';
+
+    // Набор содержит агентов; агент получает скиллы и команды по имени.
+    expect(text).toContain('содержит агентов');
+    expect(text).toContain('выдаётся по имени из каталога');
+    // Агент выбирает подключение к LLM; без выбора — дефолтная.
+    expect(text).toContain('выбор подключения; без выбора — дефолтная');
+    expect(text).toContain('дефолтная');
+    // Env и Users — отдельные разделы.
+    expect(text).toContain('участники из SSO');
+    expect(text).toContain('SSH-ключ');
+    expect(text).toContain('отдельные разделы');
+
+    act(() => root.unmount());
+  });
+
   it('shows Russian on the first open', async () => {
     const { container, root } = await renderHelp();
     const text = container.textContent ?? '';

@@ -1,4 +1,5 @@
 import { AgentSetDiagram, type HelpLang } from './AgentSetDiagram';
+import { ErDiagram } from './ErDiagram';
 
 // Статическая справка: текст одинаков при любой настройке платформы, к данным
 // не ходит. Поддерживать актуальность — вручную, при изменении состава конфига.
@@ -106,6 +107,7 @@ export const HelpContent = ({ lang }: { lang: HelpLang }) => {
             </li>
           ))}
         </ul>
+        <ErDiagram lang={lang} />
       </section>
     </div>
   );
