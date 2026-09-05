@@ -307,6 +307,8 @@ mod tests {
                 llm: LlmConfig {
                     model: None,
                     temperature: 0.7,
+                    api_url: None,
+                    api_key: None,
                 },
             },
             LlmClient::new("http://localhost:9", None, "test"),

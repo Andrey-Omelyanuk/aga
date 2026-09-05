@@ -31,10 +31,7 @@ const JWKS_REFRESH_SECS: u64 = 300;
 
 /// Фоновая задача: периодически тянет JWKS заново и подменяет верификатор.
 /// Сбой не фатален — оставляем прежний ключ и логируем.
-async fn refresh_jwks_loop(
-    url: String,
-    verifier: Arc<RwLock<Option<auth::JwtVerifier>>>,
-) {
+async fn refresh_jwks_loop(url: String, verifier: Arc<RwLock<Option<auth::JwtVerifier>>>) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(JWKS_REFRESH_SECS));
     // Первый тик срабатывает сразу — пропускаем, JWKS уже загружен при старте.
     ticker.tick().await;

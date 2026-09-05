@@ -48,6 +48,12 @@ pub struct LlmConfig {
     #[serde(default)]
     pub model: Option<String>,
     pub temperature: f32,
+    /// Адрес API выбранного подключения к LLM; отсутствует — дефолтный из env.
+    #[serde(default)]
+    pub api_url: Option<String>,
+    /// Ключ доступа выбранного подключения; отсутствует — ключ из env.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 impl Config {

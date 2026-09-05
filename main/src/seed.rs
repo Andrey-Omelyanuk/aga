@@ -82,7 +82,15 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    // --- Набор агентов: дерево backend → api.
+    // --- Набор агентов: дерево backend → api. LLM — подключение, созданное
+    // ниже: backend ходит к ollama-local, api — без подключения (env-дефолт).
+    let ollama = trace
+        .create_llm_connection(&crate::trace::LlmConnectionSpec {
+            name: "ollama-local".into(),
+            api_url: "http://localhost:11434/v1".into(),
+            api_key: None,
+        })
+        .await?;
     let set_id = trace
         .create_agent_set(
             "dev-team",
@@ -92,8 +100,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     description: "Бэкенд-разработчик: API, БД, интеграции.".into(),
                     tools: vec!["cat".into(), "ls".into(), "grep".into(), "find".into()],
                     max_iterations: 5,
-                    model: None,
-                    temperature: 0.7,
+                    llm_id: Some(ollama),
                     parent: None,
                     skills: vec![
                         AgentCapability {
@@ -112,8 +119,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     description: "Агент API-слоя: эндпоинты и контракты.".into(),
                     tools: vec!["cat".into(), "grep".into()],
                     max_iterations: 3,
-                    model: None,
-                    temperature: 0.7,
+                    llm_id: None,
                     parent: Some("backend".into()),
                     skills: Vec::new(),
                     commands: vec![AgentCapability {

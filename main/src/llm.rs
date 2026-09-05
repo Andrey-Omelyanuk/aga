@@ -87,14 +87,18 @@ impl LlmClient {
             max_tokens: Some(2048),
         };
 
+        // Адрес и ключ берутся из выбранного подключения, если оно задано;
+        // иначе — дефолтные из env (url/ключ ядра).
+        let api_url = config.api_url.as_deref().unwrap_or(&self.api_url);
+        let api_key = config.api_key.as_ref().or(self.api_key.as_ref());
         let mut req = self
             .client
-            .post(format!("{}/chat/completions", self.api_url))
+            .post(format!("{api_url}/chat/completions"))
             .json(&request)
             .header("Content-Type", "application/json");
 
-        if let Some(key) = &self.api_key {
-            req = req.header("Authorization", format!("Bearer {}", key));
+        if let Some(key) = api_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
         }
 
         let response = req.send().await?;
@@ -123,6 +127,8 @@ mod tests {
         LlmConfig {
             model: model.map(|m| m.to_string()),
             temperature: 0.7,
+            api_url: None,
+            api_key: None,
         }
     }
 
@@ -149,5 +155,72 @@ mod tests {
             client.resolve_model(&llm_config(Some("role-model"))),
             "role-model"
         );
+    }
+
+    /// Мок LLM-эндпоинта: записывает путь и Authorization, отвечает фиксированно.
+    type RecordedCalls = std::sync::Arc<tokio::sync::Mutex<Vec<(String, Option<String>)>>>;
+    async fn mock_llm_server() -> (String, tokio::task::JoinHandle<()>, RecordedCalls) {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let recorded: RecordedCalls = Arc::new(Mutex::new(Vec::new()));
+        let recorded2 = recorded.clone();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move |req: axum::extract::Request| {
+                let recorded = recorded2.clone();
+                async move {
+                    let auth = req
+                        .headers()
+                        .get("authorization")
+                        .and_then(|h| h.to_str().ok())
+                        .map(|s| s.to_string());
+                    let uri = req.uri().path().to_string();
+                    recorded.lock().await.push((uri, auth));
+                    axum::Json(serde_json::json!({
+                        "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+                    }))
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/v1"), handle, recorded)
+    }
+
+    #[tokio::test]
+    async fn chosen_connection_sends_its_url_and_key() {
+        let (api_url, server, recorded) = mock_llm_server().await;
+        let client = LlmClient::new(
+            "http://env-default/v1",
+            Some("env-key".to_string()),
+            "default-model",
+        );
+        let mut cfg = llm_config(None);
+        cfg.api_url = Some(api_url);
+        cfg.api_key = Some("conn-key".to_string());
+        let resp = client.chat(&cfg, "sys", "hello", &[]).await.unwrap();
+        assert_eq!(resp, "ok");
+        let rec = recorded.lock().await;
+        assert_eq!(rec.len(), 1);
+        // Запрос ушёл на url и с ключом выбранного подключения, не env-дефолта.
+        assert_eq!(rec[0].0, "/v1/chat/completions");
+        assert_eq!(rec[0].1.as_deref(), Some("Bearer conn-key"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_without_connection_uses_env_default_url_and_key() {
+        let (api_url, server, recorded) = mock_llm_server().await;
+        let client = LlmClient::new(&api_url, Some("env-key".to_string()), "default-model");
+        let cfg = llm_config(None);
+        let resp = client.chat(&cfg, "sys", "hello", &[]).await.unwrap();
+        assert_eq!(resp, "ok");
+        let rec = recorded.lock().await;
+        assert_eq!(rec.len(), 1);
+        assert_eq!(rec[0].1.as_deref(), Some("Bearer env-key"));
+        server.abort();
     }
 }
