@@ -1,6 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/tabs';
@@ -103,8 +103,18 @@ const ChatPage = observer(() => {
       </div>
 
       <div className="flex flex-1 flex-col bg-white">
-        <div className="border-b border-slate-200 px-5 py-3.5 font-semibold text-slate-800">
-          {currentChat ? currentChat.title || `Сессия #${currentChat.id}` : 'Выберите сессию'}
+        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
+          <div className="font-semibold text-slate-800">
+            {currentChat ? currentChat.title || `Сессия #${currentChat.id}` : 'Выберите сессию'}
+          </div>
+          {currentChat && currentChat.workstation_id ? (
+            <Link
+              to={`/workstations/${currentChat.workstation_id}/changes`}
+              className="text-xs text-blue-600 hover:underline"
+            >
+              Изменения
+            </Link>
+          ) : null}
         </div>
         <div className="flex-1 overflow-y-auto p-5">
           {!currentChat ? (
