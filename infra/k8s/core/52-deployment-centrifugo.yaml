@@ -1,0 +1,45 @@
+# Centrifugo — реальное время для чата (websocket). Общий канал `common` доступен
+# только аутентифицированным: веб-клиент берёт connection-JWT у ядра
+# (/connection-jwt/, право на канал в токене), ядро публикует по HTTP API с api_key.
+#
+# Секреты должны совпадать с центрифуго-блоком roles.yaml ядра (из
+# main/config/roles.yaml): api_key и secret здесь и там одни (дефолты
+# config.example.yml — aga-api-key / aga-hmac-secret; при смене править оба места).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: centrifugo
+  namespace: aga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: centrifugo
+  template:
+    metadata:
+      labels:
+        app: centrifugo
+    spec:
+      containers:
+        - name: centrifugo
+          image: centrifugo/centrifugo:v6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CENTRIFUGO_TOKEN_HMAC_SECRET_KEY
+              value: aga-hmac-secret
+            - name: CENTRIFUGO_API_KEY
+              value: aga-api-key
+            # SPA живёт на dev.localhost (ingress) — это Origin websocket-соединения.
+            - name: CENTRIFUGO_ALLOWED_ORIGINS
+              value: http://dev.localhost
+            - name: CENTRIFUGO_LOG_LEVEL
+              value: info
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5

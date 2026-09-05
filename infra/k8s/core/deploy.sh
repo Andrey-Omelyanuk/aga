@@ -47,6 +47,17 @@ $KUBECTL create configmap aga-env -n "$NS" \
 # roles.yaml ядра: роли из main/config/roles.yaml, sso-блок — стендовый (включён,
 # указывает на Keycloak в кластере). authorize_url — внешний для браузера.
 awk '/^sso:/{exit} {print}' "$ROLES_SRC" > "$WORK/roles.yaml"
+# Центрифуго-блок: из свежего roles.yaml (make init) он уже есть до sso;
+# в старом — подставляем дефолты, совпадающие с 52-deployment-centrifugo.yaml.
+if ! grep -q '^centrifuge:' "$WORK/roles.yaml"; then
+cat >> "$WORK/roles.yaml" <<EOF
+centrifuge:
+  api_url: http://centrifugo:8000
+  api_key: aga-api-key
+  secret: aga-hmac-secret
+  channel: common
+EOF
+fi
 cat >> "$WORK/roles.yaml" <<EOF
 sso:
   enabled: true

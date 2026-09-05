@@ -1,0 +1,16 @@
+# Сервис Centrifugo: ClusterIP для ingress (pub-sub.localhost) + NodePort для
+# прямого доступа, если ingress не поднят (аналогично core/keycloak).
+apiVersion: v1
+kind: Service
+metadata:
+  name: centrifugo
+  namespace: aga
+spec:
+  type: NodePort
+  selector:
+    app: centrifugo
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      nodePort: 30083

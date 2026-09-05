@@ -118,6 +118,9 @@ DEV_COMPOSE_CMD = docker compose --env-file .env -f $(DEV_COMPOSE)
 dev-roles:
 	@if [ ! -f main/config/roles.yaml ]; then echo "roles config not found: main/config/roles.yaml (run 'make init')" >&2; exit 1; fi
 	@awk '/^sso:/{exit} {print}' main/config/roles.yaml > infra/dev-roles.yaml
+	@# Центрифуго-блок: из свежего roles.yaml (make init) он уже есть до sso;
+	@# в старом — подставляем дефолты, совпадающие с сервисом centrifugo compose.
+	@grep -q '^centrifuge:' infra/dev-roles.yaml || printf 'centrifuge:\n  api_url: http://centrifugo:8000\n  api_key: aga-api-key\n  secret: aga-hmac-secret\n  channel: common\n' >> infra/dev-roles.yaml
 	@printf 'sso:\n  enabled: true\n  jwks_url: http://keycloak:8080/realms/aga/protocol/openid-connect/certs\n  authorize_url: http://auth.localhost/realms/aga/protocol/openid-connect/auth\n  token_url: http://keycloak:8080/realms/aga/protocol/openid-connect/token\n  end_session_url: http://auth.localhost/realms/aga/protocol/openid-connect/logout\n  client_id: aga\n  client_secret: aga-secret\n' >> infra/dev-roles.yaml
 	@echo "dev-roles.yaml written (SSO enabled -> dev Keycloak)"
 
