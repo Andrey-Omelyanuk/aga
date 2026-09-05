@@ -62,6 +62,17 @@ done
 [ -n "$WS_ID" ]
 echo "workstation id=$WS_ID"
 
+echo "==> wait for the workstation container ready (entrypoint: user aga owns /work)"
+WS_READY=""
+for _ in $(seq 1 120); do
+  if [ "$(docker exec ws-$WS_ID sh -c 'stat -c %u /work' 2>/dev/null || true)" = "1000" ]; then
+    WS_READY=1
+    break
+  fi
+  sleep 2
+done
+[ -n "$WS_READY" ]
+
 echo "==> close its session as the owner (alice) frees the workstation"
 SESSION_ID=$(curl -sf -H "Authorization: Bearer $ALICE" "$CORE/workstations/$WS_ID/session" | jq -r '.id')
 [ -n "$SESSION_ID" ]
@@ -71,8 +82,8 @@ echo "session $SESSION_ID closed, workstation free"
 
 echo "==> release the workstation (bob, superuser)"
 curl -sf -X POST -H "Authorization: Bearer $BOB" "$CORE/workstations/$WS_ID/release" >/dev/null
-[ "$(curl -sf -H "Authorization: Bearer $ALICE" "$CORE/workstations/$WS_ID" \
-  | jq -r '.project_id')" = "0" ]
+[ "$(curl -sf -H "Authorization: Bearer $ALICE" "$CORE/workstations" \
+  | jq -r --argjson id "$WS_ID" '.[] | select(.id == $id) | .project_id')" = "0" ]
 
 echo "==> switch released workstation to mobx-model-ui (bob, superuser)"
 curl -sf -X POST -H "Authorization: Bearer $BOB" -H 'content-type: application/json' \
