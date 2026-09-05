@@ -109,4 +109,37 @@ describe('ChatPage', () => {
     expect(source).not.toMatch(/setInterval/);
     expect(source).not.toMatch(/POLL_INTERVAL_MS/);
   });
+
+  it('на странице сессии есть ссылка на страницу Changes её воркстейшна', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue({
+      id: 42,
+      title: 'Тест',
+      state: 'OPEN',
+      workstation_id: 7,
+      participants: [],
+      messages: [],
+    } as any);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const link = container.querySelector('a[href="/workstations/7/changes"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toContain('Изменения');
+    act(() => root.unmount());
+  });
+
+  it('у чата без воркстейшна (не сессии) ссылки на Changes нет', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue({
+      id: 43,
+      title: 'Общий чат',
+      state: 'OPEN',
+      workstation_id: null,
+      participants: [],
+      messages: [],
+    } as any);
+    const { container, root } = await renderChat('43');
+    await act(async () => {});
+    expect(container.querySelector('a[href*="/changes"]')).toBeNull();
+    expect(container.textContent).not.toContain('Изменения');
+    act(() => root.unmount());
+  });
 });
