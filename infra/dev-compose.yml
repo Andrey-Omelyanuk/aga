@@ -43,9 +43,11 @@ services:
       - AGA_WS_BACKEND=docker
       # Образ воркстейшна: тот же, что собирает compose (server ниже).
       - AGA_K8S_IMAGE=aga-workstation:dev
-      - LLM_API_URL=${LLM_API_URL:-http://host.docker.internal:11434/v1}
-      - LLM_API_KEY=${LLM_API_KEY:-}
-      - LLM_MODEL=${LLM_MODEL:-qwen3.5:9b}
+      # Маленькая LLM (ollama) этого compose: при первом старте ядро создаёт
+      # подключение к ней и ставит дефолтным (bootstrap, см. main.rs). Дефолтной
+      # LLM из env больше нет — LLM_API_URL/LLM_API_KEY/LLM_MODEL не используются.
+      - AGA_LLM_BOOTSTRAP_URL=http://ollama:11434/v1
+      - AGA_LLM_BOOTSTRAP_MODEL=qwen3:0.6b
       # SSH-ключ aga (git+ssh для воркстейшнов): приватный задаёт админ в .env;
       # ядро прокидывает его в контейнеры ws (inject_ssh_key) при подъёме.
       - AGA_SSH_PRIVATE_KEY=${AGA_SSH_PRIVATE_KEY:-}
@@ -54,6 +56,20 @@ services:
       # а не из .env: там AGA_FRONT_URL=http://localhost:8081 (для make run),
       # что ломает возврат токена в SSO-флоу dev-стенда.
       - AGA_FRONT_URL=http://dev.localhost
+    restart: "no"
+
+  # Маленькая LLM для dev — только проверить, что цикл запускается, интеллект
+  # не важен (модель до 1B). Модель тянется при старте, чтобы агенты работали
+  # из коробки после make dev-up. Подключение к ней ядро создаёт само (bootstrap).
+  ollama:
+    image: ollama/ollama:latest
+    container_name: aga-ollama
+    # Entrypoint образа — ollama, поэтому явно задаём shell: поднимаем сервер и
+    # тянем маленькую модель (после первого раза pull — no-op, volume хранит).
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama serve & sleep 3 && ollama pull qwen3:0.6b && wait"]
+    volumes:
+      - ollama-data:/root/.ollama
     restart: "no"
 
   # Keycloak — SSO dev-стенда (тот же realm, что в k8s: aga, участники
@@ -137,3 +153,4 @@ volumes:
   aga-data:
   ws-1-data:
   ws-2-data:
+  ollama-data:
