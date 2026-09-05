@@ -4,7 +4,6 @@
   "sslRequired": "none",
   "registrationAllowed": false,
   "accessTokenLifespan": 3600,
-  "refreshTokenLifespan": 604800,
   "ssoSessionIdleTimeout": 604800,
   "ssoSessionMaxLifespan": 604800,
   "clientSessionIdleTimeout": 604800,
