@@ -28,6 +28,10 @@ if ls /etc/secrets/*/id_ed25519 >/dev/null 2>&1; then
   printf 'IdentitiesOnly yes\nStrictHostKeyChecking accept-new\n' > ~/.ssh/config
 fi
 mkdir -p /work
+# /work — рабочее дерево агента. В dev-режиме команды агента идут от uid 1000
+# (docker exec -u 1000:1000): ему нужно создавать рядом с проектом временные
+# каталоги клона (/work/project.new.<pid>) — /work должен принадлежать ему.
+chown 1000:1000 /work
 cd /work
 if [ -n "$GIT_URL" ]; then
   if [ ! -d project ]; then
