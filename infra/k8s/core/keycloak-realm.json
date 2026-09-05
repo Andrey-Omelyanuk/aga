@@ -3,11 +3,12 @@
   "enabled": true,
   "sslRequired": "none",
   "registrationAllowed": false,
-  "accessTokenLifespan": 300,
-  "ssoSessionIdleTimeout": 86400,
-  "ssoSessionMaxLifespan": 86400,
-  "clientSessionIdleTimeout": 86400,
-  "clientSessionMaxLifespan": 86400,
+  "accessTokenLifespan": 3600,
+  "refreshTokenLifespan": 604800,
+  "ssoSessionIdleTimeout": 604800,
+  "ssoSessionMaxLifespan": 604800,
+  "clientSessionIdleTimeout": 604800,
+  "clientSessionMaxLifespan": 604800,
   "roles": {
     "realm": [
       { "name": "participant" },
