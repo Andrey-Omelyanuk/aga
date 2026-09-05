@@ -25,7 +25,7 @@ CARGO_IN_MAIN = cd main && $(CARGO)
         front-test storybook storybook-build \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
-dev-up dev-down dev-logs dev-ps dev-reset dev-verify \
+ dev-up dev-down dev-logs dev-ps dev-reset dev-verify dev-e2e \
         dev-roles dev-seed k8s-seed
 
 help:
@@ -47,6 +47,7 @@ help:
 	@echo "dev-ps      - Show dev stand containers"
 	@echo "dev-reset   - Recreate dev stand from scratch (fresh DB)"
 	@echo "dev-verify  - Check dev stand: core API + both workstations ready"
+	@echo "dev-e2e     - E2E on dev stand: free ws, switch to mobx-model-ui, agent answers"
 	@echo "dev-seed    - Restore test dataset into dev stand DB (aga seed in core)"
 	@echo "k8s-seed    - Restore test dataset into cluster DB (aga seed via kubectl exec)"
 	@echo "k8s-up      - Start local cluster (minikube)"
@@ -166,6 +167,16 @@ dev-verify: dev-roles
 dev-seed:
 	$(DEV_COMPOSE_CMD) up -d --build
 	docker exec aga-core /app/aga seed
+
+# E2E всего рабочего цикла агента на dev-стенде (см. infra/dev-e2e.sh):
+# свободный воркстейшн, switch на mobx-model-ui, сессия, @Agent.ui отвечает.
+# --force-recreate core ws-1 ws-2 подхватывает свежие образы ядра и
+# воркстейшнов (пользователь aga, права /work, ключ в /home/aga/.ssh), сид
+# сбрасывает БД в детерминированное состояние.
+dev-e2e: dev-roles
+	$(DEV_COMPOSE_CMD) up -d --build --force-recreate core ws-1 ws-2
+	docker exec aga-core /app/aga seed
+	bash infra/dev-e2e.sh
 
 # Восстановить тестовый набор в БД кластера (PVC). Образ ядра должен быть
 # передеплоен с поддержкой seed (make k8s-build && make k8s-load && make k8s-deploy).
