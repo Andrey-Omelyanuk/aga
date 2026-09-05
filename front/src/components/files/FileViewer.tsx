@@ -1,7 +1,7 @@
 import { observer } from 'mobx-react-lite';
-import { fileBrowser } from '@/models/files';
+import { fileBrowser, langFor } from '@/models/files';
 import { EmptyState } from '@/components/ui/tabs';
-import { escapeHtml } from '@/utils/html';
+import { highlightText } from '@/utils/highlight';
 
 export const FileViewer = observer(() => {
   if (!fileBrowser.currentPath) {
@@ -29,8 +29,13 @@ export const FileViewer = observer(() => {
             <audio controls src={content.objectUrl} />
           )
         ) : content.text !== undefined ? (
-          <pre className="m-0 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3.5">
-            <code dangerouslySetInnerHTML={{ __html: escapeHtml(content.text) }} />
+          <pre className="m-0 overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3.5">
+            <code
+              className="hljs"
+              dangerouslySetInnerHTML={{
+                __html: highlightText(content.text, langFor(fileBrowser.currentPath)),
+              }}
+            />
           </pre>
         ) : (
           <EmptyState>Не удалось прочитать файл</EmptyState>
