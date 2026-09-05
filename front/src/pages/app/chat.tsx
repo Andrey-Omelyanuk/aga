@@ -9,8 +9,7 @@ import { MessageList } from '@/components/chat/MessageList';
 import { Chat, loadChatDetail } from '@/models/chat';
 import { AgentSet } from '@/models/project';
 import { useQuery } from '@/utils/mobx';
-
-const POLL_INTERVAL_MS = 2000;
+import pub_sub from '@/services/pub-sub';
 
 const ChatPage = observer(() => {
   const { id } = useParams();
@@ -33,8 +32,9 @@ const ChatPage = observer(() => {
     }
   }
 
-  // Текущий чат: GET /chats/:id + опрос (pub-sub на бэкенде пока нет —
-  // реактивные ответы агентов приходят асинхронно, перезагружаем по таймеру).
+  // Текущий чат: GET /chats/:id. Обновления — по websocket (centrifuge,
+  // общий канал common): на событие нового сообщения перезагружаем деталь
+  // открытого чата и список чатов. Опроса по таймеру больше нет.
   useEffect(() => {
     if (chatId === null) {
       setCurrentChat(null);
@@ -48,10 +48,13 @@ const ChatPage = observer(() => {
         })
         .catch(() => {});
     void load();
-    const timer = setInterval(() => void load(), POLL_INTERVAL_MS);
+    const unsubscribe = pub_sub.on_message((data: any) => {
+      if (data?.chat_id === chatId) void load();
+      void chats.load();
+    });
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      unsubscribe();
     };
   }, [chatId]);
 
