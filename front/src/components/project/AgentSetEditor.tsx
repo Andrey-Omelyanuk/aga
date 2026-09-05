@@ -7,13 +7,15 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
-import type { Agent, AgentCapability, CatalogItem } from '@/models/project';
+import type { Agent, AgentCapability, CatalogItem, Llm } from '@/models/project';
 export interface AgentSetEditorProps {
   setId: number;
   name: string;
   agents: Agent[];
   skills: CatalogItem[];
   commands: CatalogItem[];
+  /** Подключения к LLM: у агента набора выбирается одно из них. */
+  connections: Llm[];
   onSaved: () => void;
 }
 
@@ -22,7 +24,7 @@ const emptyAgent = (name: string): Agent => ({
   description: '',
   tools: [],
   max_iterations: 3,
-  temperature: 0.7,
+  llm_id: null,
   parent_id: null,
   parent: null,
   skills: [],
@@ -31,9 +33,10 @@ const emptyAgent = (name: string): Agent => ({
 });
 
 /** Редактор состава набора: агенты, их территория (по дереву), данные скиллы
- * и команды по имени (без версии), инструменты. Сохраняется целиком (PATCH). */
+ * и команды по имени (без версии), инструменты, выбранное подключение к LLM.
+ * Сохраняется целиком (PATCH). */
 export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
-  const { setId, skills, commands, onSaved } = props;
+  const { setId, skills, commands, connections, onSaved } = props;
   const [name, setName] = useState(props.name);
   const [agents, setAgents] = useState<Agent[]>(() =>
     props.agents.map((a) => ({
@@ -105,8 +108,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
         description: a.description,
         tools: a.tools,
         max_iterations: a.max_iterations,
-        model: a.model ?? null,
-        temperature: a.temperature,
+        llm_id: a.llm_id ?? null,
         parent: a.parent ?? null,
         skills: a.skills,
         commands: a.commands,
@@ -184,6 +186,21 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                 {parentOptions.map((n) => (
                   <option key={n} value={n}>
                     {n}
+                  </option>
+                ))}
+              </Select>
+              <Select
+                className="max-w-52"
+                value={agent.llm_id != null ? String(agent.llm_id) : ''}
+                onChange={(e) =>
+                  patchAgent(i, { llm_id: e.target.value ? Number(e.target.value) : null })
+                }
+                title="Подключение к LLM"
+              >
+                <option value="">— LLM из env —</option>
+                {connections.map((c) => (
+                  <option key={c.id} value={String(c.id)}>
+                    {c.name}
                   </option>
                 ))}
               </Select>

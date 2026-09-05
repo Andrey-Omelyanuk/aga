@@ -2,11 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { AgentSetEditor } from './AgentSetEditor';
-import type { Agent, CatalogItem } from '@/models/project';
+import type { Agent, CatalogItem, Llm } from '@/models/project';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-function renderEditor(agents: Agent[], skills: CatalogItem[], commands: CatalogItem[]) {
+function renderEditor(
+  agents: Agent[],
+  skills: CatalogItem[],
+  commands: CatalogItem[],
+  connections: Llm[] = [],
+) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root: Root = createRoot(container);
@@ -18,6 +23,7 @@ function renderEditor(agents: Agent[], skills: CatalogItem[], commands: CatalogI
         agents={agents}
         skills={skills}
         commands={commands}
+        connections={connections}
         onSaved={() => {}}
       />,
     );
@@ -33,7 +39,7 @@ describe('AgentSetEditor', () => {
       description: 'Правила бэкенда',
       tools: ['git', 'make'],
       max_iterations: 3,
-      temperature: 0.7,
+      llm_id: null,
       parent_id: null,
       skills: [{ name: 'review' }],
       commands: [{ name: 'deploy' }],
@@ -66,6 +72,39 @@ describe('AgentSetEditor', () => {
     expect(text).toContain('deploy');
     // Фиксации версий в составе набора больше нет.
     expect(text).not.toContain('версия');
+
+    act(() => root.unmount());
+  });
+
+  it('agent picks a connection to LLM; own model and temperature are gone', () => {
+    const agent: Agent = {
+      id: 10,
+      name: 'src/backend',
+      description: 'Правила бэкенда',
+      tools: ['git'],
+      max_iterations: 3,
+      llm_id: 7,
+      parent_id: null,
+      skills: [],
+      commands: [],
+      territory: { folder: 'src/backend', excludes: [] },
+    };
+    const connections: Llm[] = [
+      {
+        id: 7,
+        name: 'ollama-local',
+        api_url: 'http://llm:11434/v1',
+        api_key: 'secret',
+      },
+    ] as Llm[];
+
+    const { container, root } = renderEditor([agent], [], [], connections);
+    const text = container.textContent ?? '';
+    // В редакторе видно подключение к LLM — выбранное и из списка созданных.
+    expect(text).toContain('ollama-local');
+    // Своей модели и температуры у агента в редакторе нет.
+    expect(text).not.toContain('temperature');
+    expect(text).not.toContain('модел');
 
     act(() => root.unmount());
   });
