@@ -163,8 +163,10 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    // --- Набор для UI-библиотеки (mobx-model-ui): корень ui + слой model.
-    // Оба агента без своего подключения — ходят к дефолтной LLM (ollama-local).
+    // --- Набор для UI-библиотеки (mobx-model-ui): корень ui + слой src/model.
+    // Корень дерева набора — корень проекта (территория ""), наследники —
+    // папки репозитория по своему имени. Оба агента без своего подключения —
+    // ходят к дефолтной LLM (ollama-local).
     let ui_set_id = trace
         .create_agent_set(
             "ui-kit",
@@ -189,7 +191,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     }],
                 },
                 AgentSpec {
-                    name: "model".into(),
+                    name: "src/model".into(),
                     description: "Слой данных библиотеки: стори, сериализация.".into(),
                     tools: vec!["cat".into(), "grep".into()],
                     max_iterations: 3,

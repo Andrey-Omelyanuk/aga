@@ -2197,7 +2197,9 @@ mod tests {
             set.agents.iter().map(|a| (a.name.as_str(), a)).collect();
         // Территория агента — папка его узла в дереве набора: у папки свой
         // агент, подпапки — его наследники, их папки в его территорию не входят.
-        assert_eq!(by_name["src"].territory.folder, "src");
+        // Корень дерева — корень проекта (папка ""): у него нет папки-родителя,
+        // его территория — весь проект кроме папок наследников.
+        assert_eq!(by_name["src"].territory.folder, "");
         assert_eq!(
             by_name["src"].territory.excludes,
             vec!["src/backend".to_string()]

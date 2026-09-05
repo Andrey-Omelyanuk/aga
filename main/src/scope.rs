@@ -118,7 +118,15 @@ pub fn territory_for(set: &AgentSet, agent: &AgentDef) -> Territory {
 
 /// То же по списку агентов набора (без заимствования всего набора).
 pub fn territory_for_list(agents: &[AgentDef], agent: &AgentDef) -> Territory {
-    let folder = agent.name.clone();
+    // Корень дерева набора — корень проекта (папка ""), а не имя агента:
+    // дерево повторяет иерархию папок проекта, а у корня папки-родителя нет.
+    // Имя корня — метка слоя проекта (например, `ui` библиотеки), папкой в
+    // репозитории оно не является; у наследников папка — их имя.
+    let folder = if agent.parent_id.is_none() {
+        String::new()
+    } else {
+        agent.name.clone()
+    };
     // Территория заканчивается перед папками наследников — только ближайших
     // (у подпапок — свои наследники, их папка уже покрыта папкой ребёнка).
     let excludes: Vec<String> = agents

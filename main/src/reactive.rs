@@ -372,20 +372,36 @@ mod tests {
         let set_id = store
             .create_agent_set(
                 "ops",
-                &[AgentSpec {
-                    name: "src/backend".to_string(),
-                    description: "Бэкенд".to_string(),
-                    tools: vec!["git".to_string(), "make".to_string()],
-                    max_iterations: 3,
-                    llm_id: None,
-                    parent: None,
-                    skills: vec![AgentCapability {
-                        name: "review".to_string(),
-                    }],
-                    commands: vec![AgentCapability {
-                        name: "deploy".to_string(),
-                    }],
-                }],
+                &[
+                    AgentSpec {
+                        name: "src".to_string(),
+                        description: "Корень проекта".to_string(),
+                        tools: vec!["git".to_string(), "make".to_string()],
+                        max_iterations: 3,
+                        llm_id: None,
+                        parent: None,
+                        skills: vec![AgentCapability {
+                            name: "review".to_string(),
+                        }],
+                        commands: vec![AgentCapability {
+                            name: "deploy".to_string(),
+                        }],
+                    },
+                    AgentSpec {
+                        name: "src/backend".to_string(),
+                        description: "Бэкенд".to_string(),
+                        tools: vec!["git".to_string(), "make".to_string()],
+                        max_iterations: 3,
+                        llm_id: None,
+                        parent: Some("src".to_string()),
+                        skills: vec![AgentCapability {
+                            name: "review".to_string(),
+                        }],
+                        commands: vec![AgentCapability {
+                            name: "deploy".to_string(),
+                        }],
+                    },
+                ],
             )
             .await
             .unwrap();
