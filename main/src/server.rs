@@ -231,6 +231,7 @@ pub fn create_router(state: AppState) -> Router {
         // === Просмотр содержимого проекта в воркстейшне ===
         .route("/workstations/:id/tree", get(workstation_tree))
         .route("/workstations/:id/file", get(workstation_file))
+        .route("/workstations/:id/changes", get(workstation_changes))
         // === Настройки: публичный SSH-ключ aga ===
         .route("/settings/ssh-key", get(get_ssh_key))
         .layer(cors)
@@ -1993,6 +1994,31 @@ fn map_file_error(e: crate::project_files::FileError) -> StatusCode {
     }
 }
 
+/// Изменения проекта воркстейшна от начала ветки (страница Changes). Дифф
+/// берётся из git внутри воркстейшна; доступен любому вошедшему участнику,
+/// как и просмотр содержимого. Только чтение: коммиты и push не выполняются.
+async fn workstation_changes(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::git_changes::ChangesSummary>, StatusCode> {
+    current_user(&state, &headers).await?;
+    if state
+        .chat_store
+        .get_workstation(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .is_none()
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
+    let summary = crate::git_changes::changes(&executor, crate::project_files::PROJECT_ROOT)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(summary))
+}
+
 /// Публичный SSH-ключ aga (общий на инстанс) для страницы «Настройки».
 /// Приватный ключ задаёт админ в env `AGA_SSH_PRIVATE_KEY`; здесь отдаётся
 /// только публичный (не секрет) — для добавления в deploy-ключи репозитория.
@@ -3652,6 +3678,59 @@ mod tests {
             &headers,
             state.clone(),
             serde_json::json!({"path": "README.md", "content": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn workstation_changes_requires_authentication() {
+        let (state, file) = test_state(true).await;
+        let (status, _) = get("/workstations/1/changes", &HeaderMap::new(), state.clone()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn missing_workstation_changes_returns_not_found() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, _) = get("/workstations/99/changes", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn participant_browses_any_workstation_changes() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        state
+            .chat_store
+            .create_workstation(1, "ws-1", None)
+            .await
+            .unwrap();
+        // Видимость как у содержимого проекта: участник проходит проверку
+        // доступа к Changes любого воркстейшна. Исполнение git в тестовом
+        // окружении может упасть (нет kubectl/docker) — проверяем, что это
+        // не 401/403: видимость пройдена.
+        let (status, _) = get("/workstations/1/changes", &headers, state.clone()).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        assert_ne!(status, StatusCode::FORBIDDEN);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn no_write_route_for_changes() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        // Changes только показывает изменения: коммитить и пушить нельзя — на
+        // ручке нет write-методов.
+        let (status, _) = post_json(
+            "/workstations/1/changes",
+            &headers,
+            state.clone(),
+            serde_json::json!({"message": "push"}),
         )
         .await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);

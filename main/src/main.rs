@@ -4,6 +4,7 @@ mod centrifuge;
 mod chat;
 mod cluster;
 mod config;
+mod git_changes;
 mod llm;
 mod project_files;
 mod reactive;
