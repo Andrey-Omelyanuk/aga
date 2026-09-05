@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     #[serde(default)]
     pub sso: Option<SsoConfig>,
+    /// Centrifugo: реальное время (websocket) для чата. Не задан — чат без
+    /// автообновления (клиент деградирует молча, /connection-jwt/ — 404).
+    #[serde(default)]
+    pub centrifuge: Option<CentrifugeConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -31,6 +35,26 @@ pub struct SsoConfig {
     /// Секрет клиента aga в Keycloak.
     #[serde(default)]
     pub client_secret: Option<String>,
+}
+
+/// Centrifugo-сервер (реальное время для чата). Подключение ядра к его
+/// HTTP API для публикации; общий канал для всех аутентифицированных.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CentrifugeConfig {
+    /// Адрес HTTP API Centrifugo (например `http://centrifugo:8000`).
+    pub api_url: String,
+    /// Ключ API Centrifugo (`CENTRIFUGO_API_KEY`) — для публикации сообщений.
+    pub api_key: String,
+    /// HMAC-секрет Centrifugo (`CENTRIFUGO_TOKEN_HMAC_SECRET_KEY`) — для
+    /// подписи connection-JWT, который выдаёт ядро аутентифицированным.
+    pub secret: String,
+    /// Единственный общий канал обновлений чата.
+    #[serde(default = "default_channel")]
+    pub channel: String,
+}
+
+fn default_channel() -> String {
+    "common".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

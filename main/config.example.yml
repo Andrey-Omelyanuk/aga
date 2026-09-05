@@ -2,6 +2,18 @@
 # Копируется в config/roles.yaml через `make init`.
 # Агентов больше не задают глобальные роли — их определяет AgentSet проекта
 # (см. /agent-sets), который живёт в БД и настраивается через API.
+#
+# Блоки до `sso:` (здесь — centrifuge) попадают в dev-roles.yaml и стендовый
+# roles.yaml (awk останавливается на `sso:`); sso-блок в стенде заменяется.
+
+# Centrifugo (опционально). Реальное время для чата: общий канал для всех
+# аутентифицированных. Не задан — чат без автообновления (/connection-jwt/ — 404).
+# api_key и secret должны совпадать с конфигом сервиса centrifugo (dev/k8s).
+centrifuge:
+  api_url: http://centrifugo:8000
+  api_key: aga-api-key
+  secret: aga-hmac-secret
+  channel: common
 
 # SSO (опционально). Выключен — все запросы под аноним-суперпользователем.
 # Включён — API принимает Bearer-токены Keycloak: подпись проверяется по

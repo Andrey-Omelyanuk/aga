@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agent::Agent;
+use crate::centrifuge::CentrifugeClient;
 use crate::chat::ChatStore;
 use crate::cluster::Cluster;
 use crate::config::RoleConfig;
@@ -20,6 +21,7 @@ pub struct ReactiveRunner {
     trace_store: TraceStore,
     chat_store: ChatStore,
     cluster: Cluster,
+    centrifuge: CentrifugeClient,
     locks: Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>,
 }
 
@@ -51,12 +53,14 @@ impl ReactiveRunner {
         trace_store: TraceStore,
         chat_store: ChatStore,
         cluster: Cluster,
+        centrifuge: CentrifugeClient,
     ) -> Self {
         Self {
             llm_client,
             trace_store,
             chat_store,
             cluster,
+            centrifuge,
             locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -176,6 +180,9 @@ impl ReactiveRunner {
             let _ = self
                 .chat_store
                 .add_artifact(msg.id, "result", Some("Ответ агента"), &result)
+                .await;
+            self.centrifuge
+                .publish(crate::centrifuge::message_payload(msg.chat_id, msg.id))
                 .await;
         }
     }
