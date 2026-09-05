@@ -31,8 +31,11 @@
   git-репо в отдельных named volumes `ws-1-data`/`ws-2-data` — на хосте файлов
   воркстейшнов нет) + маленькая LLM (`ollama`, модель до 1B `qwen3:0.6b` —
   тянется при старте; подключение к ней ядро создаёт само и ставит дефолтным,
-  см. bootstrap в main.rs). Прокси маршрутизирует как ingress в k8s:
-  `dev.localhost` → front, `api.localhost` → core, `auth.localhost` → Keycloak.
+  см. bootstrap в main.rs) + Centrifugo (реальное время для чата, общий канал
+  `common` для аутентифицированных; секреты — `aga-api-key`/`aga-hmac-secret`,
+  совпадают с центрифуго-блоком roles.yaml). Прокси маршрутизирует как ingress
+  в k8s: `dev.localhost` → front, `api.localhost` → core, `auth.localhost` →
+  Keycloak, `pub-sub.localhost` → centrifugo.
   Конфиг ядра — `infra/dev-roles.yaml` (генерируется `make dev-roles` из
   `main/config/roles.yaml`, sso-блок — стендовый, Keycloak этого compose).
   SSH-ключ aga (`AGA_SSH_PRIVATE_KEY`) пробрасывается ядру из `.env` и
@@ -61,7 +64,9 @@
   `infra/dev-roles.yaml`). Ядро при включённом SSO ждёт JWKS с ретраями и не
   стартует без него (анонимный доступ закрыт).
 - Веб-клиент разнесён с API по сервисам: `dev.localhost` → фронт,
-  `api.localhost` → ядро, `auth.localhost` → Keycloak (см. `k8s/core/70-ingress.yaml`).
+  `api.localhost` → ядро, `auth.localhost` → Keycloak, `pub-sub.localhost` →
+  Centrifugo (см. `k8s/core/70-ingress.yaml`). В dev-compose те же маршруты —
+  `dev-proxy/nginx.conf`.
 
 ## Verification
 - `make init` — создаёт `.env` и `main/config/roles.yaml` из примеров.
