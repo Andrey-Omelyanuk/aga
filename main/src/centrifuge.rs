@@ -177,4 +177,12 @@ mod tests {
         };
         assert_eq!(cfg.channel, "common");
     }
+
+    #[test]
+    fn message_payload_carries_chat_id_and_message_id() {
+        let payload = message_payload(42, 7);
+        assert_eq!(payload["type"], "message");
+        assert_eq!(payload["chat_id"], 42);
+        assert_eq!(payload["message_id"], 7);
+    }
 }
