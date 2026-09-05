@@ -173,7 +173,11 @@ src/
   воркстейшны ws-1/ws-2, сессия с тредом и артефактом, общий чат с share,
   выполненная задача с trace-записями + pending human-запрос). Семантика —
   полный сброс: все таблицы очищаются (`clear_all` в TraceStore/ChatStore) и
-  `sqlite_sequence` сбрасывается — ID стабильны между запусками. Запуск:
+  `sqlite_sequence` сбрасывается — ID стабильны между запусками. Seed создаёт
+  и дефолтное подключение к LLM (`ollama-local`) — адрес и модель из
+  `AGA_LLM_BOOTSTRAP_*` (в dev-стенде — контейнер ollama), иначе
+  `http://localhost:11434/v1`; seed стирает БД, поэтому bootstrap ядра после
+  него уже не отработает. Запуск:
   `make dev-seed` (контейнер aga-core) / `make k8s-seed` (кластер); локально —
   `cargo run -- seed` в `main/`. `roles.yaml` для сида не нужен — подкоманда
   отрабатывает до загрузки конфига. Участники `alice`/`bob` — учётки Keycloak
