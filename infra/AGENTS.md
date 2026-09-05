@@ -69,6 +69,13 @@
   получает 401, `/auth/login` редиректит в Keycloak на `auth.localhost`),
   ws-1/ws-2 ready, фронт отвечает на `${AGA_FRONT_PORT:-8081}`, прокси отдаёт
   SPA на `dev.localhost`, API на `api.localhost`, Keycloak на `auth.localhost`.
+- `make dev-e2e` — e2e всего рабочего цикла агента на dev-стенде
+  (`infra/dev-e2e.sh`): форсит пересоздание core и ws-контейнеров (свежие
+  образы), сидит БД и через HTTP API со SSO закрывает сессию занятого
+  воркстейшна, отпускает и переключает его на проект mobx-model-ui (git-клон
+  в `/work/project`), открывает сессию и ждёт непустой ответ `@Agent.ui`
+  с артефактом. Требует SSH-доступа по `AGA_SSH_PRIVATE_KEY` к репозиторию
+  `git@github.com:Andrey-Omelyanuk/mobx-model-ui.git`.
 - Вход в Keycloak — тестовые учётки `alice`/`alice-pass` (participant) и
   `bob`/`bob-pass` (admin); фиксированные `sso_subject` заданы в
   `k8s/core/keycloak-realm.json` и совпадают с участниками сида (`aga seed`).
