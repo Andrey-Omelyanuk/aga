@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react';
 import { AgentSetEditor } from './AgentSetEditor';
-import type { Agent, CatalogItem } from '@/models/project';
+import type { Agent, CatalogItem, Llm } from '@/models/project';
 
 const agents: Agent[] = [
   {
@@ -9,7 +9,7 @@ const agents: Agent[] = [
     description: 'Правила разработки',
     tools: ['git', 'make'],
     max_iterations: 3,
-    temperature: 0.7,
+    llm_id: 1,
     parent_id: null,
     skills: [{ name: 'review' }],
     commands: [],
@@ -21,7 +21,7 @@ const agents: Agent[] = [
     description: 'Правила бэкенда',
     tools: ['docker'],
     max_iterations: 3,
-    temperature: 0.7,
+    llm_id: null,
     parent_id: 10,
     skills: [],
     commands: [{ name: 'deploy' }],
@@ -42,6 +42,17 @@ const commands: CatalogItem[] = [
   { id: 1, name: 'deploy', content: 'Выкатывать', deleted: false },
 ];
 
+const connections: Llm[] = [
+  {
+    id: 1,
+    name: 'ollama-local',
+    api_url: 'http://llm:11434/v1',
+    api_key: 'secret',
+    model_name: 'qwen3:0.6b',
+    is_default: true,
+  },
+] as Llm[];
+
 const meta = {
   title: 'project/AgentSetEditor',
   component: AgentSetEditor,
@@ -51,6 +62,7 @@ const meta = {
     agents,
     skills,
     commands,
+    connections,
     onSaved: () => {},
   },
 } satisfies Meta<typeof AgentSetEditor>;

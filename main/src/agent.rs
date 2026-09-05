@@ -33,7 +33,9 @@ pub fn kubectl_exec_args(namespace: &str, pod: &str, command: &str) -> Vec<Strin
 /// Аргументы для `docker exec` в контейнер воркстейшна. В отличие от kubectl,
 /// docker exec разделитель `--` не понимает — команда идёт сразу после имени.
 /// Команды агента выполняются от uid/gid 1000 (владелец bind-mount на хосте dev),
-/// чтобы файлы проекта принадлежали хостовому пользователю, а не root.
+/// чтобы файлы проекта принадлежали хостовому пользователю, а не root. uid 1000
+/// в образе воркстейшна — пользователь `aga` с home `/home/aga` (Dockerfile),
+/// поэтому у агента есть свой `~/.ssh` с ключом от `inject_ssh_key`.
 pub fn docker_exec_args(container: &str, command: &str) -> Vec<String> {
     vec![
         "exec".to_string(),
@@ -307,9 +309,11 @@ mod tests {
                 llm: LlmConfig {
                     model: None,
                     temperature: 0.7,
+                    api_url: None,
+                    api_key: None,
                 },
             },
-            LlmClient::new("http://localhost:9", None, "test"),
+            LlmClient::new(),
             store,
             Executor::Sh,
             None,

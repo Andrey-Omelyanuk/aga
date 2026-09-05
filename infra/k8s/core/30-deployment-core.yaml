@@ -78,21 +78,6 @@ spec:
                 configMapKeyRef:
                   name: aga-env
                   key: PORT
-            - name: LLM_API_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: aga-env
-                  key: LLM_API_URL
-            - name: LLM_API_KEY
-              valueFrom:
-                configMapKeyRef:
-                  name: aga-env
-                  key: LLM_API_KEY
-            - name: LLM_MODEL
-              valueFrom:
-                configMapKeyRef:
-                  name: aga-env
-                  key: LLM_MODEL
             - name: AGA_FRONT_URL
               valueFrom:
                 configMapKeyRef:

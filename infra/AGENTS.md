@@ -29,7 +29,9 @@
   nginx-прокси `*.localhost` (`proxy`, `dev-proxy/nginx.conf`, host-порт
   `${AGA_PROXY_PORT:-80}`) + 2 воркстейшна (`ws-1`, `ws-2`, privileged, пустые
   git-репо в отдельных named volumes `ws-1-data`/`ws-2-data` — на хосте файлов
-  воркстейшнов нет). Прокси маршрутизирует как ingress в k8s:
+  воркстейшнов нет) + маленькая LLM (`ollama`, модель до 1B `qwen3:0.6b` —
+  тянется при старте; подключение к ней ядро создаёт само и ставит дефолтным,
+  см. bootstrap в main.rs). Прокси маршрутизирует как ingress в k8s:
   `dev.localhost` → front, `api.localhost` → core, `auth.localhost` → Keycloak.
   Конфиг ядра — `infra/dev-roles.yaml` (генерируется `make dev-roles` из
   `main/config/roles.yaml`, sso-блок — стендовый, Keycloak этого compose).
@@ -46,9 +48,13 @@
   cargo run в `main/`), `make run-front` (vite dev, `front/`), `make dev-*`
   (dev-стенд в compose), `make k8s-*` (стенд в кластере).
 - Dev-стенд — опциональный, только для разработки; стенд поднимается в k8s.
-  Compose-команды идут с `--env-file .env` (LLM_API_URL из корневого `.env`).
-- Для стенда LLM берётся из `AGA_K8S_LLM_API_URL` (кластер-достижимый адрес),
-  локальный `LLM_API_URL` из `.env` — для `make run` и dev-стенда.
+  Compose-команды идут с `--env-file .env` (только ssh-ключ и порты).
+- Дефолтной LLM из env больше нет (LLM_API_URL/LLM_API_KEY/LLM_MODEL и
+  AGA_K8S_LLM_API_URL не используются): подключения к LLM живут в БД и
+  выбираются на странице «LLM». Dev-стенд поднимает свою маленькую LLM
+  (`ollama`) и задаёт её адрес/модель ядру через `AGA_LLM_BOOTSTRAP_*` — при
+  первом старте ядро создаёт подключение и ставит его дефолтным. В k8s-стенде
+  подключение к внешней LLM создаётся в БД вручную или сидом.
 - Стенд включает SSO: `deploy.sh` заменяет sso-блок `main/config/roles.yaml` на
   стендовый (Keycloak в кластере). Локальный `make run` — без SSO (аноним-супер);
   dev-стенд — со SSO (Keycloak в compose, `make dev-roles` генерирует
@@ -63,6 +69,13 @@
   получает 401, `/auth/login` редиректит в Keycloak на `auth.localhost`),
   ws-1/ws-2 ready, фронт отвечает на `${AGA_FRONT_PORT:-8081}`, прокси отдаёт
   SPA на `dev.localhost`, API на `api.localhost`, Keycloak на `auth.localhost`.
+- `make dev-e2e` — e2e всего рабочего цикла агента на dev-стенде
+  (`infra/dev-e2e.sh`): форсит пересоздание core и ws-контейнеров (свежие
+  образы), сидит БД и через HTTP API со SSO закрывает сессию занятого
+  воркстейшна, отпускает и переключает его на проект mobx-model-ui (git-клон
+  в `/work/project`), открывает сессию и ждёт непустой ответ `@Agent.ui`
+  с артефактом. Требует SSH-доступа по `AGA_SSH_PRIVATE_KEY` к репозиторию
+  `git@github.com:Andrey-Omelyanuk/mobx-model-ui.git`.
 - Вход в Keycloak — тестовые учётки `alice`/`alice-pass` (participant) и
   `bob`/`bob-pass` (admin); фиксированные `sso_subject` заданы в
   `k8s/core/keycloak-realm.json` и совпадают с участниками сида (`aga seed`).

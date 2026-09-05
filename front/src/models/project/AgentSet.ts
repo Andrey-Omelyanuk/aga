@@ -16,8 +16,8 @@ export interface Agent {
   description: string;
   tools: string[];
   max_iterations: number;
-  model?: string | null;
-  temperature: number;
+  /** Подключение к LLM (llm_connections); нет — дефолтная LLM со страницы «LLM». */
+  llm_id?: number | null;
   parent_id?: number | null;
   /** Имя родителя в дереве (для сохранения; при загрузке выводится из parent_id). */
   parent?: string | null;

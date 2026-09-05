@@ -25,7 +25,7 @@ CARGO_IN_MAIN = cd main && $(CARGO)
         front-test storybook storybook-build \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
-dev-up dev-down dev-logs dev-ps dev-reset dev-verify \
+ dev-up dev-down dev-logs dev-ps dev-reset dev-verify dev-e2e \
         dev-roles dev-seed k8s-seed
 
 help:
@@ -47,6 +47,7 @@ help:
 	@echo "dev-ps      - Show dev stand containers"
 	@echo "dev-reset   - Recreate dev stand from scratch (fresh DB)"
 	@echo "dev-verify  - Check dev stand: core API + both workstations ready"
+	@echo "dev-e2e     - E2E on dev stand: free ws, switch to mobx-model-ui, agent answers"
 	@echo "dev-seed    - Restore test dataset into dev stand DB (aga seed in core)"
 	@echo "k8s-seed    - Restore test dataset into cluster DB (aga seed via kubectl exec)"
 	@echo "k8s-up      - Start local cluster (minikube)"
@@ -101,13 +102,12 @@ run: init
 run-front:
 	cd front && npm run dev
 
-# Dev-стенд (docker compose): ядро + 2 воркстейшна, без кластера.
-# Воркстейшны поднимаются заранее (ws-1/ws-2) и переиспользуются ядром в
-# docker-режиме (AGA_WS_BACKEND=docker). Проекты — пустые репо в named volumes
-# (entrypoint инициализирует их сам).
+# Dev-стенд (docker compose): ядро + маленькая LLM (ollama) + Keycloak + фронт +
+# 2 воркстейшна, без кластера. Поднимает весь стенд: core при старте создаёт
+# подключение к ollama и ставит его дефолтным (bootstrap, см. main.rs). --build
+# пересоздаёт контейнеры при смене образов (в т.ч. ws-1/ws-2). Проекты — пустые
+# репо в named volumes (entrypoint инициализирует их сам).
 # Стенд — по-прежнему k8s (make k8s-*); compose только для разработки.
-# --env-file .env — compose берёт LLM_API_URL и др. из корневого .env
-# (по умолчанию искал бы .env рядом с compose-файлом).
 DEV_COMPOSE = infra/dev-compose.yml
 DEV_COMPOSE_CMD = docker compose --env-file .env -f $(DEV_COMPOSE)
 
@@ -122,7 +122,7 @@ dev-roles:
 	@echo "dev-roles.yaml written (SSO enabled -> dev Keycloak)"
 
 dev-up: dev-roles
-	$(DEV_COMPOSE_CMD) up -d --build --force-recreate ws-1 ws-2
+	$(DEV_COMPOSE_CMD) up -d --build
 	# Прокси монтирует nginx.conf bind'ом — compose не пересоздаёт его при смене
 	# файла; reload подхватывает новую конфигурацию (в т.ч. auth.localhost).
 	@docker exec aga-proxy nginx -s reload >/dev/null 2>&1 || true
@@ -151,6 +151,12 @@ dev-verify: dev-roles
 	@test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/auth/login)" = "307" && echo "core auth/login redirect OK"
 	@docker exec ws-1 sh -c "test -d /work/project/.git" && echo "ws-1 OK"
 	@docker exec ws-2 sh -c "test -d /work/project/.git" && echo "ws-2 OK"
+	@echo "Waiting for small LLM model (ollama:qwen3:0.6b)..."
+	@for i in $$(seq 1 60); do \
+		if docker exec aga-ollama ollama list 2>/dev/null | grep -q 'qwen3:0.6b'; then break; fi; \
+		sleep 2; \
+	done
+	@docker exec aga-ollama ollama list | grep -q 'qwen3:0.6b' && echo "ollama small LLM OK"
 	@curl -fsS http://localhost:$${AGA_FRONT_PORT:-8081}/ >/dev/null && echo "front OK"
 	@curl -s --resolve auth.localhost:80:127.0.0.1 http://auth.localhost/realms/aga | grep -q '"realm"' && echo "proxy auth.localhost (keycloak) OK"
 	@curl -fsS --resolve dev.localhost:80:127.0.0.1 http://dev.localhost/ >/dev/null && echo "proxy dev.localhost OK"
@@ -161,6 +167,16 @@ dev-verify: dev-roles
 dev-seed:
 	$(DEV_COMPOSE_CMD) up -d --build
 	docker exec aga-core /app/aga seed
+
+# E2E всего рабочего цикла агента на dev-стенде (см. infra/dev-e2e.sh):
+# свободный воркстейшн, switch на mobx-model-ui, сессия, @Agent.ui отвечает.
+# --force-recreate core ws-1 ws-2 подхватывает свежие образы ядра и
+# воркстейшнов (пользователь aga, права /work, ключ в /home/aga/.ssh), сид
+# сбрасывает БД в детерминированное состояние.
+dev-e2e: dev-roles
+	$(DEV_COMPOSE_CMD) up -d --build --force-recreate core ws-1 ws-2
+	docker exec aga-core /app/aga seed
+	bash infra/dev-e2e.sh
 
 # Восстановить тестовый набор в БД кластера (PVC). Образ ядра должен быть
 # передеплоен с поддержкой seed (make k8s-build && make k8s-load && make k8s-deploy).

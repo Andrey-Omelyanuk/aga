@@ -306,9 +306,12 @@ impl Cluster {
         Ok(())
     }
 
-    /// Положить приватный SSH-ключ в `~/.ssh` существующего контейнера
+    /// Положить приватный SSH-ключ в `/home/aga/.ssh` существующего контейнера
     /// воркстейшна (docker). Dev-стенд поднимает ws-контейнеры заранее —
     /// ядро переиспользует их, поэтому ключ инжектится при подъёме станции.
+    /// Ключ попадает в home пользователя воркстейшна (uid 1000, см.
+    /// workstation-image/Dockerfile): команды агента и git-клон идут через
+    /// `docker exec -u 1000:1000`, и ssh читает `$HOME/.ssh` именно этого uid.
     pub async fn inject_ssh_key(
         &self,
         container: &str,
@@ -321,10 +324,11 @@ impl Cluster {
                 container,
                 "sh",
                 "-c",
-                "mkdir -p ~/.ssh && \
-                 cat > ~/.ssh/id_ed25519 && \
-                 chmod 600 ~/.ssh/id_ed25519 && \
-                 printf 'IdentitiesOnly yes\\nStrictHostKeyChecking accept-new\\n' > ~/.ssh/config",
+                "mkdir -p /home/aga/.ssh && \
+                 cat > /home/aga/.ssh/id_ed25519 && \
+                 chmod 600 /home/aga/.ssh/id_ed25519 && \
+                 printf 'IdentitiesOnly yes\\nStrictHostKeyChecking accept-new\\n' > /home/aga/.ssh/config && \
+                 chown -R 1000:1000 /home/aga/.ssh",
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

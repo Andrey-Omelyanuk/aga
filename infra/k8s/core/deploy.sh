@@ -10,9 +10,6 @@ set -euo pipefail
 NS="${AGA_K8S_NAMESPACE:-aga}"
 KUBECTL="${AGA_K8S_KUBECTL:-kubectl}"
 ROLES_SRC="${AGA_ROLES_CONFIG:-./main/config/roles.yaml}"
-LLM_API_URL="${AGA_K8S_LLM_API_URL:-http://192.168.49.1:11434/v1}"
-LLM_API_KEY="${LLM_API_KEY:-}"
-LLM_MODEL="${LLM_MODEL:-qwen3.5:9b}"
 RUST_LOG="${RUST_LOG:-info}"
 PORT="${PORT:-8080}"
 # Origin веб-клиента в стенде (CORS ядра + возврат токена после SSO).
@@ -39,11 +36,9 @@ echo "==> namespace"
 $KUBECTL apply -f "$K8S_DIR/00-namespace.yaml"
 
 echo "==> configmaps"
-# env ядра: LLM (кластер-достижимый адрес!), порт, лог-уровень.
+# env ядра: порт, лог-уровень. Дефолтной LLM из env нет — подключения к LLM
+# живут в БД (создаются на странице «LLM» или сидом).
 $KUBECTL create configmap aga-env -n "$NS" \
-  --from-literal=LLM_API_URL="$LLM_API_URL" \
-  --from-literal=LLM_API_KEY="$LLM_API_KEY" \
-  --from-literal=LLM_MODEL="$LLM_MODEL" \
   --from-literal=AGA_FRONT_URL="$AGA_K8S_FRONT_URL" \
   --from-literal=RUST_LOG="$RUST_LOG" \
   --from-literal=PORT="$PORT" \

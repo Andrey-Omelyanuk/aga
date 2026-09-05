@@ -76,14 +76,16 @@ aga/
 - Локальная разработка: `make build`, `make run` (ядро, cargo в `main/`),
   `make run-front` (vite dev, `front/`), `make test`, `make lint`,
   `make fmt`.
-- Dev-стенд без кластера (ядро + Keycloak + веб-клиент + 2 воркстейшна в
-  docker compose; SSO включён, как в стенде):
+- Dev-стенд без кластера (ядро + маленькая LLM + Keycloak + веб-клиент +
+  2 воркстейшна в docker compose; SSO включён, как в стенде):
   `make dev-roles`, `make dev-up`, `make dev-down`,
   `make dev-logs`, `make dev-ps`, `make dev-reset`, `make dev-verify`.
   Воркстейшны — контейнеры `ws-1`/`ws-2` с пустыми git-репо в отдельных named
   volumes (проект агент наполняет сам); ядро в docker-режиме
   (`AGA_WS_BACKEND=docker`) переиспользует
-  их; фронт — сервис `front` (vite, `:8081`); прокси `*.localhost` на `:80`
+  их; маленькая LLM — контейнер `ollama` с моделью до 1B (`qwen3:0.6b`),
+  подключение к ней ядро создаёт при старте и ставит дефолтным (bootstrap);
+  фронт — сервис `front` (vite, `:8081`); прокси `*.localhost` на `:80`
   (`dev.localhost` → front, `api.localhost` → core, `auth.localhost` → Keycloak)
   — как в k8s-стенде. `make dev-roles` генерирует `infra/dev-roles.yaml`
   (roles.yaml со включённым SSO для dev-Keycloak).
@@ -115,6 +117,9 @@ aga/
   сообщения с дополнительной реакцией; реактивные агенты по `@Agent.<имя>`
   сериализуются per-workstation.
 - Каждый task создаёт новый Agent (легковесный, без state между задачами).
+- LLM агентов — подключения в БД (страница «LLM»): у каждого url, ключ и модель;
+  одно подключение дефолтное, к нему ходят агенты без своего. Дефолтной LLM из
+  env (LLM_API_URL/LLM_API_KEY/LLM_MODEL) больше нет.
 - В стенде SPA и API разнесены по сервисам: `dev.localhost` → `front/`,
   `api.localhost` → `main/`. Ядро статику не раздаёт.
 

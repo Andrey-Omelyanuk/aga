@@ -81,8 +81,49 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             "alice",
         )
         .await?;
+    // Способности набора ui-kit (UI-библиотека mobx-model-ui).
+    trace
+        .create_capability(
+            CapabilityKind::Skill,
+            "ui-review",
+            "Ревью UI-компонентов: доступность, состояния, реакции на observable.",
+            alice,
+            "alice",
+        )
+        .await?;
+    trace
+        .create_capability(
+            CapabilityKind::Command,
+            "run-ui-tests",
+            "vitest по пакетам библиотеки, сборка Storybook.",
+            alice,
+            "alice",
+        )
+        .await?;
 
-    // --- Набор агентов: дерево backend → api.
+    // --- Набор агентов: дерево backend → api. LLM — подключение, созданное
+    // ниже (дефолтное, с моделью): backend ходит к ollama-local, api — без
+    // подключения (ходит к дефолтной LLM). Адрес и модель — как у bootstrap
+    // ядра (main.rs): в dev-стенде compose задаёт AGA_LLM_BOOTSTRAP_* (контейнер
+    // ollama), локально `cargo run -- seed` — host-ollama. Seed стирает БД, и
+    // bootstrap уже не отработает — поэтому подключение создаёт сам seed.
+    let llm_url = std::env::var("AGA_LLM_BOOTSTRAP_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| "http://localhost:11434/v1".to_string());
+    let llm_model = std::env::var("AGA_LLM_BOOTSTRAP_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "qwen3:0.6b".to_string());
+    let ollama = trace
+        .create_llm_connection(&crate::trace::LlmConnectionSpec {
+            name: "ollama-local".into(),
+            api_url: llm_url,
+            api_key: None,
+            model_name: llm_model,
+        })
+        .await?;
+    trace.set_default_llm(ollama).await?;
     let set_id = trace
         .create_agent_set(
             "dev-team",
@@ -92,8 +133,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     description: "Бэкенд-разработчик: API, БД, интеграции.".into(),
                     tools: vec!["cat".into(), "ls".into(), "grep".into(), "find".into()],
                     max_iterations: 5,
-                    model: None,
-                    temperature: 0.7,
+                    llm_id: Some(ollama),
                     parent: None,
                     skills: vec![
                         AgentCapability {
@@ -112,13 +152,53 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     description: "Агент API-слоя: эндпоинты и контракты.".into(),
                     tools: vec!["cat".into(), "grep".into()],
                     max_iterations: 3,
-                    model: None,
-                    temperature: 0.7,
+                    llm_id: None,
                     parent: Some("backend".into()),
                     skills: Vec::new(),
                     commands: vec![AgentCapability {
                         name: "deploy".into(),
                     }],
+                },
+            ],
+        )
+        .await?;
+
+    // --- Набор для UI-библиотеки (mobx-model-ui): корень ui + слой src/model.
+    // Корень дерева набора — корень проекта (территория ""), наследники —
+    // папки репозитория по своему имени. Оба агента без своего подключения —
+    // ходят к дефолтной LLM (ollama-local).
+    let ui_set_id = trace
+        .create_agent_set(
+            "ui-kit",
+            &[
+                AgentSpec {
+                    name: "ui".into(),
+                    description: "Разработчик UI-библиотеки: компоненты, стили.".into(),
+                    tools: vec!["cat".into(), "ls".into(), "grep".into(), "find".into()],
+                    max_iterations: 5,
+                    llm_id: None,
+                    parent: None,
+                    skills: vec![
+                        AgentCapability {
+                            name: "ui-review".into(),
+                        },
+                        AgentCapability {
+                            name: "git-workflow".into(),
+                        },
+                    ],
+                    commands: vec![AgentCapability {
+                        name: "run-ui-tests".into(),
+                    }],
+                },
+                AgentSpec {
+                    name: "src/model".into(),
+                    description: "Слой данных библиотеки: стори, сериализация.".into(),
+                    tools: vec!["cat".into(), "grep".into()],
+                    max_iterations: 3,
+                    llm_id: None,
+                    parent: Some("ui".into()),
+                    skills: Vec::new(),
+                    commands: Vec::new(),
                 },
             ],
         )
@@ -131,7 +211,11 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let p2 = trace
         .upsert_project("https://example.com/mobile.git")
         .await?;
+    let p3 = trace
+        .upsert_project("git@github.com:Andrey-Omelyanuk/mobx-model-ui.git")
+        .await?;
     trace.attach_agent_set(p1, set_id).await?;
+    trace.attach_agent_set(p3, ui_set_id).await?;
 
     // --- Воркстейшны: готовые станции (контейнеры ws-1/ws-2 dev-стенда).
     let ws1 = chat.create_workstation(p1, "ws-1", None).await?;
@@ -246,12 +330,14 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     tracing::info!(
-        "Тестовый набор восстановлен: users={}, set={}, projects={}/{} ws, chats={}; \
-         вход в Keycloak: alice/alice-pass, bob/bob-pass",
+        "Тестовый набор восстановлен: users={}, sets={} (dev-team)/{} (ui-kit), \
+         projects={}/{}/{} ws, chats={}; вход в Keycloak: alice/alice-pass, bob/bob-pass",
         4,
         set_id,
+        ui_set_id,
         p1,
         p2,
+        p3,
         session.id
     );
     Ok(())

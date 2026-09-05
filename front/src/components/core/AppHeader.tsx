@@ -30,6 +30,8 @@ const CONFIG_MENU: Array<{ tab: string; label: string; to: string }> = [
   { tab: 'skills', label: 'Skills', to: '/config/skills' },
   { tab: 'commands', label: 'Commands', to: '/config/commands' },
   { tab: 'agent-sets', label: 'Agent Set', to: '/config/agent-sets' },
+  { tab: 'llms', label: 'LLM', to: '/config/llms' },
+  { tab: 'help', label: 'Help', to: '/config/help' },
 ];
 
 const navItemClass = ({ isActive }: { isActive: boolean }) =>

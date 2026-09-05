@@ -89,6 +89,20 @@ pub struct CreateAgentSetRequest {
 }
 
 #[derive(Deserialize)]
+pub struct LlmConnectionRequest {
+    pub name: String,
+    pub api_url: String,
+    pub api_key: Option<String>,
+    pub model_name: String,
+}
+
+/// Выбор дефолтной LLM на странице «LLM»: id подключения или null (снять выбор).
+#[derive(Deserialize)]
+pub struct SetLlmDefaultRequest {
+    pub llm_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
 pub struct CreateCapabilityRequest {
     pub name: String,
     pub content: String,
@@ -139,6 +153,21 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(delete_agent_set)
                 .patch(update_agent_set),
         )
+        // === Подключения к LLM ===
+        // Имя, url API, ключ и модель. Агент набора ссылается на подключение;
+        // без него агент ходит к дефолтной LLM (одно из подключений отмечается
+        // на странице «LLM»; env-дефолта больше нет).
+        .route(
+            "/llms",
+            get(list_llm_connections).post(create_llm_connection),
+        )
+        .route(
+            "/llms/:id",
+            get(get_llm_connection)
+                .delete(delete_llm_connection)
+                .patch(update_llm_connection),
+        )
+        .route("/settings/llm-default", post(set_llm_default))
         // === Каталог способностей (скиллы и команды) ===
         // У записи одно текущее содержимое и история изменений (кто, когда и
         // что сделал). ?deleted=1 — список «Удалённые» (история переживает
@@ -433,6 +462,133 @@ async fn update_agent_set(
             .map(Json),
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+// === API для управления подключениями к LLM ===
+
+async fn list_llm_connections(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::trace::LlmConnection>>, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .list_llm_connections()
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn create_llm_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<LlmConnectionRequest>,
+) -> Result<Json<crate::trace::LlmConnection>, StatusCode> {
+    current_user(&state, &headers).await?;
+    let spec = crate::trace::LlmConnectionSpec {
+        name: payload.name,
+        api_url: payload.api_url,
+        api_key: payload.api_key,
+        model_name: payload.model_name,
+    };
+    match state.trace_store.create_llm_connection(&spec).await {
+        Ok(id) => state
+            .trace_store
+            .get_llm_connection(id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+            .map(Json),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn get_llm_connection(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::trace::LlmConnection>, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .get_llm_connection(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
+}
+
+async fn delete_llm_connection(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    match state.trace_store.delete_llm_connection(id).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Изменить подключение (название, url API, ключ, модель). Возвращает
+/// обновлённое подключение; используется агентами набора сразу после правки.
+async fn update_llm_connection(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<LlmConnectionRequest>,
+) -> Result<Json<crate::trace::LlmConnection>, StatusCode> {
+    current_user(&state, &headers).await?;
+    let spec = crate::trace::LlmConnectionSpec {
+        name: payload.name,
+        api_url: payload.api_url,
+        api_key: payload.api_key,
+        model_name: payload.model_name,
+    };
+    match state.trace_store.update_llm_connection(id, &spec).await {
+        Ok(true) => state
+            .trace_store
+            .get_llm_connection(id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)
+            .map(Json),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Выбрать дефолтную LLM: `llm_id` — одно из подключений (дефолт снимается с
+/// остальных — одна дефолтная LLM), `null` — снять выбор. Возвращает дефолтное
+/// подключение или null.
+async fn set_llm_default(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SetLlmDefaultRequest>,
+) -> Result<Json<Option<crate::trace::LlmConnection>>, StatusCode> {
+    current_user(&state, &headers).await?;
+    match payload.llm_id {
+        Some(id) => match state.trace_store.set_default_llm(id).await {
+            Ok(true) => state
+                .trace_store
+                .get_llm_connection(id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .map(|c| Json(Some(c)))
+                .ok_or(StatusCode::NOT_FOUND),
+            Ok(false) => Err(StatusCode::NOT_FOUND),
+            Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        },
+        None => {
+            state
+                .trace_store
+                .clear_default_llm()
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(Json(None))
+        }
     }
 }
 
@@ -1983,7 +2139,7 @@ mod tests {
             .await
             .unwrap();
         let config = Config { sso: None };
-        let llm_client = LlmClient::new("http://localhost:1/v1", None, "test-model");
+        let llm_client = LlmClient::new();
         let cluster = Cluster {
             backend: crate::cluster::Backend::K8s,
             kubectl: "kubectl".into(),
@@ -2657,8 +2813,7 @@ mod tests {
             "description": format!("Правила {name}"),
             "tools": ["git", "make"],
             "max_iterations": 3,
-            "model": null,
-            "temperature": 0.7,
+            "llm_id": null,
             "parent": null,
             "skills": [],
             "commands": []
@@ -2684,6 +2839,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn created_llm_connection_listed_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/llms",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ollama",
+                "api_url": "http://llm:11434/v1",
+                "api_key": "secret-key",
+                "model_name": "qwen3:0.6b"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("ollama"));
+        assert!(body.contains("http://llm:11434/v1"));
+        assert!(body.contains("secret-key"));
+        assert!(body.contains("qwen3:0.6b"));
+        // Созданное подключение видно в списке: название, url, ключ и модель.
+        let (status, body) = get("/llms", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("ollama"));
+        assert!(body.contains("http://llm:11434/v1"));
+        assert!(body.contains("secret-key"));
+        assert!(body.contains("qwen3:0.6b"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn updated_llm_connection_changes_url_and_key_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/llms",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ollama",
+                "api_url": "http://old/v1",
+                "api_key": "old-key",
+                "model_name": "qwen3:0.6b"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, body) = patch_json(
+            &format!("/llms/{id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ollama2",
+                "api_url": "http://new/v1",
+                "api_key": "new-key",
+                "model_name": "qwen3:1b"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("http://new/v1"));
+        assert!(body.contains("new-key"));
+        assert!(body.contains("qwen3:1b"));
+        assert!(!body.contains("http://old/v1"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn deleted_llm_connection_disappears_from_list_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/llms",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ollama",
+                "api_url": "http://llm:11434/v1",
+                "api_key": null,
+                "model_name": "qwen3:0.6b"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, _) = delete_json(&format!("/llms/{id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get("/llms", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("ollama"));
+        let (status, _) = delete_json(&format!("/llms/{id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn llm_connections_require_authentication() {
+        let (state, file) = test_state(true).await;
+        let headers = HeaderMap::new();
+        let (status, _) = get("/llms", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = post_json(
+            "/llms",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ollama",
+                "api_url": "http://llm:11434/v1",
+                "api_key": null,
+                "model_name": "qwen3:0.6b"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn default_llm_set_and_cleared_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/llms",
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ollama",
+                "api_url": "http://llm:11434/v1",
+                "api_key": null,
+                "model_name": "qwen3:0.6b"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        // Выбор дефолтной LLM: подключение отмечено, снять выбор можно.
+        let (status, body) = post_json(
+            "/settings/llm-default",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "llm_id": id }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("ollama"));
+        let (status, body) = get("/llms", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"is_default\":true"));
+        let (status, body) = post_json(
+            "/settings/llm-default",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "llm_id": null }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "null");
+        let (status, body) = get("/llms", &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"is_default\":false"));
+        // Несуществующее подключение дефолтным не становится.
+        let (status, _) = post_json(
+            "/settings/llm-default",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "llm_id": 9999 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn default_llm_requires_authentication() {
+        let (state, file) = test_state(true).await;
+        let headers = HeaderMap::new();
+        let (status, _) = post_json(
+            "/settings/llm-default",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "llm_id": null }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
     async fn attached_agent_set_appears_on_project() {
         let (state, file) = test_state(true).await;
         let headers = auth_headers("alice", &["participant"]);
@@ -2701,8 +3051,7 @@ mod tests {
                     description: "Правила разработчика".to_string(),
                     tools: vec!["git".to_string()],
                     max_iterations: 3,
-                    model: None,
-                    temperature: 0.7,
+                    llm_id: None,
                     parent: None,
                     skills: vec![],
                     commands: vec![],
@@ -2742,8 +3091,7 @@ mod tests {
                     description: "a".to_string(),
                     tools: vec![],
                     max_iterations: 1,
-                    model: None,
-                    temperature: 0.5,
+                    llm_id: None,
                     parent: None,
                     skills: vec![],
                     commands: vec![],
@@ -2760,8 +3108,7 @@ mod tests {
                     description: "b".to_string(),
                     tools: vec![],
                     max_iterations: 1,
-                    model: None,
-                    temperature: 0.5,
+                    llm_id: None,
                     parent: None,
                     skills: vec![],
                     commands: vec![],
@@ -2838,8 +3185,7 @@ mod tests {
                     "description": "Разработка",
                     "tools": ["git", "make"],
                     "max_iterations": 3,
-                    "model": null,
-                    "temperature": 0.7,
+                    "llm_id": null,
                     "parent": null,
                     "skills": [{"name": "review"}],
                     "commands": [{"name": "deploy"}]
@@ -2864,6 +3210,9 @@ mod tests {
         assert!(body.contains("review"));
         assert!(body.contains("commands"));
         assert!(!body.contains("pinned_version"));
+        // Своей модели и температуры у агента больше нет — только подключение.
+        assert!(!body.contains("\"model\""));
+        assert!(!body.contains("\"temperature\""));
         assert!(body.contains(&format!("\"id\":{skill_id}")));
         cleanup(&file).await;
     }

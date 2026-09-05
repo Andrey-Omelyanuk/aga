@@ -10,6 +10,8 @@ const AgentSetsPage = lazy(() => import('./pages/app/agentSets'));
 const ConfigCapabilitiesPage = lazy(() => import('./pages/app/configCapabilities'));
 const ConfigEnvPage = lazy(() => import('./pages/app/configEnv'));
 const ConfigUsersPage = lazy(() => import('./pages/app/configUsers'));
+const ConfigLlmPage = lazy(() => import('./pages/app/configLlm'));
+const ConfigHelpPage = lazy(() => import('./pages/app/configHelp'));
 const CapabilityHistoryPage = lazy(() => import('./pages/app/capabilityHistory'));
 const WorkstationsPage = lazy(() => import('./pages/app/workstations'));
 const SessionsPage = lazy(() => import('./pages/app/sessions'));
@@ -35,6 +37,8 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
           <Route path="config/skills" element={<ConfigCapabilitiesPage />} />
           <Route path="config/commands" element={<ConfigCapabilitiesPage />} />
           <Route path="config/agent-sets" element={<AgentSetsPage />} />
+          <Route path="config/llms" element={<ConfigLlmPage />} />
+          <Route path="config/help" element={<ConfigHelpPage />} />
           <Route path="skills/:id/history" element={<CapabilityHistoryPage />} />
           <Route path="commands/:id/history" element={<CapabilityHistoryPage />} />
           <Route path="workstations" element={<WorkstationsPage />} />

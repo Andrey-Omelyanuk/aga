@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use crate::agent::Agent;
 use crate::chat::ChatStore;
 use crate::cluster::Cluster;
-use crate::config::{LlmConfig, RoleConfig};
+use crate::config::RoleConfig;
 use crate::llm::LlmClient;
 use crate::scope::{territory_for, Territory};
 use crate::trace::{AgentSet, TraceStore};
@@ -25,7 +25,8 @@ pub struct ReactiveRunner {
 
 /// Собрать конфиг агента из набора: промпт = правила + данные агенту скиллы и
 /// команды (единственное содержимое каталога), инструменты — отдельный список
-/// без версий; территория — папка узла в дереве набора.
+/// без версий; территория — папка узла в дереве набора; LLM — выбранное
+/// подключение (url и ключ), без подключения — дефолтная LLM из env.
 pub async fn resolve_agent(
     store: &TraceStore,
     set: &AgentSet,
@@ -39,10 +40,7 @@ pub async fn resolve_agent(
         prompt,
         tools: agent.tools.clone(),
         max_iterations: agent.max_iterations,
-        llm: LlmConfig {
-            model: agent.model.clone(),
-            temperature: agent.temperature,
-        },
+        llm: store.llm_config_for(agent).await?,
     };
     Ok(Some((config, territory_for(set, agent))))
 }
@@ -204,6 +202,24 @@ mod tests {
     #[tokio::test]
     async fn mentioned_agent_resolves_own_rules_commands_and_llm() {
         let (store, file) = store().await;
+        let conn_a = store
+            .create_llm_connection(&crate::trace::LlmConnectionSpec {
+                name: "conn-a".into(),
+                api_url: "http://a/v1".into(),
+                api_key: Some("key-a".into()),
+                model_name: "qwen3:0.6b".into(),
+            })
+            .await
+            .unwrap();
+        let conn_b = store
+            .create_llm_connection(&crate::trace::LlmConnectionSpec {
+                name: "conn-b".into(),
+                api_url: "http://b/v1".into(),
+                api_key: None,
+                model_name: "qwen3:1b".into(),
+            })
+            .await
+            .unwrap();
         let set_id = store
             .create_agent_set(
                 "ops",
@@ -213,8 +229,7 @@ mod tests {
                         description: "Правила разработчика".to_string(),
                         tools: vec!["git".to_string(), "make".to_string()],
                         max_iterations: 4,
-                        model: Some("model-dev".to_string()),
-                        temperature: 0.1,
+                        llm_id: Some(conn_a),
                         parent: None,
                         skills: vec![],
                         commands: vec![],
@@ -224,8 +239,7 @@ mod tests {
                         description: "Правила деплоера".to_string(),
                         tools: vec!["docker".to_string()],
                         max_iterations: 4,
-                        model: None,
-                        temperature: 0.9,
+                        llm_id: Some(conn_b),
                         parent: None,
                         skills: vec![],
                         commands: vec![],
@@ -237,12 +251,14 @@ mod tests {
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
 
         // В чате @Agent.<имя> запускает именно этого агента: его правила идут в
-        // промпт, инструменты — в белый список исполнения, LLM — свои.
+        // промпт, инструменты — в белый список исполнения, LLM — из его
+        // подключения (url, ключ и модель).
         let (dev, _) = resolve_agent(&store, &set, "dev").await.unwrap().unwrap();
         assert_eq!(dev.prompt, "Правила разработчика");
         assert_eq!(dev.tools, vec!["git".to_string(), "make".to_string()]);
-        assert_eq!(dev.llm.model.as_deref(), Some("model-dev"));
-        assert_eq!(dev.llm.temperature, 0.1);
+        assert_eq!(dev.llm.api_url.as_deref(), Some("http://a/v1"));
+        assert_eq!(dev.llm.api_key.as_deref(), Some("key-a"));
+        assert_eq!(dev.llm.model.as_deref(), Some("qwen3:0.6b"));
 
         let (deploy, _) = resolve_agent(&store, &set, "deploy")
             .await
@@ -250,14 +266,82 @@ mod tests {
             .unwrap();
         assert_eq!(deploy.prompt, "Правила деплоера");
         assert_eq!(deploy.tools, vec!["docker".to_string()]);
-        assert!(deploy.llm.model.is_none());
-        assert_eq!(deploy.llm.temperature, 0.9);
+        assert_eq!(deploy.llm.api_url.as_deref(), Some("http://b/v1"));
+        assert!(deploy.llm.api_key.is_none());
+        assert_eq!(deploy.llm.model.as_deref(), Some("qwen3:1b"));
 
         // Несуществующего агента нет — отказа нет, просто нет конфига.
         assert!(resolve_agent(&store, &set, "nosuch")
             .await
             .unwrap()
             .is_none());
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn agent_without_connection_and_default_has_no_llm() {
+        let (store, file) = store().await;
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[AgentSpec {
+                    name: "dev".to_string(),
+                    description: "Правила разработчика".to_string(),
+                    tools: vec!["git".to_string()],
+                    max_iterations: 3,
+                    llm_id: None,
+                    parent: None,
+                    skills: vec![],
+                    commands: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let (config, _) = resolve_agent(&store, &set, "dev").await.unwrap().unwrap();
+        // Без подключения у агента нет url, ключа и модели: env-дефолта больше
+        // нет, дефолтная LLM не выбрана — запуск не пройдёт.
+        assert!(config.llm.api_url.is_none());
+        assert!(config.llm.api_key.is_none());
+        assert!(config.llm.model.is_none());
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn agent_without_connection_uses_default_llm() {
+        let (store, file) = store().await;
+        let default = store
+            .create_llm_connection(&crate::trace::LlmConnectionSpec {
+                name: "default".into(),
+                api_url: "http://default/v1".into(),
+                api_key: Some("default-key".into()),
+                model_name: "qwen3:0.6b".into(),
+            })
+            .await
+            .unwrap();
+        store.set_default_llm(default).await.unwrap();
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[AgentSpec {
+                    name: "dev".to_string(),
+                    description: "Правила разработчика".to_string(),
+                    tools: vec!["git".to_string()],
+                    max_iterations: 3,
+                    llm_id: None,
+                    parent: None,
+                    skills: vec![],
+                    commands: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let (config, _) = resolve_agent(&store, &set, "dev").await.unwrap().unwrap();
+        // Агент без подключения ходит к дефолтной LLM: url, ключ и модель из неё.
+        assert_eq!(config.llm.api_url.as_deref(), Some("http://default/v1"));
+        assert_eq!(config.llm.api_key.as_deref(), Some("default-key"));
+        assert_eq!(config.llm.model.as_deref(), Some("qwen3:0.6b"));
         cleanup(&file).await;
     }
 
@@ -288,21 +372,36 @@ mod tests {
         let set_id = store
             .create_agent_set(
                 "ops",
-                &[AgentSpec {
-                    name: "src/backend".to_string(),
-                    description: "Бэкенд".to_string(),
-                    tools: vec!["git".to_string(), "make".to_string()],
-                    max_iterations: 3,
-                    model: None,
-                    temperature: 0.7,
-                    parent: None,
-                    skills: vec![AgentCapability {
-                        name: "review".to_string(),
-                    }],
-                    commands: vec![AgentCapability {
-                        name: "deploy".to_string(),
-                    }],
-                }],
+                &[
+                    AgentSpec {
+                        name: "src".to_string(),
+                        description: "Корень проекта".to_string(),
+                        tools: vec!["git".to_string(), "make".to_string()],
+                        max_iterations: 3,
+                        llm_id: None,
+                        parent: None,
+                        skills: vec![AgentCapability {
+                            name: "review".to_string(),
+                        }],
+                        commands: vec![AgentCapability {
+                            name: "deploy".to_string(),
+                        }],
+                    },
+                    AgentSpec {
+                        name: "src/backend".to_string(),
+                        description: "Бэкенд".to_string(),
+                        tools: vec!["git".to_string(), "make".to_string()],
+                        max_iterations: 3,
+                        llm_id: None,
+                        parent: Some("src".to_string()),
+                        skills: vec![AgentCapability {
+                            name: "review".to_string(),
+                        }],
+                        commands: vec![AgentCapability {
+                            name: "deploy".to_string(),
+                        }],
+                    },
+                ],
             )
             .await
             .unwrap();
