@@ -83,14 +83,17 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // --- Набор агентов: дерево backend → api. LLM — подключение, созданное
-    // ниже: backend ходит к ollama-local, api — без подключения (env-дефолт).
+    // ниже (дефолтное, с моделью): backend ходит к ollama-local, api — без
+    // подключения (ходит к дефолтной LLM).
     let ollama = trace
         .create_llm_connection(&crate::trace::LlmConnectionSpec {
             name: "ollama-local".into(),
             api_url: "http://localhost:11434/v1".into(),
             api_key: None,
+            model_name: "qwen3:0.6b".into(),
         })
         .await?;
+    trace.set_default_llm(ollama).await?;
     let set_id = trace
         .create_agent_set(
             "dev-team",

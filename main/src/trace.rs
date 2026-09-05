@@ -85,22 +85,27 @@ pub struct AgentSpec {
     pub commands: Vec<AgentCapability>,
 }
 
-/// Подключение к LLM: название, url API и ключ доступа. Агент набора ссылается
-/// на подключение (llm_id); без подключения — дефолтная LLM из env.
+/// Подключение к LLM: название, url API, ключ доступа и модель. Агент набора
+/// ссылается на подключение (llm_id); одно подключение отмечается дефолтным —
+/// к нему ходят агенты без своего подключения. Имя поля model_name в API —
+/// «model» зарезервировано базовым классом mobx-модели веб-клиента.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConnection {
     pub id: i64,
     pub name: String,
     pub api_url: String,
     pub api_key: Option<String>,
+    pub model_name: String,
+    pub is_default: bool,
 }
 
-/// Спек подключения при создании/обновлении: название, url API, ключ доступа.
+/// Спек подключения при создании/обновлении: название, url API, ключ, модель.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConnectionSpec {
     pub name: String,
     pub api_url: String,
     pub api_key: Option<String>,
+    pub model_name: String,
 }
 
 /// Вид способности каталога: скилл или команда.
@@ -346,17 +351,29 @@ impl TraceStore {
         .await?;
 
         // === Подключения к LLM ===
-        // Имя, url API и ключ доступа. Агент набора ссылается на подключение;
-        // без подключения агент работает на дефолтной LLM из env.
+        // Имя, url API, ключ доступа и модель. Агент набора ссылается на
+        // подключение; одно подключение — дефолтное (is_default): к нему ходят
+        // агенты без своего подключения. Дефолтной LLM из env больше нет.
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS llm_connections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 api_url TEXT NOT NULL,
-                api_key TEXT
+                api_key TEXT,
+                model TEXT NOT NULL DEFAULT '',
+                is_default INTEGER NOT NULL DEFAULT 0
             )
             "#,
+        )
+        .execute(&pool)
+        .await?;
+        // Миграция старых БД: у подключения появились модель и флаг дефолта.
+        migrate_llm_connection_columns(&pool).await?;
+        // Одна дефолтная LLM: частичный уникальный индекс на is_default=1.
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_connections_default
+             ON llm_connections(is_default) WHERE is_default = 1",
         )
         .execute(&pool)
         .await?;
@@ -854,34 +871,48 @@ impl TraceStore {
 
     // === Методы для управления подключениями к LLM ===
 
-    /// Создать подключение к LLM: название, url API и ключ доступа.
+    fn llm_row(&self, r: &sqlx::sqlite::SqliteRow) -> LlmConnection {
+        LlmConnection {
+            id: r.get("id"),
+            name: r.get("name"),
+            api_url: r.get("api_url"),
+            api_key: r.get("api_key"),
+            model_name: r.get("model"),
+            is_default: r.get::<i64, _>("is_default") != 0,
+        }
+    }
+
+    /// Создать подключение к LLM: название, url API, ключ доступа и модель.
     pub async fn create_llm_connection(
         &self,
         spec: &LlmConnectionSpec,
     ) -> Result<i64, sqlx::Error> {
-        let result =
-            sqlx::query("INSERT INTO llm_connections (name, api_url, api_key) VALUES (?, ?, ?)")
-                .bind(&spec.name)
-                .bind(&spec.api_url)
-                .bind(&spec.api_key)
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query(
+            "INSERT INTO llm_connections (name, api_url, api_key, model) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&spec.name)
+        .bind(&spec.api_url)
+        .bind(&spec.api_key)
+        .bind(&spec.model_name)
+        .execute(&self.pool)
+        .await?;
         Ok(result.last_insert_rowid())
     }
 
-    /// Изменить подключение: название, url API, ключ. Возвращает false, если
-    /// подключения нет.
+    /// Изменить подключение: название, url API, ключ, модель. Возвращает false,
+    /// если подключения нет.
     pub async fn update_llm_connection(
         &self,
         id: i64,
         spec: &LlmConnectionSpec,
     ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
-            "UPDATE llm_connections SET name = ?, api_url = ?, api_key = ? WHERE id = ?",
+            "UPDATE llm_connections SET name = ?, api_url = ?, api_key = ?, model = ? WHERE id = ?",
         )
         .bind(&spec.name)
         .bind(&spec.api_url)
         .bind(&spec.api_key)
+        .bind(&spec.model_name)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -890,7 +921,8 @@ impl TraceStore {
 
     /// Удалить подключение. Агенты, ссылавшиеся на него, остаются без
     /// подключения (llm_id обнуляется каскадом на новых БД, на старых —
-    /// ссылка просто не находится) и работают на дефолтной LLM из env.
+    /// ссылка просто не находится) и, как агенты без подключения, ходят к
+    /// дефолтной LLM. Было дефолтным — дефолт исчезает вместе с ним.
     pub async fn delete_llm_connection(&self, id: i64) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM llm_connections WHERE id = ?")
             .bind(id)
@@ -900,39 +932,66 @@ impl TraceStore {
     }
 
     pub async fn get_llm_connection(&self, id: i64) -> Result<Option<LlmConnection>, sqlx::Error> {
-        let row =
-            sqlx::query("SELECT id, name, api_url, api_key FROM llm_connections WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(row.map(|r| LlmConnection {
-            id: r.get("id"),
-            name: r.get("name"),
-            api_url: r.get("api_url"),
-            api_key: r.get("api_key"),
-        }))
+        let row = sqlx::query(
+            "SELECT id, name, api_url, api_key, model, is_default
+             FROM llm_connections WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| self.llm_row(&r)))
     }
 
     pub async fn list_llm_connections(&self) -> Result<Vec<LlmConnection>, sqlx::Error> {
-        let rows =
-            sqlx::query("SELECT id, name, api_url, api_key FROM llm_connections ORDER BY id")
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows
-            .iter()
-            .map(|r| LlmConnection {
-                id: r.get("id"),
-                name: r.get("name"),
-                api_url: r.get("api_url"),
-                api_key: r.get("api_key"),
-            })
-            .collect())
+        let rows = sqlx::query(
+            "SELECT id, name, api_url, api_key, model, is_default
+             FROM llm_connections ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| self.llm_row(r)).collect())
     }
 
-    /// LLM-конфиг агента из его подключения: url и ключ берутся из выбранного
-    /// подключения, своей модели и температуры у агента нет — модель дефолтная
-    /// (из env), температура 0.7. Агент без подключения (или со ссылкой на
-    /// удалённое) — дефолтные url/ключ из env.
+    /// Сделать подключение дефолтной LLM: дефолт снимается с остальных (одна
+    /// дефолтная LLM). Возвращает false, если подключения нет.
+    pub async fn set_default_llm(&self, id: i64) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE llm_connections SET is_default = 0 WHERE is_default = 1")
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query("UPDATE llm_connections SET is_default = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Снять выбор дефолтной LLM: ни одна LLM не дефолтная, агенты без своего
+    /// подключения остаются без LLM.
+    pub async fn clear_default_llm(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE llm_connections SET is_default = 0 WHERE is_default = 1")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Дефолтная LLM (одна). None — дефолт не выбран.
+    pub async fn default_llm_connection(&self) -> Result<Option<LlmConnection>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, name, api_url, api_key, model, is_default
+             FROM llm_connections WHERE is_default = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| self.llm_row(&r)))
+    }
+
+    /// LLM-конфиг агента: url, ключ и модель берутся из выбранного подключения,
+    /// а без него — из дефолтной LLM (выбранной на странице «LLM»). Своей
+    /// модели и температуры у агента нет — модель живёт в подключении,
+    /// температура 0.7. Ни подключения, ни дефолтной LLM нет — конфиг без url:
+    /// запуск агента не пройдёт (LlmClient ответит, что LLM не настроена).
     pub async fn llm_config_for(&self, agent: &AgentDef) -> Result<LlmConfig, sqlx::Error> {
         let mut llm = LlmConfig {
             model: None,
@@ -940,11 +999,16 @@ impl TraceStore {
             api_url: None,
             api_key: None,
         };
-        if let Some(llm_id) = agent.llm_id {
-            if let Some(conn) = self.get_llm_connection(llm_id).await? {
-                llm.api_url = Some(conn.api_url);
-                llm.api_key = conn.api_key;
-            }
+        // Своё подключение важнее дефолта; ссылка на удалённое — как отсутствие.
+        let conn = match agent.llm_id {
+            Some(id) => self.get_llm_connection(id).await?,
+            None => None,
+        };
+        let conn = conn.or(self.default_llm_connection().await?);
+        if let Some(conn) = conn {
+            llm.model = Some(conn.model_name);
+            llm.api_url = Some(conn.api_url);
+            llm.api_key = conn.api_key;
         }
         Ok(llm)
     }
@@ -1437,6 +1501,29 @@ async fn migrate_agents_llm_column(pool: &SqlitePool) -> Result<(), sqlx::Error>
     Ok(())
 }
 
+/// Миграция старых БД: у подключения к LLM появились модель (`model`) и флаг
+/// дефолта (`is_default`). Модель больше не из env — она живёт в подключении;
+/// старые строки получают пустую модель (их правит пользователь на странице).
+async fn migrate_llm_connection_columns(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let cols: Vec<String> = sqlx::query("PRAGMA table_info(llm_connections)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    if !cols.iter().any(|c| c == "model") {
+        sqlx::query("ALTER TABLE llm_connections ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await?;
+    }
+    if !cols.iter().any(|c| c == "is_default") {
+        sqlx::query("ALTER TABLE llm_connections ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1692,6 +1779,7 @@ mod tests {
                 name: "conn".to_string(),
                 api_url: "http://llm/v1".to_string(),
                 api_key: Some("key".to_string()),
+                model_name: "qwen3:0.6b".to_string(),
             })
             .await
             .unwrap();
@@ -1740,6 +1828,7 @@ mod tests {
                 name: "conn".to_string(),
                 api_url: "http://old/v1".to_string(),
                 api_key: Some("old-key".to_string()),
+                model_name: "qwen3:0.6b".to_string(),
             })
             .await
             .unwrap();
@@ -1764,6 +1853,7 @@ mod tests {
         let cfg = store.llm_config_for(dev).await.unwrap();
         assert_eq!(cfg.api_url.as_deref(), Some("http://old/v1"));
         assert_eq!(cfg.api_key.as_deref(), Some("old-key"));
+        assert_eq!(cfg.model.as_deref(), Some("qwen3:0.6b"));
         // Правка подключения — без перенастройки агентов: тот же llm_id, новый url/ключ.
         store
             .update_llm_connection(
@@ -1772,6 +1862,7 @@ mod tests {
                     name: "conn".to_string(),
                     api_url: "http://new/v1".to_string(),
                     api_key: Some("new-key".to_string()),
+                    model_name: "qwen3:1b".to_string(),
                 },
             )
             .await
@@ -1782,13 +1873,14 @@ mod tests {
         let cfg = store.llm_config_for(dev).await.unwrap();
         assert_eq!(cfg.api_url.as_deref(), Some("http://new/v1"));
         assert_eq!(cfg.api_key.as_deref(), Some("new-key"));
+        assert_eq!(cfg.model.as_deref(), Some("qwen3:1b"));
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
     }
 
     #[tokio::test]
-    async fn deleted_connection_drops_agents_to_env_default() {
+    async fn deleted_default_connection_clears_default_and_agent_has_no_llm() {
         let (path, file) = temp_db_path();
         let store = TraceStore::new(&path).await.unwrap();
         let conn = store
@@ -1796,9 +1888,11 @@ mod tests {
                 name: "conn".to_string(),
                 api_url: "http://conn/v1".to_string(),
                 api_key: Some("key".to_string()),
+                model_name: "qwen3:0.6b".to_string(),
             })
             .await
             .unwrap();
+        store.set_default_llm(conn).await.unwrap();
         let set_id = store
             .create_agent_set(
                 "ops",
@@ -1816,19 +1910,172 @@ mod tests {
             .await
             .unwrap();
         store.delete_llm_connection(conn).await.unwrap();
-        // Удалённое подключение исчезает из списка.
+        // Удалённое подключение исчезает из списка, дефолт сбрасывается.
         assert!(store
             .list_llm_connections()
             .await
             .unwrap()
             .iter()
             .all(|c| c.id != conn));
-        // Агент, его использовавший, остаётся без подключения — env-дефолт.
+        assert!(store.default_llm_connection().await.unwrap().is_none());
+        // Агент, его использовавший, остаётся без подключения — LLM нет.
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
         let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
         let cfg = store.llm_config_for(dev).await.unwrap();
         assert!(cfg.api_url.is_none());
         assert!(cfg.api_key.is_none());
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn agent_without_connection_uses_default_llm() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let conn = store
+            .create_llm_connection(&LlmConnectionSpec {
+                name: "conn".to_string(),
+                api_url: "http://default/v1".to_string(),
+                api_key: Some("default-key".to_string()),
+                model_name: "qwen3:0.6b".to_string(),
+            })
+            .await
+            .unwrap();
+        store.set_default_llm(conn).await.unwrap();
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[AgentSpec {
+                    name: "dev".to_string(),
+                    description: "Правила".to_string(),
+                    tools: vec![],
+                    max_iterations: 3,
+                    llm_id: None,
+                    parent: None,
+                    skills: vec![],
+                    commands: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        // Агент без своего подключения ходит к дефолтной LLM: url, ключ и модель.
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
+        let cfg = store.llm_config_for(dev).await.unwrap();
+        assert_eq!(cfg.api_url.as_deref(), Some("http://default/v1"));
+        assert_eq!(cfg.api_key.as_deref(), Some("default-key"));
+        assert_eq!(cfg.model.as_deref(), Some("qwen3:0.6b"));
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn own_connection_wins_over_default() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let default = store
+            .create_llm_connection(&LlmConnectionSpec {
+                name: "default".to_string(),
+                api_url: "http://default/v1".to_string(),
+                api_key: None,
+                model_name: "default-model".to_string(),
+            })
+            .await
+            .unwrap();
+        store.set_default_llm(default).await.unwrap();
+        let own = store
+            .create_llm_connection(&LlmConnectionSpec {
+                name: "own".to_string(),
+                api_url: "http://own/v1".to_string(),
+                api_key: Some("own-key".to_string()),
+                model_name: "own-model".to_string(),
+            })
+            .await
+            .unwrap();
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[AgentSpec {
+                    name: "dev".to_string(),
+                    description: "Правила".to_string(),
+                    tools: vec![],
+                    max_iterations: 3,
+                    llm_id: Some(own),
+                    parent: None,
+                    skills: vec![],
+                    commands: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        // У агента со своим подключением дефолтная LLM не влияет.
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
+        let cfg = store.llm_config_for(dev).await.unwrap();
+        assert_eq!(cfg.api_url.as_deref(), Some("http://own/v1"));
+        assert_eq!(cfg.api_key.as_deref(), Some("own-key"));
+        assert_eq!(cfg.model.as_deref(), Some("own-model"));
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn setting_default_moves_it_and_clearing_removes_it() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let a = store
+            .create_llm_connection(&LlmConnectionSpec {
+                name: "a".to_string(),
+                api_url: "http://a/v1".to_string(),
+                api_key: None,
+                model_name: "a-model".to_string(),
+            })
+            .await
+            .unwrap();
+        let b = store
+            .create_llm_connection(&LlmConnectionSpec {
+                name: "b".to_string(),
+                api_url: "http://b/v1".to_string(),
+                api_key: None,
+                model_name: "b-model".to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(store.default_llm_connection().await.unwrap().is_none());
+        store.set_default_llm(a).await.unwrap();
+        assert_eq!(store.default_llm_connection().await.unwrap().unwrap().id, a);
+        // Новый дефолт снимает прежний: дефолтная LLM одна.
+        store.set_default_llm(b).await.unwrap();
+        assert_eq!(store.default_llm_connection().await.unwrap().unwrap().id, b);
+        // Снять выбор: ни одна не дефолтная.
+        store.clear_default_llm().await.unwrap();
+        assert!(store.default_llm_connection().await.unwrap().is_none());
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn connection_keeps_model_and_default_flag() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let conn = store
+            .create_llm_connection(&LlmConnectionSpec {
+                name: "conn".to_string(),
+                api_url: "http://llm/v1".to_string(),
+                api_key: Some("key".to_string()),
+                model_name: "qwen3:0.6b".to_string(),
+            })
+            .await
+            .unwrap();
+        store.set_default_llm(conn).await.unwrap();
+        let listed = store.list_llm_connections().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].model_name, "qwen3:0.6b");
+        assert!(listed[0].is_default);
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);

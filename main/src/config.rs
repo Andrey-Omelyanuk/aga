@@ -44,14 +44,14 @@ pub struct RoleConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
-    /// Модель LLM. Пустая/отсутствующая — используется дефолт из LLM_MODEL.
+    /// Модель из подключения к LLM (своей у агента нет).
     #[serde(default)]
     pub model: Option<String>,
     pub temperature: f32,
-    /// Адрес API выбранного подключения к LLM; отсутствует — дефолтный из env.
+    /// Адрес API подключения к LLM. Отсутствует — LLM не выбрана, запуск не пройдёт.
     #[serde(default)]
     pub api_url: Option<String>,
-    /// Ключ доступа выбранного подключения; отсутствует — ключ из env.
+    /// Ключ доступа подключения; отсутствует — запросы без ключа.
     #[serde(default)]
     pub api_key: Option<String>,
 }

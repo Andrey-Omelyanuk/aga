@@ -207,6 +207,7 @@ mod tests {
                 name: "conn-a".into(),
                 api_url: "http://a/v1".into(),
                 api_key: Some("key-a".into()),
+                model_name: "qwen3:0.6b".into(),
             })
             .await
             .unwrap();
@@ -215,6 +216,7 @@ mod tests {
                 name: "conn-b".into(),
                 api_url: "http://b/v1".into(),
                 api_key: None,
+                model_name: "qwen3:1b".into(),
             })
             .await
             .unwrap();
@@ -250,13 +252,13 @@ mod tests {
 
         // В чате @Agent.<имя> запускает именно этого агента: его правила идут в
         // промпт, инструменты — в белый список исполнения, LLM — из его
-        // подключения (url и ключ). Своей модели у агента нет.
+        // подключения (url, ключ и модель).
         let (dev, _) = resolve_agent(&store, &set, "dev").await.unwrap().unwrap();
         assert_eq!(dev.prompt, "Правила разработчика");
         assert_eq!(dev.tools, vec!["git".to_string(), "make".to_string()]);
         assert_eq!(dev.llm.api_url.as_deref(), Some("http://a/v1"));
         assert_eq!(dev.llm.api_key.as_deref(), Some("key-a"));
-        assert!(dev.llm.model.is_none());
+        assert_eq!(dev.llm.model.as_deref(), Some("qwen3:0.6b"));
 
         let (deploy, _) = resolve_agent(&store, &set, "deploy")
             .await
@@ -266,7 +268,7 @@ mod tests {
         assert_eq!(deploy.tools, vec!["docker".to_string()]);
         assert_eq!(deploy.llm.api_url.as_deref(), Some("http://b/v1"));
         assert!(deploy.llm.api_key.is_none());
-        assert!(deploy.llm.model.is_none());
+        assert_eq!(deploy.llm.model.as_deref(), Some("qwen3:1b"));
 
         // Несуществующего агента нет — отказа нет, просто нет конфига.
         assert!(resolve_agent(&store, &set, "nosuch")
@@ -277,7 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_without_connection_uses_default_env_llm() {
+    async fn agent_without_connection_and_default_has_no_llm() {
         let (store, file) = store().await;
         let set_id = store
             .create_agent_set(
@@ -297,9 +299,49 @@ mod tests {
             .unwrap();
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
         let (config, _) = resolve_agent(&store, &set, "dev").await.unwrap().unwrap();
-        // Без подключения у агента нет url и ключа — их даст env-дефолт ядра.
+        // Без подключения у агента нет url, ключа и модели: env-дефолта больше
+        // нет, дефолтная LLM не выбрана — запуск не пройдёт.
         assert!(config.llm.api_url.is_none());
         assert!(config.llm.api_key.is_none());
+        assert!(config.llm.model.is_none());
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn agent_without_connection_uses_default_llm() {
+        let (store, file) = store().await;
+        let default = store
+            .create_llm_connection(&crate::trace::LlmConnectionSpec {
+                name: "default".into(),
+                api_url: "http://default/v1".into(),
+                api_key: Some("default-key".into()),
+                model_name: "qwen3:0.6b".into(),
+            })
+            .await
+            .unwrap();
+        store.set_default_llm(default).await.unwrap();
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[AgentSpec {
+                    name: "dev".to_string(),
+                    description: "Правила разработчика".to_string(),
+                    tools: vec!["git".to_string()],
+                    max_iterations: 3,
+                    llm_id: None,
+                    parent: None,
+                    skills: vec![],
+                    commands: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        let (config, _) = resolve_agent(&store, &set, "dev").await.unwrap().unwrap();
+        // Агент без подключения ходит к дефолтной LLM: url, ключ и модель из неё.
+        assert_eq!(config.llm.api_url.as_deref(), Some("http://default/v1"));
+        assert_eq!(config.llm.api_key.as_deref(), Some("default-key"));
+        assert_eq!(config.llm.model.as_deref(), Some("qwen3:0.6b"));
         cleanup(&file).await;
     }
 

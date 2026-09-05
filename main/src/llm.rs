@@ -29,28 +29,19 @@ struct Choice {
 #[derive(Debug, Clone)]
 pub struct LlmClient {
     client: Client,
-    api_url: String,
-    api_key: Option<String>,
-    default_model: String,
+}
+
+impl Default for LlmClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LlmClient {
-    pub fn new(api_url: &str, api_key: Option<String>, default_model: &str) -> Self {
+    pub fn new() -> Self {
         Self {
             client: Client::new(),
-            api_url: api_url.to_string(),
-            api_key,
-            default_model: default_model.to_string(),
         }
-    }
-
-    /// Модель роли, если задана и не пустая; иначе дефолтная из LLM_MODEL.
-    fn resolve_model(&self, config: &LlmConfig) -> String {
-        config
-            .model
-            .clone()
-            .filter(|m| !m.trim().is_empty())
-            .unwrap_or_else(|| self.default_model.clone())
     }
 
     pub async fn chat(
@@ -60,6 +51,12 @@ impl LlmClient {
         user_message: &str,
         history: &[String],
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Адрес обязателен: дефолтной LLM из env больше нет — url, ключ и
+        // модель живут в подключении (выбранном агентом или дефолтном).
+        let api_url = config.api_url.as_deref().ok_or_else(|| {
+            "LLM не настроена: у агента нет подключения и дефолтная LLM не выбрана".to_string()
+        })?;
+
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
             content: system_prompt.to_string(),
@@ -81,23 +78,19 @@ impl LlmClient {
         });
 
         let request = LlmRequest {
-            model: self.resolve_model(config),
+            model: config.model.clone().unwrap_or_default(),
             messages,
             temperature: config.temperature,
             max_tokens: Some(2048),
         };
 
-        // Адрес и ключ берутся из выбранного подключения, если оно задано;
-        // иначе — дефолтные из env (url/ключ ядра).
-        let api_url = config.api_url.as_deref().unwrap_or(&self.api_url);
-        let api_key = config.api_key.as_ref().or(self.api_key.as_ref());
         let mut req = self
             .client
             .post(format!("{api_url}/chat/completions"))
             .json(&request)
             .header("Content-Type", "application/json");
 
-        if let Some(key) = api_key {
+        if let Some(key) = config.api_key.as_ref() {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
 
@@ -123,42 +116,18 @@ impl LlmClient {
 mod tests {
     use super::*;
 
-    fn llm_config(model: Option<&str>) -> LlmConfig {
+    fn llm_config(model: &str, api_url: Option<&str>) -> LlmConfig {
         LlmConfig {
-            model: model.map(|m| m.to_string()),
+            model: Some(model.to_string()),
             temperature: 0.7,
-            api_url: None,
+            api_url: api_url.map(|u| u.to_string()),
             api_key: None,
         }
     }
 
-    #[test]
-    fn default_model_used_when_role_model_unset() {
-        let client = LlmClient::new("http://x/v1", None, "default-model");
-        assert_eq!(client.resolve_model(&llm_config(None)), "default-model");
-    }
-
-    #[test]
-    fn default_model_used_when_role_model_empty() {
-        let client = LlmClient::new("http://x/v1", None, "default-model");
-        assert_eq!(client.resolve_model(&llm_config(Some(""))), "default-model");
-        assert_eq!(
-            client.resolve_model(&llm_config(Some("  "))),
-            "default-model"
-        );
-    }
-
-    #[test]
-    fn role_model_overrides_default() {
-        let client = LlmClient::new("http://x/v1", None, "default-model");
-        assert_eq!(
-            client.resolve_model(&llm_config(Some("role-model"))),
-            "role-model"
-        );
-    }
-
-    /// Мок LLM-эндпоинта: записывает путь и Authorization, отвечает фиксированно.
-    type RecordedCalls = std::sync::Arc<tokio::sync::Mutex<Vec<(String, Option<String>)>>>;
+    /// Мок LLM-эндпоинта: записывает путь, Authorization и модель, отвечает
+    /// фиксированно.
+    type RecordedCalls = std::sync::Arc<tokio::sync::Mutex<Vec<(String, Option<String>, String)>>>;
     async fn mock_llm_server() -> (String, tokio::task::JoinHandle<()>, RecordedCalls) {
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -177,7 +146,13 @@ mod tests {
                         .and_then(|h| h.to_str().ok())
                         .map(|s| s.to_string());
                     let uri = req.uri().path().to_string();
-                    recorded.lock().await.push((uri, auth));
+                    let body: serde_json::Value = axum::body::to_bytes(req.into_body(), usize::MAX)
+                        .await
+                        .ok()
+                        .and_then(|b| serde_json::from_slice(&b).ok())
+                        .unwrap_or_default();
+                    let model = body["model"].as_str().unwrap_or_default().to_string();
+                    recorded.lock().await.push((uri, auth, model));
                     axum::Json(serde_json::json!({
                         "choices": [{"message": {"role": "assistant", "content": "ok"}}]
                     }))
@@ -191,36 +166,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chosen_connection_sends_its_url_and_key() {
+    async fn chat_uses_config_url_key_and_model() {
         let (api_url, server, recorded) = mock_llm_server().await;
-        let client = LlmClient::new(
-            "http://env-default/v1",
-            Some("env-key".to_string()),
-            "default-model",
-        );
-        let mut cfg = llm_config(None);
-        cfg.api_url = Some(api_url);
+        let client = LlmClient::new();
+        let mut cfg = llm_config("qwen3:0.6b", Some(&api_url));
         cfg.api_key = Some("conn-key".to_string());
         let resp = client.chat(&cfg, "sys", "hello", &[]).await.unwrap();
         assert_eq!(resp, "ok");
         let rec = recorded.lock().await;
         assert_eq!(rec.len(), 1);
-        // Запрос ушёл на url и с ключом выбранного подключения, не env-дефолта.
+        // Запрос ушёл на url подключения, с его ключом и его моделью.
         assert_eq!(rec[0].0, "/v1/chat/completions");
         assert_eq!(rec[0].1.as_deref(), Some("Bearer conn-key"));
+        assert_eq!(rec[0].2, "qwen3:0.6b");
         server.abort();
     }
 
     #[tokio::test]
-    async fn agent_without_connection_uses_env_default_url_and_key() {
-        let (api_url, server, recorded) = mock_llm_server().await;
-        let client = LlmClient::new(&api_url, Some("env-key".to_string()), "default-model");
-        let cfg = llm_config(None);
-        let resp = client.chat(&cfg, "sys", "hello", &[]).await.unwrap();
-        assert_eq!(resp, "ok");
-        let rec = recorded.lock().await;
-        assert_eq!(rec.len(), 1);
-        assert_eq!(rec[0].1.as_deref(), Some("Bearer env-key"));
-        server.abort();
+    async fn chat_without_configured_llm_fails() {
+        let client = LlmClient::new();
+        let cfg = llm_config("qwen3:0.6b", None);
+        let err = client.chat(&cfg, "sys", "hello", &[]).await.unwrap_err();
+        assert!(err.to_string().contains("LLM не настроена"));
     }
 }

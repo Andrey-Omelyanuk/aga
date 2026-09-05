@@ -311,7 +311,7 @@ mod tests {
                     api_key: None,
                 },
             },
-            LlmClient::new("http://localhost:9", None, "test"),
+            LlmClient::new(),
             store,
             Executor::Sh,
             None,
