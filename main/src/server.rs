@@ -212,6 +212,8 @@ pub fn create_router(state: AppState) -> Router {
             axum::routing::delete(remove_participant),
         )
         .route("/messages/:id/share", post(share_message))
+        .route("/messages/:id/thread", post(start_message_thread))
+        .route("/messages/:id/to-parent", post(post_message_to_parent))
         .route("/messages/:id/artifacts", get(message_artifacts))
         .route(
             "/workstations",
@@ -1284,8 +1286,6 @@ pub struct CreateChatRequest {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
-    pub parent_id: Option<i64>,
-    #[serde(default)]
     pub workstation_id: Option<i64>,
 }
 
@@ -1298,7 +1298,7 @@ async fn create_chat(
     match state
         .chat_store
         .create_chat(
-            payload.parent_id,
+            None,
             payload.title.as_deref(),
             user_id,
             payload.workstation_id,
@@ -1332,29 +1332,44 @@ async fn get_chat(
     if !can_read(&state, id, user_id).await {
         return Err(StatusCode::FORBIDDEN);
     }
-    let Some(chat) = state
-        .chat_store
-        .get_chat(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    let messages = state
-        .chat_store
-        .list_messages(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match chat_detail(&state, id).await {
+        Some(detail) => Ok(Json(detail)),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Деталь чата: сам чат, сообщения, участники и начатые в нём нити.
+/// Нити разворачиваются рекурсивно (своими сообщениями, участниками и
+/// вложенными нитями) — страница родителя рисует их свёрнутыми у сообщения.
+async fn chat_detail(state: &AppState, chat_id: i64) -> Option<serde_json::Value> {
+    let chat = state.chat_store.get_chat(chat_id).await.ok()?;
+    let messages = state.chat_store.list_messages(chat_id).await.ok()?;
     let participants = state
         .chat_store
-        .list_participants(id)
+        .list_participants(chat_id)
         .await
         .unwrap_or_default();
-    Ok(Json(serde_json::json!({
+    let mut threads = Vec::new();
+    for thread in state.chat_store.list_threads(chat_id).await.ok()? {
+        if let Some(detail) = chat_detail_boxed(state, thread.id).await {
+            threads.push(detail);
+        }
+    }
+    Some(serde_json::json!({
         "chat": chat,
         "messages": messages,
         "participants": participants,
-    })))
+        "threads": threads,
+    }))
+}
+
+/// Рекурсия `chat_detail` через boxed-фьючер: бесконечный размер типа
+/// (рекурсивный async fn) так не собирается.
+fn chat_detail_boxed(
+    state: &AppState,
+    chat_id: i64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send + '_>> {
+    Box::pin(chat_detail(state, chat_id))
 }
 
 async fn close_chat(
@@ -1385,8 +1400,6 @@ pub struct SendMessageRequest {
 #[derive(Serialize)]
 pub struct SendMessageResponse {
     pub message: Message,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_chat: Option<Chat>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub invited: Vec<String>,
 }
@@ -1402,7 +1415,6 @@ async fn send_message(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let mut created_chat: Option<Chat> = None;
     let mut invited: Vec<String> = Vec::new();
 
     // Команды — обычные сообщения с дополнительной реакцией.
@@ -1447,15 +1459,6 @@ async fn send_message(
                             .await
                             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                     }
-                }
-            }
-            ChatCommand::Start(title) => {
-                if let Ok(chat) = state
-                    .chat_store
-                    .create_chat(Some(chat_id), Some(&title), user_id, None)
-                    .await
-                {
-                    created_chat = Some(chat);
                 }
             }
             ChatCommand::End => {
@@ -1503,14 +1506,130 @@ async fn send_message(
             .publish(crate::centrifuge::message_payload(chat_id, message.id))
             .await;
 
-        Ok(Json(SendMessageResponse {
-            message,
-            created_chat,
-            invited,
-        }))
+        Ok(Json(SendMessageResponse { message, invited }))
     } else {
         Err(StatusCode::BAD_REQUEST)
     }
+}
+
+#[derive(Deserialize)]
+pub struct StartThreadRequest {
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Serialize)]
+pub struct StartThreadResponse {
+    pub chat: Chat,
+    pub message: Message,
+}
+
+/// Начать нить от сообщения: дочерний чат с привязкой к сообщению и первым
+/// сообщением, несущим заголовок нити.
+async fn start_message_thread(
+    Path(message_id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<StartThreadRequest>,
+) -> Result<Json<StartThreadResponse>, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    let Some(origin) = state
+        .chat_store
+        .get_message(message_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    if !can_write(&state, origin.chat_id, user_id).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Some((chat, message)) = state
+        .chat_store
+        .start_thread(
+            origin.chat_id,
+            message_id,
+            &payload.title,
+            &payload.body,
+            user_id,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+
+    // Первое сообщение нити — обычное сообщение: реактивные агенты по
+    // упоминаниям @Agent.<имя> из набора проекта работают в нити как в чате.
+    for name in crate::chat::mentioned_roles(&payload.body) {
+        if let Ok(agent_user_id) = state.chat_store.ensure_agent_user(&name).await {
+            let context = build_context(&state, chat.id)
+                .await
+                .unwrap_or_else(|| payload.body.clone());
+            state
+                .reactive
+                .enqueue(chat.id, &name, agent_user_id, context);
+        }
+    }
+
+    // Обновление и родителю (появилась свёрнутая нить), и самой нити.
+    state
+        .centrifuge
+        .publish(crate::centrifuge::message_payload(
+            origin.chat_id,
+            message.id,
+        ))
+        .await;
+    state
+        .centrifuge
+        .publish(crate::centrifuge::message_payload(chat.id, message.id))
+        .await;
+    Ok(Json(StartThreadResponse { chat, message }))
+}
+
+/// Отправить сообщение нити в родительский чат: копия остаётся в нити,
+/// в ленте родителя появляется её копия со ссылкой на сообщение-источник.
+async fn post_message_to_parent(
+    Path(message_id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Message>, StatusCode> {
+    let user_id = current_user(&state, &headers).await?;
+    let Some(original) = state
+        .chat_store
+        .get_message(message_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let Some(thread) = state
+        .chat_store
+        .get_chat(original.chat_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let Some(parent_id) = thread.parent_id else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    if !can_write(&state, parent_id, user_id).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Some(message) = state
+        .chat_store
+        .post_to_parent(message_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    state
+        .centrifuge
+        .publish(crate::centrifuge::message_payload(parent_id, message.id))
+        .await;
+    Ok(Json(message))
 }
 
 async fn list_chat_messages(
@@ -3734,6 +3853,265 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        cleanup(&file).await;
+    }
+
+    fn json_get(body: &str, path: &[&str]) -> Option<serde_json::Value> {
+        let mut v = serde_json::from_str::<serde_json::Value>(body).ok()?;
+        for key in path {
+            v = v.get(*key)?.clone();
+        }
+        Some(v)
+    }
+
+    #[tokio::test]
+    async fn thread_created_via_api_appears_collapsed_in_parent() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/chats",
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "s"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let chat_id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let (_, body) = post_json(
+            &format!("/chats/{chat_id}/messages"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"body": "задача"}),
+        )
+        .await;
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+
+        let (status, _) = post_json(
+            &format!("/messages/{msg_id}/thread"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "Обсуждение", "body": "Что падает?"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = get(&format!("/chats/{chat_id}"), &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        // Нить привязана к сообщению и видна в родителе свёрнутой по заголовку
+        // первого сообщения; у самого чата-нити заголовка нет.
+        let threads = json_get(&body, &["threads"]).unwrap();
+        let threads = threads.as_array().unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(
+            threads[0]["chat"]["start_message_id"].as_i64(),
+            Some(msg_id)
+        );
+        assert_eq!(threads[0]["chat"]["title"], serde_json::Value::Null);
+        assert_eq!(
+            threads[0]["messages"][0]["title"].as_str(),
+            Some("Обсуждение")
+        );
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn multiple_threads_from_one_message_via_api() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (_, body) = post_json(
+            "/chats",
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "s"}),
+        )
+        .await;
+        let chat_id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let (_, body) = post_json(
+            &format!("/chats/{chat_id}/messages"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"body": "задача"}),
+        )
+        .await;
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        for (title, text) in [("Разбор демо", "Первое."), ("Таймеры", "Второе.")]
+        {
+            let (status, _) = post_json(
+                &format!("/messages/{msg_id}/thread"),
+                &alice,
+                state.clone(),
+                serde_json::json!({"title": title, "body": text}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (_, body) = get(&format!("/chats/{chat_id}"), &alice, state.clone()).await;
+        let threads = json_get(&body, &["threads"]).unwrap();
+        let threads = threads.as_array().unwrap();
+        assert_eq!(threads.len(), 2);
+        let titles: Vec<&str> = threads
+            .iter()
+            .map(|t| t["messages"][0]["title"].as_str().unwrap())
+            .collect();
+        assert!(titles.contains(&"Разбор демо"));
+        assert!(titles.contains(&"Таймеры"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn start_command_no_longer_creates_thread_via_api() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (_, body) = post_json(
+            "/chats",
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "s"}),
+        )
+        .await;
+        let chat_id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let (_, body) = post_json(
+            &format!("/chats/{chat_id}/messages"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"body": "задача"}),
+        )
+        .await;
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        // #start больше не команда: сообщение уходит как обычное, нить не
+        // создаётся — нити начинаются только действием у сообщения.
+        let (status, _) = post_json(
+            &format!("/chats/{chat_id}/messages"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"body": "#start Новая нить", "parent_id": msg_id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body) = get(&format!("/chats/{chat_id}"), &alice, state.clone()).await;
+        let threads = json_get(&body, &["threads"]).unwrap();
+        assert!(threads.as_array().unwrap().is_empty());
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn message_posted_to_parent_via_api_carries_thread_link() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (_, body) = post_json(
+            "/chats",
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "s"}),
+        )
+        .await;
+        let chat_id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let (_, body) = post_json(
+            &format!("/chats/{chat_id}/messages"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"body": "задача"}),
+        )
+        .await;
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        let (_, body) = post_json(
+            &format!("/messages/{msg_id}/thread"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "Обсуждение", "body": "Что падает?"}),
+        )
+        .await;
+        let thread_id = json_get(&body, &["chat", "id"]).unwrap().as_i64().unwrap();
+        let (_, body) = post_json(
+            &format!("/chats/{thread_id}/messages"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"body": "Гоняю run-tests."}),
+        )
+        .await;
+        let reply_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+
+        let (status, _) = post_json(
+            &format!("/messages/{reply_id}/to-parent"),
+            &alice,
+            state.clone(),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // В ленте родителя появилась копия со ссылкой на сообщение-источник;
+        // оригинал остался в нити.
+        let (_, body) = get(&format!("/chats/{chat_id}"), &alice, state.clone()).await;
+        let messages = json_get(&body, &["messages"]).unwrap();
+        let messages = messages.as_array().unwrap();
+        let copy = messages
+            .iter()
+            .find(|m| m["thread_of_id"].as_i64() == Some(msg_id))
+            .expect("копия в родителе со ссылкой на источник");
+        assert_eq!(copy["body"].as_str(), Some("Гоняю run-tests."));
+        let (_, body) = get(&format!("/chats/{thread_id}"), &alice, state.clone()).await;
+        let thread_messages = json_get(&body, &["messages"]).unwrap();
+        assert!(thread_messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"].as_i64() == Some(reply_id)));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn list_chats_via_api_shows_only_root_chats() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (_, body) = post_json(
+            "/chats",
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "s"}),
+        )
+        .await;
+        let chat_id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let (_, body) = post_json(
+            &format!("/chats/{chat_id}/messages"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"body": "задача"}),
+        )
+        .await;
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        post_json(
+            &format!("/messages/{msg_id}/thread"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "Обсуждение", "body": "Что падает?"}),
+        )
+        .await;
+        // В списке чатов — только корневые: нить не показывается.
+        let (status, body) = get("/chats", &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let chats = serde_json::from_str::<serde_json::Value>(&body).unwrap();
+        let chats = chats.as_array().unwrap();
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0]["id"].as_i64(), Some(chat_id));
         cleanup(&file).await;
     }
 }
