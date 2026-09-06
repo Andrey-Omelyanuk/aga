@@ -1,5 +1,5 @@
 import { observer } from 'mobx-react-lite';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
@@ -17,6 +17,8 @@ const ChatPage = observer(() => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState('');
   const [currentChat, setCurrentChat] = useState<Chat | null>(null);
+  const currentChatRef = useRef<Chat | null>(null);
+  currentChatRef.current = currentChat;
 
   const chatId = id !== undefined && /^\d+$/.test(id) ? Number(id) : null;
 
@@ -31,6 +33,13 @@ const ChatPage = observer(() => {
       agents.push(agent.name);
     }
   }
+
+  const loadDetail = useCallback(
+    (id: number, onDone?: (c: Chat) => void) => {
+      void loadChatDetail(id).then(onDone).catch(() => {});
+    },
+    [],
+  );
 
   // Текущий чат: GET /chats/:id. Обновления — по websocket (centrifuge,
   // общий канал common): на событие нового сообщения перезагружаем деталь
@@ -49,7 +58,17 @@ const ChatPage = observer(() => {
         .catch(() => {});
     void load();
     const unsubscribe = pub_sub.on_message((data: any) => {
-      if (data?.chat_id === chatId) void load();
+      // Событие приходит и для самих нитей (их id — тоже чаты): перезагружаем
+      // открытый чат, если сообщение появилось в нём или в одной из его нитей.
+      const open = currentChatRef.current;
+      const threadIds: number[] = [];
+      if (open?.threads) {
+        for (const t of open.threads) {
+          threadIds.push(t.id);
+          for (const nt of t.threads) threadIds.push(nt.id);
+        }
+      }
+      if (data?.chat_id === chatId || threadIds.includes(data?.chat_id)) void load();
       void chats.load();
     });
     return () => {
@@ -75,6 +94,10 @@ const ChatPage = observer(() => {
     const chat = new Chat({ title: 'Новая сессия' });
     await chat.create();
     navigate(`/chat/${chat.id}`);
+  };
+
+  const reloadDetail = () => {
+    if (chatId !== null) loadDetail(chatId, setCurrentChat);
   };
 
   return (
@@ -123,7 +146,7 @@ const ChatPage = observer(() => {
               <p>Выберите сессию или откройте новую</p>
             </EmptyState>
           ) : (
-            <MessageList chat={currentChat} />
+            <MessageList chat={currentChat} onChanged={reloadDetail} />
           )}
         </div>
         <div className="border-t border-slate-200 p-3.5">
