@@ -714,7 +714,8 @@ impl ChatStore {
         .execute(&mut *tx)
         .await?;
         let thread_id = result.last_insert_rowid();
-        self.add_participant_tx(&mut tx, thread_id, author_id).await?;
+        self.add_participant_tx(&mut tx, thread_id, author_id)
+            .await?;
 
         let first = sqlx::query(
             "INSERT INTO messages (chat_id, parent_id, author_id, title, body) VALUES (?, ?, ?, ?, ?)",
@@ -729,7 +730,10 @@ impl ChatStore {
         let first_id = first.last_insert_rowid();
 
         tx.commit().await?;
-        let thread = self.get_chat(thread_id).await?.ok_or(sqlx::Error::RowNotFound)?;
+        let thread = self
+            .get_chat(thread_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
         let first_message = self
             .get_message(first_id)
             .await?
@@ -1808,10 +1812,8 @@ mod tests {
     }
 
     async fn chat_fixture() -> (ChatStore, std::path::PathBuf, i64) {
-        let path = std::env::temp_dir().join(format!(
-            "aga_chat_thread_test_{}.db",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_thread_test_{}.db", uuid::Uuid::new_v4()));
         let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
             .await
             .unwrap();
@@ -1951,11 +1953,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let copy = store
-            .post_to_parent(reply.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let copy = store.post_to_parent(reply.id).await.unwrap().unwrap();
         // Копия в ленте родителя со ссылкой на сообщение-источник нити;
         // оригинал остаётся в нити.
         assert_eq!(copy.chat_id, root.id);
@@ -1963,10 +1961,7 @@ mod tests {
         assert_eq!(copy.author_id, other);
         assert_eq!(copy.thread_of_id, Some(msg.id));
         assert!(store.get_message(reply.id).await.unwrap().is_some());
-        assert_eq!(
-            store.list_messages(thread.id).await.unwrap().len(),
-            2
-        );
+        assert_eq!(store.list_messages(thread.id).await.unwrap().len(), 2);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);

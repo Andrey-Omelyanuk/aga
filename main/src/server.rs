@@ -1297,7 +1297,12 @@ async fn create_chat(
     let user_id = current_user(&state, &headers).await?;
     match state
         .chat_store
-        .create_chat(None, payload.title.as_deref(), user_id, payload.workstation_id)
+        .create_chat(
+            None,
+            payload.title.as_deref(),
+            user_id,
+            payload.workstation_id,
+        )
         .await
     {
         Ok(chat) => Ok(Json(chat)),
@@ -1363,8 +1368,7 @@ async fn chat_detail(state: &AppState, chat_id: i64) -> Option<serde_json::Value
 fn chat_detail_boxed(
     state: &AppState,
     chat_id: i64,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send + '_>>
-{
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send + '_>> {
     Box::pin(chat_detail(state, chat_id))
 }
 
@@ -1571,7 +1575,10 @@ async fn start_message_thread(
     // Обновление и родителю (появилась свёрнутая нить), и самой нити.
     state
         .centrifuge
-        .publish(crate::centrifuge::message_payload(origin.chat_id, message.id))
+        .publish(crate::centrifuge::message_payload(
+            origin.chat_id,
+            message.id,
+        ))
         .await;
     state
         .centrifuge
@@ -3877,7 +3884,10 @@ mod tests {
             serde_json::json!({"body": "задача"}),
         )
         .await;
-        let msg_id = json_get(&body, &["message", "id"]).unwrap().as_i64().unwrap();
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
 
         let (status, _) = post_json(
             &format!("/messages/{msg_id}/thread"),
@@ -3926,8 +3936,12 @@ mod tests {
             serde_json::json!({"body": "задача"}),
         )
         .await;
-        let msg_id = json_get(&body, &["message", "id"]).unwrap().as_i64().unwrap();
-        for (title, text) in [("Разбор демо", "Первое."), ("Таймеры", "Второе.")] {
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        for (title, text) in [("Разбор демо", "Первое."), ("Таймеры", "Второе.")]
+        {
             let (status, _) = post_json(
                 &format!("/messages/{msg_id}/thread"),
                 &alice,
@@ -3969,7 +3983,10 @@ mod tests {
             serde_json::json!({"body": "задача"}),
         )
         .await;
-        let msg_id = json_get(&body, &["message", "id"]).unwrap().as_i64().unwrap();
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
         // #start больше не команда: сообщение уходит как обычное, нить не
         // создаётся — нити начинаются только действием у сообщения.
         let (status, _) = post_json(
@@ -4005,7 +4022,10 @@ mod tests {
             serde_json::json!({"body": "задача"}),
         )
         .await;
-        let msg_id = json_get(&body, &["message", "id"]).unwrap().as_i64().unwrap();
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
         let (_, body) = post_json(
             &format!("/messages/{msg_id}/thread"),
             &alice,
@@ -4021,7 +4041,10 @@ mod tests {
             serde_json::json!({"body": "Гоняю run-tests."}),
         )
         .await;
-        let reply_id = json_get(&body, &["message", "id"]).unwrap().as_i64().unwrap();
+        let reply_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
 
         let (status, _) = post_json(
             &format!("/messages/{reply_id}/to-parent"),
@@ -4071,7 +4094,10 @@ mod tests {
             serde_json::json!({"body": "задача"}),
         )
         .await;
-        let msg_id = json_get(&body, &["message", "id"]).unwrap().as_i64().unwrap();
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
         post_json(
             &format!("/messages/{msg_id}/thread"),
             &alice,
