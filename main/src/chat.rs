@@ -86,7 +86,6 @@ pub struct InterruptedSession {
 pub enum ChatCommand {
     Invite(String),
     Kick(String),
-    Start(String),
     End,
 }
 
@@ -1106,6 +1105,8 @@ fn artifact_from_row(r: &sqlx::sqlite::SqliteRow) -> Artifact {
 }
 
 /// Распознать команду по первой строке сообщения. Не команда → None.
+/// `#start` командой больше не является: нити начинаются только действием
+/// у сообщения (см. историю message-threads).
 pub fn parse_command(body: &str) -> Option<ChatCommand> {
     let first = body.lines().next()?.trim();
     let mut parts = first.split_whitespace();
@@ -1113,18 +1114,6 @@ pub fn parse_command(body: &str) -> Option<ChatCommand> {
     match cmd {
         "#invite" => parts.next().map(|n| ChatCommand::Invite(clean_at(n))),
         "#kick" => parts.next().map(|n| ChatCommand::Kick(clean_at(n))),
-        "#start" => {
-            let title = first
-                .split_whitespace()
-                .skip(1)
-                .collect::<Vec<_>>()
-                .join(" ");
-            if title.is_empty() {
-                None
-            } else {
-                Some(ChatCommand::Start(title))
-            }
-        }
         "#end" => Some(ChatCommand::End),
         _ => None,
     }
@@ -1162,13 +1151,11 @@ mod tests {
             parse_command("#kick @B"),
             Some(ChatCommand::Kick("B".into()))
         );
-        assert_eq!(
-            parse_command("#start New thread"),
-            Some(ChatCommand::Start("New thread".into()))
-        );
         assert_eq!(parse_command("#end"), Some(ChatCommand::End));
         assert_eq!(parse_command("hello"), None);
         assert_eq!(parse_command("\n#start X"), None);
+        // #start больше не команда: нити начинаются действием у сообщения.
+        assert_eq!(parse_command("#start New thread"), None);
     }
 
     #[test]

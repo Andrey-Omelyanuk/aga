@@ -1385,8 +1385,6 @@ pub struct SendMessageRequest {
 #[derive(Serialize)]
 pub struct SendMessageResponse {
     pub message: Message,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_chat: Option<Chat>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub invited: Vec<String>,
 }
@@ -1402,7 +1400,6 @@ async fn send_message(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let mut created_chat: Option<Chat> = None;
     let mut invited: Vec<String> = Vec::new();
 
     // Команды — обычные сообщения с дополнительной реакцией.
@@ -1447,15 +1444,6 @@ async fn send_message(
                             .await
                             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                     }
-                }
-            }
-            ChatCommand::Start(title) => {
-                if let Ok(chat) = state
-                    .chat_store
-                    .create_chat(Some(chat_id), Some(&title), user_id, None)
-                    .await
-                {
-                    created_chat = Some(chat);
                 }
             }
             ChatCommand::End => {
@@ -1503,11 +1491,7 @@ async fn send_message(
             .publish(crate::centrifuge::message_payload(chat_id, message.id))
             .await;
 
-        Ok(Json(SendMessageResponse {
-            message,
-            created_chat,
-            invited,
-        }))
+        Ok(Json(SendMessageResponse { message, invited }))
     } else {
         Err(StatusCode::BAD_REQUEST)
     }
