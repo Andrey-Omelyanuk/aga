@@ -23,6 +23,10 @@ pub struct Chat {
     pub parent_id: Option<i64>,
     pub level: i32,
     pub title: Option<String>,
+    /// Сообщение, от которого началась нить (дочерний чат). У корневых чатов
+    /// (сессий, общих чатов) — None; заголовок нити живёт не здесь, а на её
+    /// первом сообщении.
+    pub start_message_id: Option<i64>,
     pub created_by_id: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -48,6 +52,12 @@ pub struct Message {
     pub share_of_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub last_message_id: Option<i64>,
+    /// Заголовок нити: задаётся на первом сообщении нити при её начале.
+    /// Обычные сообщения заголовка не несут.
+    pub title: Option<String>,
+    /// Сообщение в родительском чате, отправленное из нити в родителя: копия
+    /// сообщения нити со ссылкой на сообщение, от которого нить началась.
+    pub thread_of_id: Option<i64>,
     pub body: String,
 }
 
@@ -168,6 +178,7 @@ impl ChatStore {
                 parent_id INTEGER,
                 level INTEGER NOT NULL DEFAULT 0,
                 title TEXT,
+                start_message_id INTEGER,
                 created_by_id INTEGER NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -208,6 +219,8 @@ impl ChatStore {
                 share_of_id INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_message_id INTEGER,
+                title TEXT,
+                thread_of_id INTEGER,
                 body TEXT NOT NULL,
                 FOREIGN KEY (chat_id) REFERENCES chats(id)
             )
@@ -261,6 +274,15 @@ impl ChatStore {
                 "continues_session_id",
                 "continues_session_id INTEGER",
             )
+            .await?;
+        store
+            .ensure_column("chats", "start_message_id", "start_message_id INTEGER")
+            .await?;
+        store
+            .ensure_column("messages", "title", "title TEXT")
+            .await?;
+        store
+            .ensure_column("messages", "thread_of_id", "thread_of_id INTEGER")
             .await?;
 
         // Аноним-суперпользователь создаётся автоматически.
@@ -439,7 +461,7 @@ impl ChatStore {
 
     pub async fn get_chat(&self, id: i64) -> Result<Option<Chat>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, root_id, parent_id, level, title, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats WHERE id = ?",
+            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -448,11 +470,24 @@ impl ChatStore {
     }
 
     /// Список чатов для пользователя. Все участники видят все сессии
-    /// (персональной видимости нет), поэтому фильтра нет.
+    /// (персональной видимости нет), поэтому фильтра нет. В списке — только
+    /// корневые чаты: нити (дочерние чаты) живут внутри родителя, свёрнутые
+    /// у сообщения (см. историю message-threads).
     pub async fn list_chats_for_user(&self, _user_id: i64) -> Result<Vec<Chat>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, root_id, parent_id, level, title, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats ORDER BY updated_at DESC",
+            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats WHERE root_id = id ORDER BY updated_at DESC",
         )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(chat_from_row).collect())
+    }
+
+    /// Дочерние чаты-нити, начатые в этом чате (прямые наследники).
+    pub async fn list_threads(&self, parent_chat_id: i64) -> Result<Vec<Chat>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats WHERE parent_id = ? ORDER BY id",
+        )
+        .bind(parent_chat_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(chat_from_row).collect())
@@ -621,7 +656,7 @@ impl ChatStore {
 
     pub async fn get_message(&self, id: i64) -> Result<Option<Message>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, body FROM messages WHERE id = ?",
+            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body FROM messages WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -631,12 +666,124 @@ impl ChatStore {
 
     pub async fn list_messages(&self, chat_id: i64) -> Result<Vec<Message>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, body FROM messages WHERE chat_id = ? ORDER BY created_at, id",
+            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body FROM messages WHERE chat_id = ? ORDER BY created_at, id",
         )
         .bind(chat_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(message_from_row).collect())
+    }
+
+    /// Начать нить от сообщения: дочерний чат с привязкой к сообщению
+    /// (`start_message_id`) и первым сообщением, несущим заголовок нити.
+    /// Заголовок у самого чата-нити не хранится — у нити он один, на первом
+    /// сообщении. От одного сообщения можно начать сколько угодно нитей.
+    /// Первое сообщение нити отвечает на сообщение-источник (`parent_id`).
+    pub async fn start_thread(
+        &self,
+        parent_chat_id: i64,
+        message_id: i64,
+        title: &str,
+        body: &str,
+        author_id: i64,
+    ) -> Result<Option<(Chat, Message)>, sqlx::Error> {
+        let parent = self.get_chat(parent_chat_id).await?;
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        if parent.state != "OPEN" || parent.level + 1 > MAX_CHAT_LEVEL {
+            return Ok(None);
+        }
+        let origin = self.get_message(message_id).await?;
+        let Some(origin) = origin else {
+            return Ok(None);
+        };
+        if origin.chat_id != parent_chat_id {
+            return Ok(None);
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            "INSERT INTO chats (root_id, parent_id, level, title, start_message_id, created_by_id) VALUES (?, ?, ?, NULL, ?, ?)",
+        )
+        .bind(parent.root_id)
+        .bind(parent_chat_id)
+        .bind(parent.level + 1)
+        .bind(message_id)
+        .bind(author_id)
+        .execute(&mut *tx)
+        .await?;
+        let thread_id = result.last_insert_rowid();
+        self.add_participant_tx(&mut tx, thread_id, author_id).await?;
+
+        let first = sqlx::query(
+            "INSERT INTO messages (chat_id, parent_id, author_id, title, body) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(thread_id)
+        .bind(message_id)
+        .bind(author_id)
+        .bind(title)
+        .bind(body)
+        .execute(&mut *tx)
+        .await?;
+        let first_id = first.last_insert_rowid();
+
+        tx.commit().await?;
+        let thread = self.get_chat(thread_id).await?.ok_or(sqlx::Error::RowNotFound)?;
+        let first_message = self
+            .get_message(first_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        Ok(Some((thread, first_message)))
+    }
+
+    /// Отправить сообщение нити в родительский чат: оригинал остаётся в нити,
+    /// а в ленте родителя появляется копия со ссылкой (`thread_of_id`) на
+    /// сообщение, от которого нить началась. Автор копии — автор оригинала.
+    pub async fn post_to_parent(
+        &self,
+        thread_message_id: i64,
+    ) -> Result<Option<Message>, sqlx::Error> {
+        let original = self.get_message(thread_message_id).await?;
+        let Some(original) = original else {
+            return Ok(None);
+        };
+        let thread = self.get_chat(original.chat_id).await?;
+        let Some(thread) = thread else {
+            return Ok(None);
+        };
+        let Some(parent_id) = thread.parent_id else {
+            return Ok(None);
+        };
+        let Some(origin_id) = thread.start_message_id else {
+            return Ok(None);
+        };
+        let parent = self.get_chat(parent_id).await?;
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        if parent.state != "OPEN" {
+            return Ok(None);
+        }
+
+        let result = sqlx::query(
+            "INSERT INTO messages (chat_id, parent_id, author_id, title, thread_of_id, body) VALUES (?, NULL, ?, ?, ?, ?)",
+        )
+        .bind(parent_id)
+        .bind(original.author_id)
+        .bind(&original.title)
+        .bind(origin_id)
+        .bind(&original.body)
+        .execute(&self.pool)
+        .await?;
+        let new_id = result.last_insert_rowid();
+
+        sqlx::query("UPDATE chats SET updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(parent_id)
+            .execute(&self.pool)
+            .await?;
+
+        self.get_message(new_id).await
     }
 
     /// Зашарить сообщение в целевой чат. Копия несёт тело целиком;
@@ -1070,6 +1217,7 @@ fn chat_from_row(r: &sqlx::sqlite::SqliteRow) -> Chat {
         parent_id: r.get("parent_id"),
         level: r.get("level"),
         title: r.get("title"),
+        start_message_id: r.get("start_message_id"),
         created_by_id: r.get("created_by_id"),
         created_at: parse_dt(&r.get::<String, _>("created_at")),
         updated_at: parse_dt(&r.get::<String, _>("updated_at")),
@@ -1089,6 +1237,8 @@ fn message_from_row(r: &sqlx::sqlite::SqliteRow) -> Message {
         share_of_id: r.get("share_of_id"),
         created_at: parse_dt(&r.get::<String, _>("created_at")),
         last_message_id: r.get("last_message_id"),
+        title: r.get("title"),
+        thread_of_id: r.get("thread_of_id"),
         body: r.get("body"),
     }
 }
@@ -1652,6 +1802,171 @@ mod tests {
             .await
             .unwrap();
         assert!(store.continues_session_id(s.id).await.unwrap().is_none());
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    async fn chat_fixture() -> (ChatStore, std::path::PathBuf, i64) {
+        let path = std::env::temp_dir().join(format!(
+            "aga_chat_thread_test_{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let user = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        (store, path, user)
+    }
+
+    #[tokio::test]
+    async fn thread_starts_from_message_with_title_on_first_message() {
+        let (store, path, user) = chat_fixture().await;
+        let root = store
+            .create_chat(None, Some("s"), user, None)
+            .await
+            .unwrap();
+        let msg = store
+            .send_message(root.id, user, "задача", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let (thread, first) = store
+            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", user)
+            .await
+            .unwrap()
+            .unwrap();
+        // Нить — дочерний чат, привязанный к сообщению; у самого чата-нити
+        // заголовка нет.
+        assert_eq!(thread.parent_id, Some(root.id));
+        assert_eq!(thread.start_message_id, Some(msg.id));
+        assert_eq!(thread.title, None);
+        // Заголовок живёт на первом сообщении нити, оно отвечает на источник.
+        assert_eq!(first.chat_id, thread.id);
+        assert_eq!(first.title.as_deref(), Some("Обсуждение"));
+        assert_eq!(first.body, "Что падает?");
+        assert_eq!(first.parent_id, Some(msg.id));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn one_message_spawns_several_threads() {
+        let (store, path, user) = chat_fixture().await;
+        let root = store
+            .create_chat(None, Some("s"), user, None)
+            .await
+            .unwrap();
+        let msg = store
+            .send_message(root.id, user, "задача", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .start_thread(root.id, msg.id, "Разбор демо", "Первое.", user)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .start_thread(root.id, msg.id, "Таймеры", "Второе.", user)
+            .await
+            .unwrap()
+            .unwrap();
+        let threads = store.list_threads(root.id).await.unwrap();
+        assert_eq!(threads.len(), 2);
+        assert!(threads.iter().all(|t| t.start_message_id == Some(msg.id)));
+        // Заголовки нитей — по своим первым сообщениям.
+        let mut titles: Vec<String> = Vec::new();
+        for t in &threads {
+            let first = &store.list_messages(t.id).await.unwrap()[0];
+            titles.push(first.title.clone().unwrap());
+        }
+        assert!(titles.contains(&"Разбор демо".to_string()));
+        assert!(titles.contains(&"Таймеры".to_string()));
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn threads_not_listed_for_user() {
+        let (store, path, user) = chat_fixture().await;
+        let root = store
+            .create_chat(None, Some("s"), user, None)
+            .await
+            .unwrap();
+        let general = store
+            .create_chat(None, Some("g"), user, None)
+            .await
+            .unwrap();
+        let msg = store
+            .send_message(root.id, user, "задача", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", user)
+            .await
+            .unwrap()
+            .unwrap();
+        let chats = store.list_chats_for_user(user).await.unwrap();
+        let ids: Vec<i64> = chats.iter().map(|c| c.id).collect();
+        // В списке — только корневые чаты (сессии и общие чаты), нитей нет.
+        assert!(ids.contains(&root.id));
+        assert!(ids.contains(&general.id));
+        assert_eq!(ids.len(), 2);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn post_to_parent_puts_copy_with_thread_link() {
+        let (store, path, user) = chat_fixture().await;
+        let other = store
+            .insert_user("alice", "human", false, None, None)
+            .await
+            .unwrap();
+        let root = store
+            .create_chat(None, Some("s"), user, None)
+            .await
+            .unwrap();
+        let msg = store
+            .send_message(root.id, user, "задача", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let (thread, _) = store
+            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", user)
+            .await
+            .unwrap()
+            .unwrap();
+        let reply = store
+            .send_message(thread.id, other, "Гоняю run-tests.", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let copy = store
+            .post_to_parent(reply.id)
+            .await
+            .unwrap()
+            .unwrap();
+        // Копия в ленте родителя со ссылкой на сообщение-источник нити;
+        // оригинал остаётся в нити.
+        assert_eq!(copy.chat_id, root.id);
+        assert_eq!(copy.body, "Гоняю run-tests.");
+        assert_eq!(copy.author_id, other);
+        assert_eq!(copy.thread_of_id, Some(msg.id));
+        assert!(store.get_message(reply.id).await.unwrap().is_some());
+        assert_eq!(
+            store.list_messages(thread.id).await.unwrap().len(),
+            2
+        );
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);

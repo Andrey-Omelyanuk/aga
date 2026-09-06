@@ -255,12 +255,17 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // Тред в сессии.
-    let thread = chat
-        .create_chat(Some(session.id), Some("Обсуждение ревью"), alice, None)
-        .await?;
-    chat.send_message(thread.id, alice, "Что именно падает в тестах?", None, None)
-        .await?;
+    // Тред в сессии: нить от сообщения ревью, заголовок на первом сообщении.
+    let (thread, _first) = chat
+        .start_thread(
+            session.id,
+            review_msg.id,
+            "Обсуждение ревью",
+            "Что именно падает в тестах?",
+            alice,
+        )
+        .await?
+        .ok_or("thread failed")?;
     chat.send_message(
         thread.id,
         bob,
