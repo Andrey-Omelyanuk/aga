@@ -301,6 +301,39 @@ describe('ChatPage', () => {
     act(() => root.unmount());
   });
 
+  it('внутри раскрытой нити от сообщения можно начать вложенную нить', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(threadChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const toggle = [...container.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Обсуждение'),
+    );
+    act(() => toggle!.click());
+    await act(async () => {});
+    // У сообщения нити — своя кнопка «начать нить» (вложенная нить).
+    const startButtons = [...container.querySelectorAll('button')].filter((b) =>
+      b.textContent?.includes('начать нить'),
+    );
+    expect(startButtons.length).toBeGreaterThanOrEqual(2);
+    act(() => startButtons[startButtons.length - 1]!.click());
+    await act(async () => {});
+    const title = container.querySelector<HTMLInputElement>('input[placeholder="Заголовок нити"]');
+    const body = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Первое сообщение нити"]');
+    setInput(title!, 'Вложенная');
+    setInput(body!, 'глубже');
+    act(() => {
+      [...container.querySelectorAll('button')]
+        .find((b) => b.textContent?.trim() === 'Начать')!
+        .click();
+    });
+    await act(async () => {});
+    expect(http.post).toHaveBeenCalledWith('/messages/20/thread', {
+      title: 'Вложенная',
+      body: 'глубже',
+    });
+    act(() => root.unmount());
+  });
+
   it('клик по ссылке в сообщении родителя раскрывает нить у сообщения-источника', async () => {
     vi.mocked(loadChatDetail).mockResolvedValue(
       makeChat({

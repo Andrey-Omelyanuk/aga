@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-/// Максимальная глубина дерева чатов.
-pub const MAX_CHAT_LEVEL: i32 = 10;
+/// Максимальная глубина дерева чатов (вложенность нитей).
+pub const MAX_CHAT_LEVEL: i32 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatUser {
@@ -1962,6 +1962,81 @@ mod tests {
         assert_eq!(copy.thread_of_id, Some(msg.id));
         assert!(store.get_message(reply.id).await.unwrap().is_some());
         assert_eq!(store.list_messages(thread.id).await.unwrap().len(), 2);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn nested_thread_spawns_from_message_inside_thread() {
+        let (store, path, user) = chat_fixture().await;
+        let root = store
+            .create_chat(None, Some("s"), user, None)
+            .await
+            .unwrap();
+        let msg = store
+            .send_message(root.id, user, "задача", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let (thread, _) = store
+            .start_thread(root.id, msg.id, "Первая", "тело", user)
+            .await
+            .unwrap()
+            .unwrap();
+        let tmsg = store
+            .send_message(thread.id, user, "внутри", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        // Вложенная нить: начинается от сообщения внутри нити, родитель — нить.
+        let (nested, _) = store
+            .start_thread(thread.id, tmsg.id, "Вторая", "глубже", user)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(nested.parent_id, Some(thread.id));
+        assert_eq!(nested.level, 2);
+        assert_eq!(nested.start_message_id, Some(tmsg.id));
+        assert_eq!(nested.root_id, root.id);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn thread_depth_limited_to_max_level() {
+        let (store, path, user) = chat_fixture().await;
+        let root = store
+            .create_chat(None, Some("s"), user, None)
+            .await
+            .unwrap();
+        let mut parent = root.clone();
+        let mut origin = store
+            .send_message(root.id, user, "start", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        // Допустимо до MAX_CHAT_LEVEL уровней вложенности.
+        for _ in 0..crate::chat::MAX_CHAT_LEVEL {
+            let (thread, _) = store
+                .start_thread(parent.id, origin.id, "т", "б", user)
+                .await
+                .unwrap()
+                .unwrap();
+            parent = thread;
+            origin = store
+                .send_message(parent.id, user, "сообщение", None, None)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        // Следующий уровень за пределом не создаётся.
+        assert!(store
+            .start_thread(parent.id, origin.id, "т", "б", user)
+            .await
+            .unwrap()
+            .is_none());
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);
