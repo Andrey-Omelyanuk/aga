@@ -52,38 +52,6 @@ async fn refresh_jwks_loop(url: String, verifier: Arc<RwLock<Option<auth::JwtVer
     }
 }
 
-/// Дефолтную LLM через env убрали: подключения живут в БД и выбираются на
-/// странице «LLM». Для dev-стенда compose поднимает маленькую LLM (ollama) и
-/// передаёт её адрес и модель через `AGA_LLM_BOOTSTRAP_*` — при старте ядро
-/// создаёт подключение к ней и отмечает дефолтным, но только пока в БД нет ни
-/// одного подключения (иначе в dev агент без своего подключения не запустился
-/// бы). k8s-стенд bootstrap не задаёт: подключение к внешней LLM создаётся там
-/// вручную или сидом.
-async fn bootstrap_default_llm(
-    store: &trace::TraceStore,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let url = match env::var("AGA_LLM_BOOTSTRAP_URL") {
-        Ok(u) if !u.trim().is_empty() => u,
-        _ => return Ok(()),
-    };
-    if !store.list_llm_connections().await?.is_empty() {
-        return Ok(());
-    }
-    let model = env::var("AGA_LLM_BOOTSTRAP_MODEL").unwrap_or_default();
-    let name = env::var("AGA_LLM_BOOTSTRAP_NAME").unwrap_or_else(|_| "dev-llm".to_string());
-    let id = store
-        .create_llm_connection(&trace::LlmConnectionSpec {
-            name,
-            api_url: url,
-            api_key: None,
-            model_name: model,
-        })
-        .await?;
-    store.set_default_llm(id).await?;
-    tracing::info!("Создано дефолтное подключение к LLM из bootstrap (dev-стенд)");
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Инициализация логирования
@@ -133,10 +101,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Инициализация модели чата: {}", db_path);
     let chat_store = chat::ChatStore::new(&db_path).await?;
     tracing::info!("ChatStore ok");
-
-    // Dev-стенд: маленькая LLM поднимается compose-ом; ядро создаёт подключение
-    // к ней при старте, если в БД ещё нет ни одного (см. bootstrap_default_llm).
-    bootstrap_default_llm(&trace_store).await?;
 
     // Верификатор JWT против JWKS. Включён только когда SSO включён и задан
     // jwks_url; иначе запросы работают под аноним-суперпользователем. Обёрнут

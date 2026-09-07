@@ -103,24 +103,18 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Набор агентов: дерево backend → api. LLM — подключение, созданное
     // ниже (дефолтное, с моделью): backend ходит к ollama-local, api — без
-    // подключения (ходит к дефолтной LLM). Адрес и модель — как у bootstrap
-    // ядра (main.rs): в dev-стенде compose задаёт AGA_LLM_BOOTSTRAP_* (контейнер
-    // ollama), локально `cargo run -- seed` — host-ollama. Seed стирает БД, и
-    // bootstrap уже не отработает — поэтому подключение создаёт сам seed.
-    let llm_url = std::env::var("AGA_LLM_BOOTSTRAP_URL")
-        .ok()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| "http://localhost:11434/v1".to_string());
-    let llm_model = std::env::var("AGA_LLM_BOOTSTRAP_MODEL")
-        .ok()
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| "qwen3:0.6b".to_string());
+    // подключения (ходит к дефолтной LLM). Адрес и модель фиксированы — это
+    // контейнер ollama dev-стенда (`ollama:11434/v1`, модель qwen3:0.6b):
+    // seed запускается в контейнере ядра той же compose-сети и пишет
+    // подключение прямо в БД (bootstrap через env убран; ядро LLM из env не
+    // читает — всё живёт в БД). Локально `cargo run -- seed` адрес не поменяет:
+    // для host-ollama подключение правится на странице «LLM».
     let ollama = trace
         .create_llm_connection(&crate::trace::LlmConnectionSpec {
             name: "ollama-local".into(),
-            api_url: llm_url,
+            api_url: "http://ollama:11434/v1".into(),
             api_key: None,
-            model_name: llm_model,
+            model_name: "qwen3:0.6b".into(),
         })
         .await?;
     trace.set_default_llm(ollama).await?;
