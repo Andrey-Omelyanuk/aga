@@ -31,6 +31,10 @@ pub struct Chat {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub state: String,
+    /// Производные от сессии поля (в БД живут в `sessions`): воркстейшн и
+    /// проект корневого чата-сессии. У общих чатов и нитей — None/0.
+    pub workstation_id: Option<i64>,
+    pub project_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,8 +76,11 @@ pub struct Artifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workstation {
     pub id: i64,
-    pub project_id: i64,
     pub name: String,
+    /// Производное от активной сессии (в БД проект живёт в `sessions`):
+    /// 0 — станция свободна. Станция обслуживает сессии, своего проекта она
+    /// не хранит.
+    pub project_id: i64,
     pub state: String,
     /// Имя k8s-Secret, который при подъёме монтируется в ws (секреты для
     /// сторонних CLI). Живёт в кластере, в БД храним только имя.
@@ -159,7 +166,6 @@ impl ChatStore {
             r#"
             CREATE TABLE IF NOT EXISTS workstations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'creating',
                 secret TEXT,
@@ -308,6 +314,10 @@ impl ChatStore {
         // Миграция старых БД: сессионные поля жили в chats, теперь — в
         // sessions. Переносим существующие корневые сессии в sessions.
         store.migrate_sessions().await?;
+        // Проект станции больше не хранится в workstations: он живёт в
+        // sessions (станция обслуживает сессии). Удаляем мёртвую колонку
+        // старых БД (после migrate_sessions, которая читает w.project_id).
+        store.drop_workstation_project_id().await?;
 
         // Аноним-суперпользователь создаётся автоматически.
         if !store.user_exists_by_kind("anonymous").await? {
@@ -328,18 +338,32 @@ impl ChatStore {
         Ok(c > 0)
     }
 
-    /// Добавить колонку в существующую таблицу, если её ещё нет (миграция
-    /// старых БД, где CREATE TABLE IF NOT EXISTS её не создал).
-    async fn ensure_column(&self, table: &str, column: &str, ddl: &str) -> Result<(), sqlx::Error> {
+    /// Есть ли колонка в таблице (по PRAGMA table_info).
+    async fn table_has_column(&self, table: &str, column: &str) -> Result<bool, sqlx::Error> {
         let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
             .fetch_all(&self.pool)
             .await?;
-        let exists = rows.iter().any(|r| {
-            let name: String = r.get("name");
-            name == column
-        });
-        if !exists {
+        Ok(rows.iter().any(|r| r.get::<String, _>("name") == column))
+    }
+
+    /// Добавить колонку в существующую таблицу, если её ещё нет (миграция
+    /// старых БД, где CREATE TABLE IF NOT EXISTS её не создал).
+    async fn ensure_column(&self, table: &str, column: &str, ddl: &str) -> Result<(), sqlx::Error> {
+        if !self.table_has_column(table, column).await? {
             sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"))
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Миграция старых БД: `workstations.project_id` убран — станция больше не
+    /// «назначена на проект», проект станции определяется по её сессии
+    /// (`sessions.project_id`). Колонка удаляется после `migrate_sessions`,
+    /// которая перенесла привязки в `sessions`.
+    async fn drop_workstation_project_id(&self) -> Result<(), sqlx::Error> {
+        if self.table_has_column("workstations", "project_id").await? {
+            sqlx::query("ALTER TABLE workstations DROP COLUMN project_id")
                 .execute(&self.pool)
                 .await?;
         }
@@ -353,15 +377,12 @@ impl ChatStore {
     /// Идемпотентно: вставляем только если для `chat_id` в `sessions` ещё нет
     /// записи.
     async fn migrate_sessions(&self) -> Result<(), sqlx::Error> {
-        // Старые БД уже имеют колонку workstation_id в chats; новые БД её не
-        // создают. Определяем, есть ли она — если нет, мигрировать нечего.
-        let chats_cols: Vec<String> = sqlx::query("PRAGMA table_info(chats)")
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(|r| r.get::<String, _>("name"))
-            .collect();
-        if !chats_cols.iter().any(|c| c == "workstation_id") {
+        // Старые БД уже имеют колонку workstation_id в chats и project_id в
+        // workstations; новые БД их не создают, а старые — теряют после
+        // миграции. Нет любой из нужных колонок — мигрировать нечего.
+        if !self.table_has_column("chats", "workstation_id").await?
+            || !self.table_has_column("workstations", "project_id").await?
+        {
             return Ok(());
         }
 
@@ -528,7 +549,7 @@ impl ChatStore {
 
     pub async fn get_chat(&self, id: i64) -> Result<Option<Chat>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state FROM chats WHERE id = ?",
+            "SELECT c.id, c.root_id, c.parent_id, c.level, c.title, c.start_message_id, c.created_by_id, c.created_at, c.updated_at, c.state, s.workstation_id, COALESCE(s.project_id, 0) AS project_id FROM chats c LEFT JOIN sessions s ON s.chat_id = c.id WHERE c.id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -542,7 +563,7 @@ impl ChatStore {
     /// у сообщения (см. историю message-threads).
     pub async fn list_chats_for_user(&self, _user_id: i64) -> Result<Vec<Chat>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state FROM chats WHERE root_id = id ORDER BY updated_at DESC",
+            "SELECT c.id, c.root_id, c.parent_id, c.level, c.title, c.start_message_id, c.created_by_id, c.created_at, c.updated_at, c.state, s.workstation_id, COALESCE(s.project_id, 0) AS project_id FROM chats c LEFT JOIN sessions s ON s.chat_id = c.id WHERE c.root_id = c.id ORDER BY c.updated_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -552,7 +573,7 @@ impl ChatStore {
     /// Дочерние чаты-нити, начатые в этом чате (прямые наследники).
     pub async fn list_threads(&self, parent_chat_id: i64) -> Result<Vec<Chat>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state FROM chats WHERE parent_id = ? ORDER BY id",
+            "SELECT c.id, c.root_id, c.parent_id, c.level, c.title, c.start_message_id, c.created_by_id, c.created_at, c.updated_at, c.state, s.workstation_id, COALESCE(s.project_id, 0) AS project_id FROM chats c LEFT JOIN sessions s ON s.chat_id = c.id WHERE c.parent_id = ? ORDER BY c.id",
         )
         .bind(parent_chat_id)
         .fetch_all(&self.pool)
@@ -560,16 +581,15 @@ impl ChatStore {
         Ok(rows.iter().map(chat_from_row).collect())
     }
 
-    /// Создать чат. `workstation_id` больше не пишется в chats (воркстейшн
-    /// сессии живёт в sessions): корневые сессии создаются через
-    /// `open_workstation_session`, а этот метод — для общих чатов и нитей.
-    /// Параметр оставлен для совместимости вызовов, но игнорируется.
+    /// Создать чат: общий чат (`parent_id = None`) или нить (`parent_id = Some`).
+    /// Сессии здесь не создаются: корневой чат-сессию создаёт
+    /// `open_workstation_session` (привязка к станции и проекту живёт в
+    /// `sessions`).
     pub async fn create_chat(
         &self,
         parent_id: Option<i64>,
         title: Option<&str>,
         created_by_id: i64,
-        _workstation_id: Option<i64>,
     ) -> Result<Chat, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let (root_id, level) = match parent_id {
@@ -1009,20 +1029,19 @@ impl ChatStore {
 
     // === Workstations ===
 
+    /// Создать запись о воркстейшне. Станция создаётся свободной и пустой:
+    /// проект появляется только вместе с сессией (`open_workstation_session`).
     pub async fn create_workstation(
         &self,
-        project_id: i64,
         name: &str,
         secret: Option<&str>,
     ) -> Result<Workstation, sqlx::Error> {
-        let result = sqlx::query(
-            "INSERT INTO workstations (project_id, name, state, secret) VALUES (?, ?, 'creating', ?)",
-        )
-        .bind(project_id)
-        .bind(name)
-        .bind(secret)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("INSERT INTO workstations (name, state, secret) VALUES (?, 'creating', ?)")
+                .bind(name)
+                .bind(secret)
+                .execute(&self.pool)
+                .await?;
         let id = result.last_insert_rowid();
         self.get_workstation(id)
             .await?
@@ -1031,7 +1050,7 @@ impl ChatStore {
 
     pub async fn get_workstation(&self, id: i64) -> Result<Option<Workstation>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, project_id, name, state, secret, current_session_id, created_at FROM workstations WHERE id = ?",
+            "SELECT w.id, w.name, COALESCE(s.project_id, 0) AS project_id, w.state, w.secret, w.current_session_id, w.created_at FROM workstations w LEFT JOIN sessions s ON s.chat_id = w.current_session_id WHERE w.id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -1041,7 +1060,7 @@ impl ChatStore {
 
     pub async fn list_workstations(&self) -> Result<Vec<Workstation>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, project_id, name, state, secret, current_session_id, created_at FROM workstations ORDER BY id",
+            "SELECT w.id, w.name, COALESCE(s.project_id, 0) AS project_id, w.state, w.secret, w.current_session_id, w.created_at FROM workstations w LEFT JOIN sessions s ON s.chat_id = w.current_session_id ORDER BY w.id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1073,35 +1092,11 @@ impl ChatStore {
         self.set_workstation_state(id, "down").await
     }
 
-    /// Переключить воркстейшн на другой проект. Только на свободной станции
-    /// (открытой сессии быть не должно) — иначе `WorkstationBusy`. Сам ws не
-    /// пересоздаётся: файлы проекта переписывает вызывающий (см. ws_ops).
-    pub async fn switch_workstation_project(
-        &self,
-        ws_id: i64,
-        new_project_id: i64,
-    ) -> Result<Workstation, SessionError> {
-        if self.get_workstation(ws_id).await?.is_none() {
-            return Err(SessionError::NotFound);
-        }
-        if self.active_session_id(ws_id).await?.is_some() {
-            return Err(SessionError::WorkstationBusy);
-        }
-        sqlx::query("UPDATE workstations SET project_id = ? WHERE id = ?")
-            .bind(new_project_id)
-            .bind(ws_id)
-            .execute(&self.pool)
-            .await?;
-        self.get_workstation(ws_id)
-            .await?
-            .ok_or(SessionError::NotFound)
-    }
-
-    /// Отпустить воркстейшн: станция становится свободной (не привязана ни к
-    /// одному проекту). Свобода кодируется `project_id = 0` — сантинел, id
-    /// проектов начинаются с 1 (AUTOINCREMENT), внешних ключей на него нет.
-    /// Только на свободной станции (без открытой сессии) — иначе
-    /// `WorkstationBusy`.
+    /// Отпустить воркстейшн: станция остаётся без сессии (она и так обязана
+    /// быть свободной — иначе `WorkstationBusy`), вызывающий очищает содержимое
+    /// `/work/project` станции (`ws_ops::release_workspace`). Проект станции
+    /// определяется активной сессией, в БД отпускать нечего — проверка и
+    /// подтверждение.
     pub async fn release_workstation(&self, ws_id: i64) -> Result<Workstation, SessionError> {
         if self.get_workstation(ws_id).await?.is_none() {
             return Err(SessionError::NotFound);
@@ -1109,12 +1104,6 @@ impl ChatStore {
         if self.active_session_id(ws_id).await?.is_some() {
             return Err(SessionError::WorkstationBusy);
         }
-        sqlx::query(
-            "UPDATE workstations SET project_id = 0, current_session_id = NULL WHERE id = ?",
-        )
-        .bind(ws_id)
-        .execute(&self.pool)
-        .await?;
         self.get_workstation(ws_id)
             .await?
             .ok_or(SessionError::NotFound)
@@ -1190,8 +1179,11 @@ impl ChatStore {
         Ok(row.and_then(|r| r.get::<Option<i64>, _>("current_session_id")))
     }
 
-    /// Открыть сессию на воркстейшне: корневой чат, привязанный к воркстейшну.
-    /// Только на готовом воркстейшне и когда открытых сессий на нём нет.
+    /// Открыть сессию на воркстейшне: корневой чат + запись сессии с проектом.
+    /// Станция обслуживает сессии: проект задаётся здесь, а не хранится на
+    /// станции. Только на готовом воркстейшне и когда открытых сессий на нём
+    /// нет. Код проекта в `/work/project` разворачивает вызывающий (см.
+    /// `ws_ops::replace_project` в server.rs).
     ///
     /// Восстановление после падения — ручное: если на свободном ws открывают
     /// сессию, а на упавшем ws есть незакрытая сессия того же проекта, то эта
@@ -1200,6 +1192,7 @@ impl ChatStore {
     pub async fn open_workstation_session(
         &self,
         workstation_id: i64,
+        project_id: i64,
         title: Option<&str>,
         created_by_id: i64,
     ) -> Result<crate::chat::Chat, SessionError> {
@@ -1238,7 +1231,7 @@ impl ChatStore {
             "INSERT INTO sessions (chat_id, project_id, workstation_id, owner_id) VALUES (?, ?, ?, ?)",
         )
         .bind(chat_id)
-        .bind(ws.project_id)
+        .bind(project_id)
         .bind(workstation_id)
         .bind(created_by_id)
         .execute(&mut *tx)
@@ -1255,7 +1248,7 @@ impl ChatStore {
 
         // Ручное восстановление после падения: если на упавшей станции того же
         // проекта есть незакрытая сессия — новая считается её продолжением.
-        if let Some(interrupted) = self.interrupted_session_for_project(ws.project_id).await? {
+        if let Some(interrupted) = self.interrupted_session_for_project(project_id).await? {
             self.set_continues_session(chat_id, interrupted.session_id)
                 .await?;
         }
@@ -1387,14 +1380,16 @@ fn chat_from_row(r: &sqlx::sqlite::SqliteRow) -> Chat {
         created_at: parse_dt(&r.get::<String, _>("created_at")),
         updated_at: parse_dt(&r.get::<String, _>("updated_at")),
         state: r.get("state"),
+        workstation_id: r.get("workstation_id"),
+        project_id: r.get("project_id"),
     }
 }
 
 fn workstation_from_row(r: &sqlx::sqlite::SqliteRow) -> Workstation {
     Workstation {
         id: r.get("id"),
-        project_id: r.get("project_id"),
         name: r.get("name"),
+        project_id: r.get("project_id"),
         state: r.get("state"),
         secret: r.get("secret"),
         current_session_id: r.get("current_session_id"),
@@ -1515,7 +1510,7 @@ mod tests {
             .await
             .unwrap();
         let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
-        let ws = store.create_workstation(1, "w1", None).await.unwrap();
+        let ws = store.create_workstation("w1", None).await.unwrap();
         assert!(store
             .list_workstations()
             .await
@@ -1535,7 +1530,7 @@ mod tests {
     }
 
     async fn ready_ws(store: &ChatStore) -> i64 {
-        let ws = store.create_workstation(1, "w1", None).await.unwrap();
+        let ws = store.create_workstation("w1", None).await.unwrap();
         store.set_workstation_state(ws.id, "ready").await.unwrap();
         ws.id
     }
@@ -1560,14 +1555,8 @@ mod tests {
             .insert_user("carol", "human", false, None, None)
             .await
             .unwrap();
-        let c1 = store
-            .create_chat(None, Some("s1"), alice, None)
-            .await
-            .unwrap();
-        let c2 = store
-            .create_chat(None, Some("s2"), carol, None)
-            .await
-            .unwrap();
+        let c1 = store.create_chat(None, Some("s1"), alice).await.unwrap();
+        let c2 = store.create_chat(None, Some("s2"), carol).await.unwrap();
         let chats = store.list_chats_for_user(participant).await.unwrap();
         assert!(chats.iter().any(|c| c.id == c1.id));
         assert!(chats.iter().any(|c| c.id == c2.id));
@@ -1590,7 +1579,7 @@ mod tests {
             .await
             .unwrap();
         let chat = store
-            .open_workstation_session(ws_id, Some("s1"), user)
+            .open_workstation_session(ws_id, 1, Some("s1"), user)
             .await
             .unwrap();
         // Сессия связана с воркстейшном через sessions (workstation_id больше
@@ -1621,13 +1610,13 @@ mod tests {
             .await
             .unwrap();
         let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
-        let ws = store.create_workstation(1, "w1", None).await.unwrap();
+        let ws = store.create_workstation("w1", None).await.unwrap();
         let user = store
             .insert_user("bob", "human", false, None, None)
             .await
             .unwrap();
         let err = store
-            .open_workstation_session(ws.id, Some("s1"), user)
+            .open_workstation_session(ws.id, 1, Some("s1"), user)
             .await
             .unwrap_err();
         assert!(matches!(err, SessionError::WorkstationNotReady));
@@ -1650,11 +1639,11 @@ mod tests {
             .await
             .unwrap();
         store
-            .open_workstation_session(ws_id, Some("a"), user)
+            .open_workstation_session(ws_id, 1, Some("a"), user)
             .await
             .unwrap();
         let err = store
-            .open_workstation_session(ws_id, Some("b"), user)
+            .open_workstation_session(ws_id, 1, Some("b"), user)
             .await
             .unwrap_err();
         assert!(matches!(err, SessionError::WorkstationBusy));
@@ -1677,7 +1666,7 @@ mod tests {
             .await
             .unwrap();
         let chat = store
-            .open_workstation_session(ws_id, Some("s"), owner)
+            .open_workstation_session(ws_id, 1, Some("s"), owner)
             .await
             .unwrap();
         store
@@ -1708,7 +1697,7 @@ mod tests {
             .await
             .unwrap();
         let chat = store
-            .open_workstation_session(ws_id, Some("s"), owner)
+            .open_workstation_session(ws_id, 1, Some("s"), owner)
             .await
             .unwrap();
         let err = store
@@ -1735,7 +1724,7 @@ mod tests {
             .await
             .unwrap();
         let first = store
-            .open_workstation_session(ws_id, Some("a"), user)
+            .open_workstation_session(ws_id, 1, Some("a"), user)
             .await
             .unwrap();
         store
@@ -1743,7 +1732,7 @@ mod tests {
             .await
             .unwrap();
         let second = store
-            .open_workstation_session(ws_id, Some("b"), user)
+            .open_workstation_session(ws_id, 1, Some("b"), user)
             .await
             .unwrap();
         assert_ne!(first.id, second.id);
@@ -1760,10 +1749,7 @@ mod tests {
             .await
             .unwrap();
         let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
-        let ws = store
-            .create_workstation(1, "w1", Some("creds"))
-            .await
-            .unwrap();
+        let ws = store.create_workstation("w1", Some("creds")).await.unwrap();
         assert_eq!(
             store
                 .get_workstation(ws.id)
@@ -1780,9 +1766,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switching_workstation_rejected_while_session_open() {
+    async fn session_project_is_direct_and_station_follows_sessions() {
         let path = std::env::temp_dir().join(format!(
-            "aga_chat_switchbusy_test_{}.db",
+            "aga_chat_sessproj_test_{}.db",
             uuid::Uuid::new_v4()
         ));
         let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
@@ -1794,66 +1780,53 @@ mod tests {
             .insert_user("bob", "human", false, None, None)
             .await
             .unwrap();
+        // Сессия проекта 1: проект чата достаётся напрямую из sessions.
+        let first = store
+            .open_workstation_session(ws_id, 1, Some("s1"), user)
+            .await
+            .unwrap();
+        assert_eq!(store.project_id_for_chat(first.id).await.unwrap(), Some(1));
         store
-            .open_workstation_session(ws_id, Some("s"), user)
+            .close_workstation_session(first.id, user)
             .await
             .unwrap();
-        let err = store
-            .switch_workstation_project(ws_id, 99)
+        // Станция свободна и может обслуживать сессию другого проекта.
+        let second = store
+            .open_workstation_session(ws_id, 2, Some("s2"), user)
             .await
-            .unwrap_err();
-        assert!(matches!(err, SessionError::WorkstationBusy));
+            .unwrap();
+        assert_eq!(store.project_id_for_chat(second.id).await.unwrap(), Some(2));
+        assert_eq!(store.project_id_for_chat(first.id).await.unwrap(), Some(1));
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
-    async fn switched_workstation_points_to_new_project() {
-        let path =
-            std::env::temp_dir().join(format!("aga_chat_switch_test_{}.db", uuid::Uuid::new_v4()));
-        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
-            .await
-            .unwrap();
-        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
-        let ws = store.create_workstation(1, "w1", None).await.unwrap();
-        let switched = store.switch_workstation_project(ws.id, 7).await.unwrap();
-        assert_eq!(switched.project_id, 7);
-        assert_eq!(
-            store
-                .get_workstation(ws.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .project_id,
-            7
-        );
-        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
-        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[tokio::test]
-    async fn released_workstation_becomes_free() {
+    async fn released_workstation_is_free_after_session_close() {
         let path =
             std::env::temp_dir().join(format!("aga_chat_release_test_{}.db", uuid::Uuid::new_v4()));
         let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
             .await
             .unwrap();
         let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
-        let ws = store.create_workstation(1, "w1", None).await.unwrap();
-        let released = store.release_workstation(ws.id).await.unwrap();
-        // Свобода — project_id = 0 (сантинел; id проектов с 1).
-        assert_eq!(released.project_id, 0);
-        assert_eq!(
-            store
-                .get_workstation(ws.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .project_id,
-            0
-        );
+        let ws_id = ready_ws(&store).await;
+        let user = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        let session = store
+            .open_workstation_session(ws_id, 1, Some("s"), user)
+            .await
+            .unwrap();
+        store
+            .close_workstation_session(session.id, user)
+            .await
+            .unwrap();
+        // Закрытая сессия освобождает станцию — release проходит и
+        // подтверждает свободу (без активной сессии).
+        let released = store.release_workstation(ws_id).await.unwrap();
+        assert_eq!(released.current_session_id, None);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);
@@ -1875,7 +1848,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .open_workstation_session(ws_id, Some("s"), user)
+            .open_workstation_session(ws_id, 1, Some("s"), user)
             .await
             .unwrap();
         let err = store.release_workstation(ws_id).await.unwrap_err();
@@ -1893,7 +1866,7 @@ mod tests {
             .await
             .unwrap();
         let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
-        let ws = store.create_workstation(1, "w1", None).await.unwrap();
+        let ws = store.create_workstation("w1", None).await.unwrap();
         store.mark_workstation_down(ws.id).await.unwrap();
         assert_eq!(
             store.get_workstation(ws.id).await.unwrap().unwrap().state,
@@ -1914,14 +1887,14 @@ mod tests {
             .await
             .unwrap();
         let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
-        let ws = store.create_workstation(1, "w1", None).await.unwrap();
+        let ws = store.create_workstation("w1", None).await.unwrap();
         store.mark_workstation_down(ws.id).await.unwrap();
         let user = store
             .insert_user("bob", "human", false, None, None)
             .await
             .unwrap();
         let err = store
-            .open_workstation_session(ws.id, Some("s"), user)
+            .open_workstation_session(ws.id, 1, Some("s"), user)
             .await
             .unwrap_err();
         assert!(matches!(err, SessionError::WorkstationNotReady));
@@ -1943,19 +1916,19 @@ mod tests {
             .await
             .unwrap();
         // Станция 1: проект 1, открыта сессия, станция упала — сессия прервана.
-        let ws1 = store.create_workstation(1, "ws1", None).await.unwrap();
+        let ws1 = store.create_workstation("ws1", None).await.unwrap();
         store.set_workstation_state(ws1.id, "ready").await.unwrap();
         let interrupted = store
-            .open_workstation_session(ws1.id, Some("s1"), user)
+            .open_workstation_session(ws1.id, 1, Some("s1"), user)
             .await
             .unwrap();
         store.mark_workstation_down(ws1.id).await.unwrap();
         // На свободной станции 2 того же проекта открывают сессию — она
         // распознаёт продолжение прерванной и восстанавливает её.
-        let ws2 = store.create_workstation(1, "ws2", None).await.unwrap();
+        let ws2 = store.create_workstation("ws2", None).await.unwrap();
         store.set_workstation_state(ws2.id, "ready").await.unwrap();
         let recovered = store
-            .open_workstation_session(ws2.id, Some("s2"), user)
+            .open_workstation_session(ws2.id, 1, Some("s2"), user)
             .await
             .unwrap();
         assert_eq!(
@@ -1987,7 +1960,7 @@ mod tests {
             .unwrap();
         let ws_id = ready_ws(&store).await;
         let s = store
-            .open_workstation_session(ws_id, Some("new"), user)
+            .open_workstation_session(ws_id, 1, Some("new"), user)
             .await
             .unwrap();
         assert!(store.continues_session_id(s.id).await.unwrap().is_none());
@@ -2013,10 +1986,7 @@ mod tests {
     #[tokio::test]
     async fn thread_starts_from_message_with_title_on_first_message() {
         let (store, path, user) = chat_fixture().await;
-        let root = store
-            .create_chat(None, Some("s"), user, None)
-            .await
-            .unwrap();
+        let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let msg = store
             .send_message(root.id, user, "задача", None, None)
             .await
@@ -2045,10 +2015,7 @@ mod tests {
     #[tokio::test]
     async fn one_message_spawns_several_threads() {
         let (store, path, user) = chat_fixture().await;
-        let root = store
-            .create_chat(None, Some("s"), user, None)
-            .await
-            .unwrap();
+        let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let msg = store
             .send_message(root.id, user, "задача", None, None)
             .await
@@ -2083,14 +2050,8 @@ mod tests {
     #[tokio::test]
     async fn threads_not_listed_for_user() {
         let (store, path, user) = chat_fixture().await;
-        let root = store
-            .create_chat(None, Some("s"), user, None)
-            .await
-            .unwrap();
-        let general = store
-            .create_chat(None, Some("g"), user, None)
-            .await
-            .unwrap();
+        let root = store.create_chat(None, Some("s"), user).await.unwrap();
+        let general = store.create_chat(None, Some("g"), user).await.unwrap();
         let msg = store
             .send_message(root.id, user, "задача", None, None)
             .await
@@ -2119,10 +2080,7 @@ mod tests {
             .insert_user("alice", "human", false, None, None)
             .await
             .unwrap();
-        let root = store
-            .create_chat(None, Some("s"), user, None)
-            .await
-            .unwrap();
+        let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let msg = store
             .send_message(root.id, user, "задача", None, None)
             .await
@@ -2155,10 +2113,7 @@ mod tests {
     #[tokio::test]
     async fn nested_thread_spawns_from_message_inside_thread() {
         let (store, path, user) = chat_fixture().await;
-        let root = store
-            .create_chat(None, Some("s"), user, None)
-            .await
-            .unwrap();
+        let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let msg = store
             .send_message(root.id, user, "задача", None, None)
             .await
@@ -2192,10 +2147,7 @@ mod tests {
     #[tokio::test]
     async fn thread_depth_limited_to_max_level() {
         let (store, path, user) = chat_fixture().await;
-        let root = store
-            .create_chat(None, Some("s"), user, None)
-            .await
-            .unwrap();
+        let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let mut parent = root.clone();
         let mut origin = store
             .send_message(root.id, user, "start", None, None)

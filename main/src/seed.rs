@@ -212,14 +212,15 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     trace.attach_agent_set(p3, ui_set_id).await?;
 
     // --- Воркстейшны: готовые станции (контейнеры ws-1/ws-2 dev-стенда).
-    let ws1 = chat.create_workstation(p1, "ws-1", None).await?;
-    let ws2 = chat.create_workstation(p2, "ws-2", None).await?;
+    // Станции пустые: проект разворачивается на станции открытой сессией.
+    let ws1 = chat.create_workstation("ws-1", None).await?;
+    let ws2 = chat.create_workstation("ws-2", None).await?;
     chat.set_workstation_state(ws1.id, "ready").await?;
     chat.set_workstation_state(ws2.id, "ready").await?;
 
-    // --- Сессия на ws-1: корневой чат воркстейшна.
+    // --- Сессия на ws-1: корневой чат проекта p1 на станции.
     let session = chat
-        .open_workstation_session(ws1.id, Some("Сессия: backend"), alice)
+        .open_workstation_session(ws1.id, p1, Some("Сессия: backend"), alice)
         .await?;
     let task_msg = chat
         .send_message(
@@ -273,7 +274,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // --- Общий чат (без воркстейшна) с зашаренным сообщением.
-    let general = chat.create_chat(None, Some("Общий чат"), bob, None).await?;
+    let general = chat.create_chat(None, Some("Общий чат"), bob).await?;
     chat.add_participant(general.id, alice).await?;
     chat.send_message(
         general.id,

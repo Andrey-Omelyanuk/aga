@@ -27,16 +27,16 @@ const WorkstationsPage = observer(() => {
           title="Все воркстейшны"
           workstations={workstations.items}
           projectName={projectName}
-          activeProjectId={null}
           onChanged={reload}
         />
       ) : (
         <>
+          {/* project_id станции — производное от активной сессии: станция
+              обслуживает проект, пока сессия открыта. */}
           <WorkstationList
             title="На текущем проекте"
             workstations={workstations.items.filter((ws) => ws.project_id === activeId)}
             projectName={projectName}
-            activeProjectId={activeId}
             onChanged={reload}
           />
           <div className="mt-6" />
@@ -44,7 +44,6 @@ const WorkstationsPage = observer(() => {
             title="Другие проекты"
             workstations={workstations.items.filter((ws) => ws.project_id !== activeId)}
             projectName={projectName}
-            activeProjectId={activeId}
             onChanged={reload}
           />
         </>

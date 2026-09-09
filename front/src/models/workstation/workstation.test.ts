@@ -14,10 +14,11 @@ beforeEach(() => {
 });
 
 // Тот же фильтр, что строит страница сессий: только ready и свободные
-// (project_id = 0) или занятые текущим проектом.
+// (project_id = 0). Станция, занятая сессией, вторую открыть не даст (409),
+// поэтому в выборку она не входит.
 describe('session workstations filter (QueryCacheSync)', () => {
-  it('offers only ready workstations that are free or bound to the current project', () => {
-    const projectIds = new Variable(ARRAY(NUMBER()), { value: [0, 2] });
+  it('offers only ready and free workstations', () => {
+    const projectIds = new Variable(ARRAY(NUMBER()), { value: [0] });
     const state = new Variable(STRING(), { value: 'ready' });
     const query = Workstation.getQueryCacheSync({
       filter: AND(EQ('state', state), IN('project_id', projectIds)),
@@ -28,14 +29,14 @@ describe('session workstations filter (QueryCacheSync)', () => {
       ws(2, 'ready', 2);
       ws(3, 'ready', 3);
       ws(4, 'down', 0);
-      ws(5, 'creating', 2);
+      ws(5, 'creating', 0);
     });
 
-    expect(query.items.map((w) => w.id)).toEqual([1, 2]);
+    expect(query.items.map((w) => w.id)).toEqual([1]);
     query.destroy();
   });
 
-  it('without a project offers only free ready workstations', () => {
+  it('never offers workstations held by a session or not ready', () => {
     const projectIds = new Variable(ARRAY(NUMBER()), { value: [0] });
     const state = new Variable(STRING(), { value: 'ready' });
     const query = Workstation.getQueryCacheSync({
@@ -43,11 +44,12 @@ describe('session workstations filter (QueryCacheSync)', () => {
     });
 
     runInAction(() => {
-      ws(10, 'ready', 0);
-      ws(11, 'ready', 2);
+      ws(10, 'ready', 2);
+      ws(11, 'down', 0);
+      ws(12, 'creating', 3);
     });
 
-    expect(query.items.map((w) => w.id)).toEqual([10]);
+    expect(query.items.map((w) => w.id)).toEqual([]);
     query.destroy();
   });
 });

@@ -77,9 +77,9 @@
 - `make dev-e2e` — e2e всего рабочего цикла агента на dev-стенде
   (`infra/dev-e2e.sh`): форсит пересоздание core и ws-контейнеров (свежие
   образы), сидит БД и через HTTP API со SSO закрывает сессию занятого
-  воркстейшна, отпускает и переключает его на проект mobx-model-ui (git-клон
-  в `/work/project`), открывает сессию и ждёт непустой ответ `@Agent.ui`
-  с артефактом. Требует SSH-доступа по `AGA_SSH_PRIVATE_KEY` к репозиторию
+  воркстейшна, отпускает его, открывает сессию с проектом mobx-model-ui
+  (ядро разворачивает git-клон в `/work/project`) и ждёт непустой ответ
+  `@Agent.ui` с артефактом. Требует SSH-доступа по `AGA_SSH_PRIVATE_KEY` к репозиторию
   `git@github.com:Andrey-Omelyanuk/mobx-model-ui.git`.
 - Вход в Keycloak — тестовые учётки `alice`/`alice-pass` (participant) и
   `bob`/`bob-pass` (admin); фиксированные `sso_subject` заданы в

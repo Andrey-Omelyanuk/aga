@@ -7,12 +7,11 @@ export interface WorkstationListProps {
   title: string;
   workstations: Workstation[];
   projectName: (id: number) => string;
-  activeProjectId: number | null;
   onChanged: () => void;
 }
 
 export const WorkstationList = observer((props: WorkstationListProps) => {
-  const { title, workstations, projectName, activeProjectId, onChanged } = props;
+  const { title, workstations, projectName, onChanged } = props;
 
   return (
     <div>
@@ -25,7 +24,6 @@ export const WorkstationList = observer((props: WorkstationListProps) => {
           key={ws.id}
           ws={ws}
           projectName={projectName}
-          activeProjectId={activeProjectId}
           onChanged={onChanged}
         />
       ))}

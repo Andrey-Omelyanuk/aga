@@ -11,18 +11,16 @@ SQLite-БД ядра (`main/data/trace.db`, WAL). Схема создаётся 
 
 ```mermaid
 erDiagram
-    PROJECTS ||--o{ WORKSTATIONS : "станции"
     PROJECTS ||--o{ PROJECT_AGENT_SET : "прикреплённый набор"
     AGENT_SET ||--o{ PROJECT_AGENT_SET : "на многих проектах"
     TASKS ||--o{ TRACE_ENTRIES : "шаги"
     TASKS ||--o{ HUMAN_REQUESTS : "human-in-the-loop"
     PROJECTS ||--o{ SESSION : "сессия проекта"
     WORKSTATIONS ||--o{ SESSION : "текущая сессия (current_session_id)"
-    SESSION ||--|| CHAT : "1:1 корневой чат (chat_id)"
+    CHAT ||--o| SESSION : "сессия — 1:1 с корневым чатом (chat_id)"
 
     WORKSTATIONS {
         integer id PK
-        integer project_id FK
         integer current_session_id FK "активная сессия, nullable"
         text name
         text state "creating|ready|down"
@@ -96,8 +94,12 @@ erDiagram
 
 - **Session** — связующая сущность между проектом, чатом и воркстейшном:
   `project_id` связывает сессию с проектом напрямую, `chat_id` — 1:1 с корневым
-  чатом (сессией), `workstation_id` — со станцией. Воркстейшн ссылается на
-  активную сессию через `current_session_id` (NULL, когда свободен).
+  чатом (сессией), `workstation_id` — со станцией. Станция обслуживает сессии и
+  собственного проекта не хранит: `workstations.project_id` удалён, ссылка —
+  `current_session_id` на активную сессию (NULL, когда станция свободна).
+- Проект в JSON API (`workstations.project_id`, `chats.project_id`,
+  `chats.workstation_id`) — производные read-модельные поля из `sessions`
+  (LEFT JOIN), в схемах таблиц их нет.
 - Сессионные поля (`result_id`, `continues_session_id`) переехали из `chats` в
   `sessions`. `chats.state` остаётся в `chats` — он нужен и нитям.
 - К проекту прикрепляется один набор агентов (`PROJECT_AGENT_SET`); один набор
@@ -118,7 +120,7 @@ erDiagram
     CHAT_USERS ||--o{ MESSAGES : "автор (author_id)"
     CHATS ||--o{ MESSAGES : "содержит"
     MESSAGES ||--o{ ARTIFACTS : "артефакты"
-    CHATS ||--o{ SESSION : "корневой чат-сессия 1:1 (chat_id)"
+    CHATS ||--o| SESSION : "корневой чат-сессия 1:1 (sessions.chat_id UNIQUE)"
 
     CHAT_USERS {
         integer id PK
@@ -192,7 +194,8 @@ erDiagram
   дочерние чаты с `parent_id` и `start_message_id`.
 - Корневой чат-сессия связан с `SESSION` 1:1 (см. основную диаграмму): через
   `sessions.project_id` проект чата достаётся напрямую, без транзита через
-  воркстейшн. Общие чаты (`workstation_id` нет) сессии не имеют.
+  воркстейшн. Общие чаты и нити сессии не имеют; в API у них
+  `project_id = 0`/`workstation_id = null` (производные поля).
 - `messages` самоссылается через `parent_id` (ответы) и `share_of_id` (шаринг).
 
 ## AgentSet (внешняя сущность)

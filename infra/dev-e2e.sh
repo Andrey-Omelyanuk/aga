@@ -3,7 +3,8 @@
 #
 # Проверяет вертикальный срез на живом стенде: HTTP API через SSO (роли
 # участника и суперпользователя), жизненный цикл воркстейшна (закрыть сессию,
-# отпустить, переключить на mobx-model-ui — git-клон в /work/project), сессию
+# отпустить, открыть сессию с проектом mobx-model-ui — ядро разворачивает
+# git-клон в /work/project), сессию
 # и реактивного агента (@Agent.ui), который отвечает о проекте через маленькую
 # LLM dev-стенда. Качество ответа не проверяем — хватает непустого ответа с
 # артефактом.
@@ -85,9 +86,12 @@ curl -sf -X POST -H "Authorization: Bearer $BOB" "$CORE/workstations/$WS_ID/rele
 [ "$(curl -sf -H "Authorization: Bearer $ALICE" "$CORE/workstations" \
   | jq -r --argjson id "$WS_ID" '.[] | select(.id == $id) | .project_id')" = "0" ]
 
-echo "==> switch released workstation to mobx-model-ui (bob, superuser)"
-curl -sf -X POST -H "Authorization: Bearer $BOB" -H 'content-type: application/json' \
-  "$CORE/workstations/$WS_ID/switch" -d "{\"project_id\": $PROJECT_ID}" >/dev/null
+echo "==> open a session on the workstation (the session deploys the project)"
+CHAT_ID=$(curl -sf -X POST -H "Authorization: Bearer $ALICE" -H 'content-type: application/json' \
+  "$CORE/workstations/$WS_ID/session" \
+  -d "{\"project_id\": $PROJECT_ID, \"title\":\"e2e: mobx-model-ui\"}" | jq -r '.id')
+[ -n "$CHAT_ID" ]
+echo "session chat id=$CHAT_ID"
 
 echo "==> project code appears in /work/project of the workstation"
 CODE_OK=""
@@ -101,12 +105,6 @@ for _ in $(seq 1 60); do
 done
 [ -n "$CODE_OK" ]
 echo "mobx-model-ui code cloned (README.md present)"
-
-echo "==> open a session on the workstation"
-CHAT_ID=$(curl -sf -X POST -H "Authorization: Bearer $ALICE" -H 'content-type: application/json' \
-  "$CORE/workstations/$WS_ID/session" -d '{"title":"e2e: mobx-model-ui"}' | jq -r '.id')
-[ -n "$CHAT_ID" ]
-echo "session chat id=$CHAT_ID"
 
 echo "==> ask the agent what the project is (@Agent.ui)"
 curl -sf -X POST -H "Authorization: Bearer $ALICE" -H 'content-type: application/json' \

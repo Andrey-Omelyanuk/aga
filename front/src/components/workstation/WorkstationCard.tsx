@@ -9,29 +9,20 @@ import { toaster } from '@/utils/toaster';
 export interface WorkstationCardProps {
   ws: Workstation;
   projectName: (id: number) => string;
-  activeProjectId: number | null;
   onChanged: () => void;
 }
 
 function messageFor(e: unknown, action: string): string {
   const status = e instanceof AxiosError ? e.response?.status : undefined;
+  // 409 может прийти от release: на станции открыта сессия (штатно отпускаем
+  // только свободные станции).
   if (status === 409) return 'На этом воркстейшне открыта сессия';
   if (status === 403) return 'Недостаточно прав';
   return `Не удалось ${action} воркстейшн`;
 }
 
 export const WorkstationCard = observer((props: WorkstationCardProps) => {
-  const { ws, projectName, activeProjectId, onChanged } = props;
-
-  const onOccupy = async () => {
-    if (activeProjectId === null) return;
-    try {
-      await ws.action('switch', { project_id: activeProjectId });
-    } catch (e) {
-      toaster.show({ message: messageFor(e, 'занять'), intent: 'danger' });
-    }
-    onChanged();
-  };
+  const { ws, projectName, onChanged } = props;
 
   const onRelease = async () => {
     try {
@@ -48,22 +39,16 @@ export const WorkstationCard = observer((props: WorkstationCardProps) => {
         {ws.name} <Badge variant={ws.isReady ? 'ok' : 'warn'}>{ws.state}</Badge>
       </CardTitle>
       <CardMeta>{ws.isFree ? 'Свободен' : projectName(ws.project_id)}</CardMeta>
-      <div className="mt-2 flex gap-2">
-        {ws.isFree ? (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onOccupy}
-            disabled={activeProjectId === null}
-          >
-            Занять
-          </Button>
-        ) : (
+      {/* Свободная станция: «Отпустить» — штатная очистка/fsck пустой станции.
+          Занятая сессией станция показывается только с именем проекта:
+          release на ней вернёт 409, других действий API не предоставляет. */}
+      {ws.isFree && (
+        <div className="mt-2 flex gap-2">
           <Button variant="outline" size="sm" onClick={onRelease}>
             Отпустить
           </Button>
-        )}
-      </div>
+        </div>
+      )}
     </Card>
   );
 });

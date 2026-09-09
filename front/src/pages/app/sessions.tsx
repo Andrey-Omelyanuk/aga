@@ -1,5 +1,4 @@
 import { observer } from 'mobx-react-lite';
-import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   AND,
@@ -30,14 +29,11 @@ const SessionsPage = observer(() => {
 
   const [chats] = useQuery(Chat, { autoupdate: true });
 
-  // Воркстейшны для открытия сессии: только ready и свободные или занятые
-  // текущим проектом (тот же фильтр, что был в AppStore.sessionWorkstations).
+  // Воркстейшны для открытия сессии: только ready и свободные (project_id = 0).
+  // Станция, обслуживающая проект, уже несёт активную сессию — вторую открыть
+  // нельзя (ядро ответит 409), поэтому занятые станции в выборку не берём.
   const stateFilter = useInput(() => new Variable(STRING(), { value: 'ready' }));
   const projectIds = useInput(() => new Variable(ARRAY(NUMBER()), { value: [0] }));
-  useEffect(() => {
-    const v = activeProject.value;
-    projectIds.value = v === undefined || v === null ? [0] : [0, Number(v)];
-  }, [activeProject.value]);
 
   const [sessionWs] = useQueryCacheSync(Workstation, {
     filter: AND(EQ('state', stateFilter), IN('project_id', projectIds)),
@@ -54,6 +50,11 @@ const SessionsPage = observer(() => {
   const titleInput = useInput(() => new Variable(STRING(), { value: '' }));
 
   const open = async () => {
+    const projectId = activeProject.value;
+    if (projectId === undefined || projectId === null) {
+      toaster.show({ message: 'Выберите проект', intent: 'danger' });
+      return;
+    }
     const wsId = wsInput.value;
     if (wsId === undefined || wsId === null) {
       toaster.show({ message: 'Выберите готовый воркстейшн', intent: 'danger' });
@@ -62,7 +63,10 @@ const SessionsPage = observer(() => {
     const ws = sessionWs.items.find((w) => w.id === Number(wsId));
     if (!ws) return;
     try {
-      const chat = (await ws.action('session', { title: titleInput.value || undefined })) as Chat;
+      const chat = (await ws.action('session', {
+        project_id: Number(projectId),
+        title: titleInput.value || undefined,
+      })) as Chat;
       titleInput.set('');
       wsInput.set(undefined);
       navigate(`/chat/${chat.id}`);
@@ -94,7 +98,7 @@ const SessionsPage = observer(() => {
       </div>
       {sessionWs.items.length === 0 && (
         <p className="mb-3 text-sm text-slate-400">
-          Нет готовых воркстейшнов — свободных или занятых текущим проектом
+          Нет готовых свободных воркстейшнов
         </p>
       )}
       {chats.items.length === 0 && <EmptyState>Сессий пока нет</EmptyState>}

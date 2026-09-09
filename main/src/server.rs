@@ -227,7 +227,6 @@ pub fn create_router(state: AppState) -> Router {
             "/workstations/:id",
             axum::routing::delete(delete_workstation),
         )
-        .route("/workstations/:id/switch", post(switch_workstation))
         .route("/workstations/:id/release", post(release_workstation))
         .route("/workstations/:id/down", post(mark_workstation_down))
         // === Просмотр содержимого проекта в воркстейшне ===
@@ -1295,7 +1294,7 @@ async fn create_chat(
     let user_id = current_user(&state, &headers).await?;
     match state
         .chat_store
-        .create_chat(None, payload.title.as_deref(), user_id, None)
+        .create_chat(None, payload.title.as_deref(), user_id)
         .await
     {
         Ok(chat) => Ok(Json(chat)),
@@ -1763,7 +1762,6 @@ async fn list_workstations(
 
 #[derive(Deserialize)]
 pub struct CreateWorkstationRequest {
-    pub project_id: i64,
     #[serde(default)]
     pub name: Option<String>,
     /// Имя k8s-Secret из кластера, монтируемого в под при подъёме.
@@ -1771,14 +1769,10 @@ pub struct CreateWorkstationRequest {
     pub secret: Option<String>,
 }
 
-/// Тело запроса на переключение воркстейшна на другой проект.
-#[derive(Deserialize)]
-pub struct SwitchWorkstationRequest {
-    pub project_id: i64,
-}
-
 /// Создание воркстейшна — только для суперпользователя (админ внешний,
 /// интерфейс станции не создаёт и не удаляет). Участники получают 403.
+/// Станция поднимается свободной и пустой: проект разворачивается на ней
+/// при открытии сессии (`POST /workstations/:id/session`).
 async fn create_workstation(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1809,21 +1803,12 @@ async fn create_workstation(
     // Воркстейшн — под в Kubernetes: сначала запись, потом сам под.
     let ws = state
         .chat_store
-        .create_workstation(payload.project_id, &name, effective_secret.as_deref())
+        .create_workstation(&name, effective_secret.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let git_url = match state.trace_store.get_project(payload.project_id).await {
-        Ok(Some(p)) => p.git_url,
-        _ => {
-            let _ = state
-                .chat_store
-                .set_workstation_state(ws.id, "failed")
-                .await;
-            return Err(StatusCode::NOT_FOUND);
-        }
-    };
-
+    // Станция пустая: GIT_URL не задан — entrypoint инициализирует пустое
+    // git-репо в /work/project, код проекта развернёт открытие сессии.
     let pod_name = Cluster::pod_name(ws.id);
     let branch = Cluster::branch_name(ws.id);
 
@@ -1850,7 +1835,7 @@ async fn create_workstation(
 
     if let Err(e) = state
         .cluster
-        .create_pod(&pod_name, &git_url, &branch, ws.secret.as_deref())
+        .create_pod(&pod_name, "", &branch, ws.secret.as_deref())
         .await
     {
         tracing::error!("failed to create workstation pod {pod_name}: {e}");
@@ -1870,8 +1855,9 @@ async fn create_workstation(
         }
     }
 
-    // Под уже создан; готовность (Running) подтягиваем ожиданием — под
-    // тянет образ и клонирует проект, это занимает время.
+    // Под уже создан; готовность (Running + пустое git-репо) подтягиваем
+    // ожиданием — под тянет образ, это занимает время. Проект на станции
+    // появится при открытии сессии.
     if state.cluster.wait_ready(&pod_name).await.unwrap_or(false) {
         let _ = state.chat_store.set_workstation_state(ws.id, "ready").await;
     }
@@ -1912,68 +1898,9 @@ async fn delete_workstation(
     }
 }
 
-/// Переключить воркстейшн на другой проект — только суперпользователь.
-/// Свободная станция (без открытой сессии) меняет проект: `/work/project`
-/// переписывается кодом нового проекта, сам ws (под/сервис) не пересоздаётся.
-async fn switch_workstation(
-    Path(id): Path<i64>,
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<SwitchWorkstationRequest>,
-) -> Result<Json<crate::chat::Workstation>, StatusCode> {
-    let user_id = current_user(&state, &headers).await?;
-    if !state
-        .chat_store
-        .is_super_user(user_id)
-        .await
-        .unwrap_or(false)
-    {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let ws = state
-        .chat_store
-        .switch_workstation_project(id, payload.project_id)
-        .await
-        .map_err(|e| match e {
-            SessionError::NotFound => StatusCode::NOT_FOUND,
-            SessionError::WorkstationBusy => StatusCode::CONFLICT,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
-    let git_url = match state.trace_store.get_project(payload.project_id).await {
-        Ok(Some(p)) => p.git_url,
-        _ => return Err(StatusCode::NOT_FOUND),
-    };
-    let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
-    let branch = Cluster::branch_name(id);
-    // SSH-ключ aga для git+ssh-клона: в k8s-поде ключ приходит из Secret при
-    // создании, в dev (docker) контейнеры ws поднимаются заранее и
-    // переиспользуются — ключ инжектится при подъёме станции (create_pod).
-    // switch не пересоздаёт контейнер, поэтому ключ нужен и здесь.
-    if let (Some(key), crate::cluster::Backend::Docker) = (
-        crate::ssh_key::private_key_from_env().as_ref(),
-        state.cluster.backend,
-    ) {
-        if let Err(e) = state
-            .cluster
-            .inject_ssh_key(&Cluster::pod_name(id), key)
-            .await
-        {
-            tracing::warn!("failed to inject ssh key into ws-{id}: {e}");
-        }
-    }
-    // Смена проекта уже зафиксирована в БД (источник истины для списка).
-    // Перезапись /work/project — лучшая попытка: в dev-стенде git_url может
-    // быть плейсхолдером (воркстейшн работает с примонтированной копией),
-    // поэтому сбой exec не откатывает назначение, а только логируется.
-    if let Err(e) = crate::ws_ops::replace_project(&executor, &git_url, &branch).await {
-        tracing::warn!("failed to switch project on ws-{id}: {e}");
-    }
-    Ok(Json(ws))
-}
-
 /// Отпустить воркстейшн — только суперпользователь. Свободная станция (без
-/// открытой сессии) сбрасывается в «не привязан к проекту» (project_id = 0),
-/// файлы проекта очищаются; сам ws (под/сервис) не пересоздаётся.
+/// открытой сессии): файлы проекта очищаются до пустого git-репо; сам ws
+/// (под/сервис) не пересоздаётся.
 async fn release_workstation(
     Path(id): Path<i64>,
     State(state): State<AppState>,
@@ -2189,6 +2116,7 @@ fn file_response(content: crate::project_files::FileContent) -> Response {
 
 #[derive(Deserialize)]
 pub struct OpenWorkstationSessionRequest {
+    pub project_id: i64,
     #[serde(default)]
     pub title: Option<String>,
 }
@@ -2217,7 +2145,9 @@ async fn get_workstation_session(
 }
 
 /// Открыть сессию на воркстейшне: любой участник, воркстейшн готов,
-/// открытой сессии на нём нет. Закрытие сессии освобождает воркстейшн.
+/// открытой сессии на нём нет. Станция обслуживает сессии: проект задаётся
+/// здесь и разворачивается в `/work/project` (код проекта станция до этого
+/// не знает). Закрытие сессии освобождает воркстейшн.
 async fn open_workstation_session(
     Path(id): Path<i64>,
     State(state): State<AppState>,
@@ -2225,9 +2155,14 @@ async fn open_workstation_session(
     Json(payload): Json<OpenWorkstationSessionRequest>,
 ) -> Result<Json<Chat>, StatusCode> {
     let user_id = current_user(&state, &headers).await?;
+    let git_url = match state.trace_store.get_project(payload.project_id).await {
+        Ok(Some(p)) => p.git_url,
+        Ok(None) => return Err(StatusCode::NOT_FOUND),
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
     let chat = match state
         .chat_store
-        .open_workstation_session(id, payload.title.as_deref(), user_id)
+        .open_workstation_session(id, payload.project_id, payload.title.as_deref(), user_id)
         .await
     {
         Ok(chat) => chat,
@@ -2237,14 +2172,37 @@ async fn open_workstation_session(
         Err(SessionError::Forbidden) => return Err(StatusCode::FORBIDDEN),
         Err(SessionError::Db(_)) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
+    let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
+    let branch = Cluster::branch_name(id);
+    // SSH-ключ aga для git+ssh-клона: в k8s-поде ключ приходит из Secret при
+    // создании, в dev (docker) контейнеры ws поднимаются заранее и
+    // переиспользуются — ключ инжектится перед клонированием проекта.
+    if let (Some(key), crate::cluster::Backend::Docker) = (
+        crate::ssh_key::private_key_from_env().as_ref(),
+        state.cluster.backend,
+    ) {
+        if let Err(e) = state
+            .cluster
+            .inject_ssh_key(&Cluster::pod_name(id), key)
+            .await
+        {
+            tracing::warn!("failed to inject ssh key into ws-{id}: {e}");
+        }
+    }
+    // Развернуть код проекта на станции — лучшая попытка: в dev-стенде git_url
+    // может быть плейсхолдером (станция работает с примонтированной копией и
+    // проект наполняет агент), поэтому сбой exec не откатывает сессию, а
+    // только логируется.
+    if let Err(e) = crate::ws_ops::replace_project(&executor, &git_url, &branch).await {
+        tracing::warn!("failed to deploy project {git_url} on ws-{id}: {e}");
+    }
     // Ручное восстановление после падения: если открытая сессия — продолжение
     // прерванной на упавшей станции, восстанавливаем файлы проекта из её ветки.
     // Сбой восстановления сессию не роняет — станция остаётся на чистом клоне,
     // ошибка уходит в лог.
     if let Ok(Some(prev)) = state.chat_store.continues_session_id(chat.id).await {
-        if let Ok(Some(branch)) = state.chat_store.session_branch(prev).await {
-            let executor = crate::workstation::executor_for_workstation(Some(id), &state.cluster);
-            if let Err(e) = crate::ws_ops::restore_workspace(&executor, &branch).await {
+        if let Ok(Some(prev_branch)) = state.chat_store.session_branch(prev).await {
+            if let Err(e) = crate::ws_ops::restore_workspace(&executor, &prev_branch).await {
                 tracing::warn!("failed to restore session from ws into ws-{id}: {e}");
             }
         }
@@ -2499,7 +2457,7 @@ mod tests {
             "/workstations",
             &headers,
             state.clone(),
-            serde_json::json!({"project_id": 1, "name": "w1"}),
+            serde_json::json!({"name": "w1"}),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -2513,7 +2471,7 @@ mod tests {
         // Админ (внешний) поднял воркстейшн — участник видит его и состояние.
         state
             .chat_store
-            .create_workstation(1, "ws-1", None)
+            .create_workstation("ws-1", None)
             .await
             .unwrap();
         let (status, body) = get("/workstations", &headers, state.clone()).await;
@@ -2522,22 +2480,6 @@ mod tests {
         assert_eq!(workstations.len(), 1);
         assert_eq!(workstations[0]["name"], "ws-1");
         assert!(workstations[0]["state"].is_string());
-        cleanup(&file).await;
-    }
-
-    #[tokio::test]
-    async fn switching_workstation_forbidden_for_participant() {
-        let (state, file) = test_state(true).await;
-        let headers = auth_headers("alice", &["participant"]);
-        // Переключение воркстейшна на другой проект — процедура админа.
-        let (status, _) = post_json(
-            "/workstations/1/switch",
-            &headers,
-            state.clone(),
-            serde_json::json!({"project_id": 2}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
         cleanup(&file).await;
     }
 
@@ -3758,7 +3700,7 @@ mod tests {
         let headers = auth_headers("alice", &["participant"]);
         state
             .chat_store
-            .create_workstation(1, "ws-1", None)
+            .create_workstation("ws-1", None)
             .await
             .unwrap();
         // Участник проходит проверку доступа к содержимому любого воркстейшна.
@@ -3819,7 +3761,7 @@ mod tests {
         let headers = auth_headers("alice", &["participant"]);
         state
             .chat_store
-            .create_workstation(1, "ws-1", None)
+            .create_workstation("ws-1", None)
             .await
             .unwrap();
         // Видимость как у содержимого проекта: участник проходит проверку
