@@ -31,8 +31,6 @@ pub struct Chat {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub state: String,
-    pub result_id: Option<i64>,
-    pub workstation_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +78,8 @@ pub struct Workstation {
     /// Имя k8s-Secret, который при подъёме монтируется в ws (секреты для
     /// сторонних CLI). Живёт в кластере, в БД храним только имя.
     pub secret: Option<String>,
+    /// Активная сессия воркстейшна (корневой чат), если она открыта.
+    pub current_session_id: Option<i64>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -163,6 +163,7 @@ impl ChatStore {
                 name TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'creating',
                 secret TEXT,
+                current_session_id INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             "#,
@@ -183,11 +184,30 @@ impl ChatStore {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 state TEXT NOT NULL DEFAULT 'OPEN',
+                FOREIGN KEY (created_by_id) REFERENCES chat_users(id)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        // Сессии воркстейшнов: корневой чат воркстейшна + привязка к проекту
+        // напрямую. Сессионные поля (result_id, workstation_id,
+        // continues_session_id) живут здесь, а не в chats. Проекты объявляются
+        // в trace.rs (TraceStore) — БД одна, и trace_store создаётся раньше
+        // chat_store, поэтому FK на projects валиден.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL UNIQUE REFERENCES chats(id),
+                project_id INTEGER NOT NULL,
+                workstation_id INTEGER NOT NULL REFERENCES workstations(id),
+                owner_id INTEGER NOT NULL REFERENCES chat_users(id),
                 result_id INTEGER,
-                workstation_id INTEGER,
                 continues_session_id INTEGER,
-                FOREIGN KEY (created_by_id) REFERENCES chat_users(id),
-                FOREIGN KEY (workstation_id) REFERENCES workstations(id)
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                closed_at DATETIME
             )
             "#,
         )
@@ -270,9 +290,9 @@ impl ChatStore {
             .await?;
         store
             .ensure_column(
-                "chats",
-                "continues_session_id",
-                "continues_session_id INTEGER",
+                "workstations",
+                "current_session_id",
+                "current_session_id INTEGER",
             )
             .await?;
         store
@@ -284,6 +304,10 @@ impl ChatStore {
         store
             .ensure_column("messages", "thread_of_id", "thread_of_id INTEGER")
             .await?;
+
+        // Миграция старых БД: сессионные поля жили в chats, теперь — в
+        // sessions. Переносим существующие корневые сессии в sessions.
+        store.migrate_sessions().await?;
 
         // Аноним-суперпользователь создаётся автоматически.
         if !store.user_exists_by_kind("anonymous").await? {
@@ -319,6 +343,49 @@ impl ChatStore {
                 .execute(&self.pool)
                 .await?;
         }
+        Ok(())
+    }
+
+    /// Миграция старых БД: сессионные поля жили в `chats` (`result_id`,
+    /// `workstation_id`, `continues_session_id`), теперь они — в `sessions`.
+    /// Для каждого корневого чата (`root_id = id`) с привязкой к воркстейшну
+    /// создаём запись в `sessions` и проставляем `workstations.current_session_id`.
+    /// Идемпотентно: вставляем только если для `chat_id` в `sessions` ещё нет
+    /// записи.
+    async fn migrate_sessions(&self) -> Result<(), sqlx::Error> {
+        // Старые БД уже имеют колонку workstation_id в chats; новые БД её не
+        // создают. Определяем, есть ли она — если нет, мигрировать нечего.
+        let chats_cols: Vec<String> = sqlx::query("PRAGMA table_info(chats)")
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        if !chats_cols.iter().any(|c| c == "workstation_id") {
+            return Ok(());
+        }
+
+        sqlx::query(
+            "INSERT INTO sessions (chat_id, project_id, workstation_id, owner_id, result_id, continues_session_id) \
+             SELECT c.id, w.project_id, c.workstation_id, c.created_by_id, c.result_id, c.continues_session_id \
+             FROM chats c JOIN workstations w ON w.id = c.workstation_id \
+             WHERE c.root_id = c.id AND c.workstation_id IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.chat_id = c.id)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Проставляем current_session_id для открытых сессий старых БД.
+        sqlx::query(
+            "UPDATE workstations SET current_session_id = (\
+               SELECT s.chat_id FROM sessions s WHERE s.workstation_id = workstations.id \
+                 AND s.closed_at IS NULL \
+                 AND EXISTS (SELECT 1 FROM chats c WHERE c.id = s.chat_id AND c.state = 'OPEN') \
+               ORDER BY s.id DESC LIMIT 1) \
+             WHERE EXISTS (SELECT 1 FROM sessions s WHERE s.workstation_id = workstations.id)",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -461,7 +528,7 @@ impl ChatStore {
 
     pub async fn get_chat(&self, id: i64) -> Result<Option<Chat>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats WHERE id = ?",
+            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state FROM chats WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -475,7 +542,7 @@ impl ChatStore {
     /// у сообщения (см. историю message-threads).
     pub async fn list_chats_for_user(&self, _user_id: i64) -> Result<Vec<Chat>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats WHERE root_id = id ORDER BY updated_at DESC",
+            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state FROM chats WHERE root_id = id ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -485,7 +552,7 @@ impl ChatStore {
     /// Дочерние чаты-нити, начатые в этом чате (прямые наследники).
     pub async fn list_threads(&self, parent_chat_id: i64) -> Result<Vec<Chat>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state, result_id, workstation_id FROM chats WHERE parent_id = ? ORDER BY id",
+            "SELECT id, root_id, parent_id, level, title, start_message_id, created_by_id, created_at, updated_at, state FROM chats WHERE parent_id = ? ORDER BY id",
         )
         .bind(parent_chat_id)
         .fetch_all(&self.pool)
@@ -493,14 +560,16 @@ impl ChatStore {
         Ok(rows.iter().map(chat_from_row).collect())
     }
 
-    /// Создать чат. Если `parent_id` пуст — создаётся корневой чат (сессия)
-    /// для воркстейшна. Создатель автоматически становится участником.
+    /// Создать чат. `workstation_id` больше не пишется в chats (воркстейшн
+    /// сессии живёт в sessions): корневые сессии создаются через
+    /// `open_workstation_session`, а этот метод — для общих чатов и нитей.
+    /// Параметр оставлен для совместимости вызовов, но игнорируется.
     pub async fn create_chat(
         &self,
         parent_id: Option<i64>,
         title: Option<&str>,
         created_by_id: i64,
-        workstation_id: Option<i64>,
+        _workstation_id: Option<i64>,
     ) -> Result<Chat, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let (root_id, level) = match parent_id {
@@ -518,14 +587,13 @@ impl ChatStore {
         };
 
         let result = sqlx::query(
-            "INSERT INTO chats (root_id, parent_id, level, title, created_by_id, workstation_id) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO chats (root_id, parent_id, level, title, created_by_id) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(root_id)
         .bind(parent_id)
         .bind(level)
         .bind(title)
         .bind(created_by_id)
-        .bind(workstation_id)
         .execute(&mut *tx)
         .await?;
         let chat_id = result.last_insert_rowid();
@@ -833,7 +901,9 @@ impl ChatStore {
         self.get_message(new_id).await
     }
 
-    /// Закрыть чат. Корневой чат каскадно закрывает всё дерево.
+    /// Закрыть чат. Корневой чат каскадно закрывает всё дерево. Если корневой
+    /// чат — сессия воркстейшна, дополнительно освобождаем воркстейшн
+    /// (`current_session_id = NULL`) и отмечаем сессию закрытой (`closed_at`).
     pub async fn close_chat(&self, chat_id: i64) -> Result<bool, sqlx::Error> {
         let chat = self.get_chat(chat_id).await?;
         let Some(chat) = chat else { return Ok(false) };
@@ -842,6 +912,7 @@ impl ChatStore {
                 .bind(chat.id)
                 .execute(&self.pool)
                 .await?;
+            self.close_session_if_any(chat.id).await?;
         } else {
             sqlx::query("UPDATE chats SET state = 'CLOSED' WHERE id = ?")
                 .bind(chat_id)
@@ -849,6 +920,31 @@ impl ChatStore {
                 .await?;
         }
         Ok(true)
+    }
+
+    /// Отметить сессию закрытой (если корневой чат — сессия) и освободить
+    /// воркстейшн. Вызывается при закрытии корневого чата.
+    async fn close_session_if_any(&self, chat_id: i64) -> Result<(), sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT workstation_id FROM sessions WHERE chat_id = ? AND closed_at IS NULL",
+        )
+        .bind(chat_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(()) };
+        let workstation_id: i64 = row.get("workstation_id");
+        sqlx::query("UPDATE sessions SET closed_at = CURRENT_TIMESTAMP WHERE chat_id = ?")
+            .bind(chat_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "UPDATE workstations SET current_session_id = NULL WHERE id = ? AND current_session_id = ?",
+        )
+        .bind(workstation_id)
+        .bind(chat_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Установить сообщение-итог чата. Только владелец, сообщение из чата.
@@ -867,7 +963,7 @@ impl ChatStore {
         if msg.chat_id != chat_id {
             return Ok(false);
         }
-        sqlx::query("UPDATE chats SET result_id = ? WHERE id = ?")
+        sqlx::query("UPDATE sessions SET result_id = ? WHERE chat_id = ?")
             .bind(message_id)
             .bind(chat_id)
             .execute(&self.pool)
@@ -935,38 +1031,21 @@ impl ChatStore {
 
     pub async fn get_workstation(&self, id: i64) -> Result<Option<Workstation>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, project_id, name, state, secret, created_at FROM workstations WHERE id = ?",
+            "SELECT id, project_id, name, state, secret, current_session_id, created_at FROM workstations WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| Workstation {
-            id: r.get("id"),
-            project_id: r.get("project_id"),
-            name: r.get("name"),
-            state: r.get("state"),
-            secret: r.get("secret"),
-            created_at: parse_dt(&r.get::<String, _>("created_at")),
-        }))
+        Ok(row.map(|r| workstation_from_row(&r)))
     }
 
     pub async fn list_workstations(&self) -> Result<Vec<Workstation>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, project_id, name, state, secret, created_at FROM workstations ORDER BY id",
+            "SELECT id, project_id, name, state, secret, current_session_id, created_at FROM workstations ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(|r| Workstation {
-                id: r.get("id"),
-                project_id: r.get("project_id"),
-                name: r.get("name"),
-                state: r.get("state"),
-                secret: r.get("secret"),
-                created_at: parse_dt(&r.get::<String, _>("created_at")),
-            })
-            .collect())
+        Ok(rows.iter().map(workstation_from_row).collect())
     }
 
     #[allow(dead_code)]
@@ -1030,26 +1109,29 @@ impl ChatStore {
         if self.active_session_id(ws_id).await?.is_some() {
             return Err(SessionError::WorkstationBusy);
         }
-        sqlx::query("UPDATE workstations SET project_id = 0 WHERE id = ?")
-            .bind(ws_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE workstations SET project_id = 0, current_session_id = NULL WHERE id = ?",
+        )
+        .bind(ws_id)
+        .execute(&self.pool)
+        .await?;
         self.get_workstation(ws_id)
             .await?
             .ok_or(SessionError::NotFound)
     }
 
     /// Прерванная (незакрытая) сессия на упавшем воркстейшне того же проекта —
-    /// кандидат на восстановление. Берём самую свежую по `updated_at`.
+    /// кандидат на восстановление. Берём самую свежую по `updated_at` чата.
     pub async fn interrupted_session_for_project(
         &self,
         project_id: i64,
     ) -> Result<Option<InterruptedSession>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT c.id AS sid FROM chats c \
-             JOIN workstations w ON w.id = c.workstation_id \
-             WHERE c.state = 'OPEN' AND c.root_id = c.id \
-               AND w.state = 'down' AND w.project_id = ? \
+            "SELECT s.chat_id AS sid FROM sessions s \
+             JOIN workstations w ON w.id = s.workstation_id \
+             JOIN chats c ON c.id = s.chat_id \
+             WHERE c.state = 'OPEN' AND s.closed_at IS NULL \
+               AND w.state = 'down' AND s.project_id = ? \
              ORDER BY c.updated_at DESC LIMIT 1",
         )
         .bind(project_id)
@@ -1062,7 +1144,7 @@ impl ChatStore {
 
     /// Ссылка сессии (`chat_id`) на прерванную, которую она продолжает.
     pub async fn continues_session_id(&self, chat_id: i64) -> Result<Option<i64>, sqlx::Error> {
-        let row = sqlx::query("SELECT continues_session_id FROM chats WHERE id = ?")
+        let row = sqlx::query("SELECT continues_session_id FROM sessions WHERE chat_id = ?")
             .bind(chat_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -1070,7 +1152,7 @@ impl ChatStore {
     }
 
     async fn set_continues_session(&self, chat_id: i64, prev: i64) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE chats SET continues_session_id = ? WHERE id = ?")
+        sqlx::query("UPDATE sessions SET continues_session_id = ? WHERE chat_id = ?")
             .bind(prev)
             .bind(chat_id)
             .execute(&self.pool)
@@ -1078,10 +1160,10 @@ impl ChatStore {
         Ok(())
     }
 
-    /// Ветка (`ws-<id>`), на которой работал корневой чат-сессия. Нужна для
+    /// Ветка (`ws-<id>`), на которой работала сессия. Нужна для
     /// восстановления файлов прерванной сессии с упавшей станции.
     pub async fn session_branch(&self, session_id: i64) -> Result<Option<String>, sqlx::Error> {
-        let row = sqlx::query("SELECT workstation_id FROM chats WHERE id = ? AND root_id = id")
+        let row = sqlx::query("SELECT workstation_id FROM sessions WHERE chat_id = ?")
             .bind(session_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -1092,13 +1174,20 @@ impl ChatStore {
 
     /// Найти активную (открытую) сессию воркстейшна.
     pub async fn active_session_id(&self, workstation_id: i64) -> Result<Option<i64>, sqlx::Error> {
+        // Активная сессия — та, что стоит в workstations.current_session_id и
+        // ещё открыта (чат OPEN). Защищаемся от рассинхрона: если
+        // current_session_id указывает на закрытый чат — не считаем активной.
         let row = sqlx::query(
-            "SELECT id FROM chats WHERE workstation_id = ? AND state = 'OPEN' AND root_id = id ORDER BY id DESC LIMIT 1",
+            "SELECT w.current_session_id FROM workstations w \
+             JOIN sessions s ON s.chat_id = w.current_session_id \
+             JOIN chats c ON c.id = s.chat_id \
+             WHERE w.id = ? AND c.state = 'OPEN' AND s.closed_at IS NULL \
+             ORDER BY s.id DESC LIMIT 1",
         )
         .bind(workstation_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.get("id")))
+        Ok(row.and_then(|r| r.get::<Option<i64>, _>("current_session_id")))
     }
 
     /// Открыть сессию на воркстейшне: корневой чат, привязанный к воркстейшну.
@@ -1124,14 +1213,54 @@ impl ChatStore {
         if self.active_session_id(workstation_id).await?.is_some() {
             return Err(SessionError::WorkstationBusy);
         }
-        let chat = self
-            .create_chat(None, title, created_by_id, Some(workstation_id))
+
+        let mut tx = self.pool.begin().await?;
+
+        // Корневой чат без workstation_id в chats.
+        let result = sqlx::query(
+            "INSERT INTO chats (root_id, parent_id, level, title, created_by_id) VALUES (0, NULL, 0, ?, ?)",
+        )
+        .bind(title)
+        .bind(created_by_id)
+        .execute(&mut *tx)
+        .await?;
+        let chat_id = result.last_insert_rowid();
+        sqlx::query("UPDATE chats SET root_id = ? WHERE id = ?")
+            .bind(chat_id)
+            .bind(chat_id)
+            .execute(&mut *tx)
             .await?;
+        self.add_participant_tx(&mut tx, chat_id, created_by_id)
+            .await?;
+
+        // Сессия: привязка к проекту напрямую + воркстейшн + владелец.
+        sqlx::query(
+            "INSERT INTO sessions (chat_id, project_id, workstation_id, owner_id) VALUES (?, ?, ?, ?)",
+        )
+        .bind(chat_id)
+        .bind(ws.project_id)
+        .bind(workstation_id)
+        .bind(created_by_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // Воркстейшн ссылается на текущую сессию.
+        sqlx::query("UPDATE workstations SET current_session_id = ? WHERE id = ?")
+            .bind(chat_id)
+            .bind(workstation_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        // Ручное восстановление после падения: если на упавшей станции того же
+        // проекта есть незакрытая сессия — новая считается её продолжением.
         if let Some(interrupted) = self.interrupted_session_for_project(ws.project_id).await? {
-            self.set_continues_session(chat.id, interrupted.session_id)
+            self.set_continues_session(chat_id, interrupted.session_id)
                 .await?;
         }
-        Ok(chat)
+
+        Ok(self.get_chat(chat_id).await?.unwrap())
     }
 
     /// Закрыть сессию воркстейшна. Только владелец сессии (или суперпользователь
@@ -1153,16 +1282,16 @@ impl ChatStore {
         Ok(())
     }
 
-    /// Воркстейшн корневого чата, к которому принадлежит чат.
+    /// Воркстейшн корневого чата, к которому принадлежит чат. Поднимается по
+    /// `parent_id` до корня, затем берёт `workstation_id` из `sessions`.
     pub async fn root_workstation_id(&self, chat_id: i64) -> Result<Option<i64>, sqlx::Error> {
         let mut id = chat_id;
         let mut seen = 0;
         loop {
-            let row =
-                sqlx::query("SELECT root_id, parent_id, workstation_id FROM chats WHERE id = ?")
-                    .bind(id)
-                    .fetch_optional(&self.pool)
-                    .await?;
+            let row = sqlx::query("SELECT root_id, parent_id FROM chats WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
             let Some(r) = row else { return Ok(None) };
             if seen > MAX_CHAT_LEVEL {
                 return Ok(None);
@@ -1170,9 +1299,40 @@ impl ChatStore {
             seen += 1;
             let root_id: i64 = r.get("root_id");
             let parent_id: Option<i64> = r.get("parent_id");
-            let workstation_id: Option<i64> = r.get("workstation_id");
             if parent_id.is_none() || root_id == id {
-                return Ok(workstation_id);
+                let row = sqlx::query("SELECT workstation_id FROM sessions WHERE chat_id = ?")
+                    .bind(root_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+                return Ok(row.and_then(|r| r.get::<Option<i64>, _>("workstation_id")));
+            }
+            id = parent_id.unwrap();
+        }
+    }
+
+    /// Проект, к которому принадлежит чат: поднимается до корня и берёт
+    /// `sessions.project_id` напрямую (без транзита через воркстейшн).
+    pub async fn project_id_for_chat(&self, chat_id: i64) -> Result<Option<i64>, sqlx::Error> {
+        let mut id = chat_id;
+        let mut seen = 0;
+        loop {
+            let row = sqlx::query("SELECT root_id, parent_id FROM chats WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+            let Some(r) = row else { return Ok(None) };
+            if seen > MAX_CHAT_LEVEL {
+                return Ok(None);
+            }
+            seen += 1;
+            let root_id: i64 = r.get("root_id");
+            let parent_id: Option<i64> = r.get("parent_id");
+            if parent_id.is_none() || root_id == id {
+                let row = sqlx::query("SELECT project_id FROM sessions WHERE chat_id = ?")
+                    .bind(root_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+                return Ok(row.and_then(|r| r.get::<Option<i64>, _>("project_id")));
             }
             id = parent_id.unwrap();
         }
@@ -1187,6 +1347,7 @@ impl ChatStore {
             "artifacts",
             "messages",
             "chat_participants",
+            "sessions",
             "chats",
             "workstations",
             "chat_users",
@@ -1226,8 +1387,18 @@ fn chat_from_row(r: &sqlx::sqlite::SqliteRow) -> Chat {
         created_at: parse_dt(&r.get::<String, _>("created_at")),
         updated_at: parse_dt(&r.get::<String, _>("updated_at")),
         state: r.get("state"),
-        result_id: r.get("result_id"),
-        workstation_id: r.get("workstation_id"),
+    }
+}
+
+fn workstation_from_row(r: &sqlx::sqlite::SqliteRow) -> Workstation {
+    Workstation {
+        id: r.get("id"),
+        project_id: r.get("project_id"),
+        name: r.get("name"),
+        state: r.get("state"),
+        secret: r.get("secret"),
+        current_session_id: r.get("current_session_id"),
+        created_at: parse_dt(&r.get::<String, _>("created_at")),
     }
 }
 
@@ -1422,7 +1593,21 @@ mod tests {
             .open_workstation_session(ws_id, Some("s1"), user)
             .await
             .unwrap();
-        assert_eq!(chat.workstation_id, Some(ws_id));
+        // Сессия связана с воркстейшном через sessions (workstation_id больше
+        // не в chats).
+        assert_eq!(
+            store.root_workstation_id(chat.id).await.unwrap(),
+            Some(ws_id)
+        );
+        assert_eq!(
+            store
+                .get_workstation(ws_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .current_session_id,
+            Some(chat.id)
+        );
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);

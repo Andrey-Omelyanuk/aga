@@ -76,12 +76,10 @@ impl ReactiveRunner {
         });
     }
 
-    /// Найти проект чата: корневой чат (сессия) → воркстейшн → проект.
+    /// Найти проект чата: поднимаемся до корневого чата (сессии) и берём
+    /// `sessions.project_id` напрямую.
     async fn project_id_for_chat(&self, chat_id: i64) -> Option<i64> {
-        let ws_id = self.chat_store.root_workstation_id(chat_id).await.ok()?;
-        let ws_id = ws_id?;
-        let ws = self.chat_store.get_workstation(ws_id).await.ok()??;
-        Some(ws.project_id)
+        self.chat_store.project_id_for_chat(chat_id).await.ok()?
     }
 
     async fn run_in_workstation_queue(

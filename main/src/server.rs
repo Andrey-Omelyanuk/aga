@@ -1285,8 +1285,6 @@ async fn connection_jwt(
 pub struct CreateChatRequest {
     #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
-    pub workstation_id: Option<i64>,
 }
 
 async fn create_chat(
@@ -1297,12 +1295,7 @@ async fn create_chat(
     let user_id = current_user(&state, &headers).await?;
     match state
         .chat_store
-        .create_chat(
-            None,
-            payload.title.as_deref(),
-            user_id,
-            payload.workstation_id,
-        )
+        .create_chat(None, payload.title.as_deref(), user_id, None)
         .await
     {
         Ok(chat) => Ok(Json(chat)),
