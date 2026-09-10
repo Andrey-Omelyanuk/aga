@@ -189,6 +189,19 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(delete_command),
         )
         .route("/commands/:id/history", get(capability_history))
+        // === Сокращения (shortcuts) ===
+        // Глобальный перечень: при отправке сообщения слово `/имя` добавляет
+        // привязанный текст в скрытую часть сообщения. Живёт в том же каталоге,
+        // что скиллы и команды (kind='shortcut'), с той же историей изменений;
+        // агентам не даётся. Имя — без пробелов, уникально.
+        .route("/shortcuts", get(list_shortcuts).post(create_shortcut))
+        .route(
+            "/shortcuts/:id",
+            get(get_shortcut)
+                .patch(update_shortcut)
+                .delete(delete_shortcut),
+        )
+        .route("/shortcuts/:id/history", get(capability_history))
         // === SSO (Keycloak): вход веб-клиента ===
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
@@ -905,6 +918,102 @@ async fn capability_history(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+// === Сокращения (shortcuts) ===
+// Живут в общем каталоге (kind='shortcut') с той же историей, что скиллы и
+// команды. Отличие — имя не содержит пробелов: вызывается оно словом `/имя`,
+// которое браузер не разобьёт на части.
+
+/// Имя сокращения: непустое и без пробелов.
+fn shortcut_name_valid(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(|c| c.is_whitespace())
+}
+
+async fn list_shortcuts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(filter): axum::extract::Query<DeletedFilter>,
+) -> Result<Json<Vec<crate::trace::CapabilityItem>>, StatusCode> {
+    list_capabilities(
+        crate::trace::CapabilityKind::Shortcut,
+        &state,
+        &headers,
+        filter.deleted,
+    )
+    .await
+}
+
+async fn create_shortcut(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateCapabilityRequest>,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    let name = payload.name.trim().to_string();
+    if !shortcut_name_valid(&name) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    create_capability(
+        crate::trace::CapabilityKind::Shortcut,
+        &state,
+        &headers,
+        CreateCapabilityRequest {
+            name,
+            content: payload.content,
+        },
+    )
+    .await
+}
+
+async fn get_shortcut(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .get_capability(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter(|c| c.kind == crate::trace::CapabilityKind::Shortcut)
+        .ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
+}
+
+async fn update_shortcut(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateCapabilityRequest>,
+) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
+    if let Some(name) = payload.name.as_deref() {
+        if !name.trim().is_empty() && !shortcut_name_valid(name.trim()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    update_capability(
+        crate::trace::CapabilityKind::Shortcut,
+        id,
+        &state,
+        &headers,
+        payload,
+    )
+    .await
+}
+
+async fn delete_shortcut(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    delete_capability(
+        crate::trace::CapabilityKind::Shortcut,
+        id,
+        &state,
+        &headers,
+    )
+    .await
+}
+
 async fn attach_agent_set(
     Path(id): Path<i64>,
     State(state): State<AppState>,
@@ -1475,9 +1584,17 @@ async fn send_message(
         }
     }
 
+    let hidden = hidden_from_shortcuts(&state, &payload.body).await;
     if let Some(message) = state
         .chat_store
-        .send_message(chat_id, user_id, &payload.body, payload.parent_id, None)
+        .send_message(
+            chat_id,
+            user_id,
+            &payload.body,
+            &hidden,
+            payload.parent_id,
+            None,
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
@@ -1536,6 +1653,7 @@ async fn start_message_thread(
     if !can_write(&state, origin.chat_id, user_id).await {
         return Err(StatusCode::FORBIDDEN);
     }
+    let hidden = hidden_from_shortcuts(&state, &payload.body).await;
     let Some((chat, message)) = state
         .chat_store
         .start_thread(
@@ -1543,6 +1661,7 @@ async fn start_message_thread(
             message_id,
             &payload.title,
             &payload.body,
+            &hidden,
             user_id,
         )
         .await
@@ -2242,6 +2361,26 @@ async fn can_write(state: &AppState, chat_id: i64, user_id: i64) -> bool {
             .is_participant(chat_id, user_id)
             .await
             .unwrap_or(false)
+}
+
+/// Скрытая часть сообщения из сокращений: каждое слово `/имя` в тексте
+/// добавляет текст привязанного сокращения (одно имя — один раз). Неизвестные
+/// имена и пустой текст пропускаются. Скрытая часть — заметка: в контекст
+/// агентов (`build_context`) она не входит.
+async fn hidden_from_shortcuts(state: &AppState, body: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for name in crate::chat::shortcut_names(body) {
+        if let Ok(Some(content)) = state
+            .trace_store
+            .resolve_capability(crate::trace::CapabilityKind::Shortcut, &name)
+            .await
+        {
+            if !content.is_empty() {
+                parts.push(content);
+            }
+        }
+    }
+    parts.join("\n")
 }
 
 async fn build_context(state: &AppState, chat_id: i64) -> Option<String> {
@@ -4047,6 +4186,403 @@ mod tests {
         let chats = chats.as_array().unwrap();
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0]["id"].as_i64(), Some(chat_id));
+        cleanup(&file).await;
+    }
+
+    // === Сокращения и скрытая часть сообщения ===
+
+    /// Создать обычный чат через API и вернуть его id.
+    async fn create_chat(headers: &HeaderMap, state: &AppState) -> i64 {
+        let (_, body) = post_json(
+            "/chats",
+            headers,
+            state.clone(),
+            serde_json::json!({"title": "s"}),
+        )
+        .await;
+        json_get(&body, &["id"]).unwrap().as_i64().unwrap()
+    }
+
+    /// Отправить сообщение в чат и вернуть тело ответа.
+    async fn send_chat_message(
+        chat_id: i64,
+        body: &str,
+        headers: &HeaderMap,
+        state: &AppState,
+    ) -> (StatusCode, String) {
+        post_json(
+            &format!("/chats/{chat_id}/messages"),
+            headers,
+            state.clone(),
+            serde_json::json!({"body": body}),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn shortcut_token_adds_text_to_message_hidden() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (status, _) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "review", "content": "Проверять диф"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let chat_id = create_chat(&alice, &state).await;
+        let (status, body) =
+            send_chat_message(chat_id, "Сделай /review пожалуйста", &alice, &state).await;
+        assert_eq!(status, StatusCode::OK);
+        // Видимый текст не меняется, скрытая часть — из сокращения.
+        assert_eq!(
+            json_get(&body, &["message", "body"]).unwrap().as_str(),
+            Some("Сделай /review пожалуйста")
+        );
+        assert_eq!(
+            json_get(&body, &["message", "hidden"]).unwrap().as_str(),
+            Some("Проверять диф")
+        );
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn unknown_shortcut_leaves_message_hidden_unchanged() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let chat_id = create_chat(&alice, &state).await;
+        let (status, body) = send_chat_message(chat_id, "/nope вопрос", &alice, &state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json_get(&body, &["message", "hidden"]).unwrap().as_str(),
+            Some("")
+        );
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn repeated_shortcut_added_once() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "review", "content": "Проверять диф"}),
+        )
+        .await;
+        let chat_id = create_chat(&alice, &state).await;
+        let (_, body) = send_chat_message(chat_id, "/review и ещё /review", &alice, &state).await;
+        assert_eq!(
+            json_get(&body, &["message", "hidden"]).unwrap().as_str(),
+            Some("Проверять диф")
+        );
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn several_shortcuts_added_to_hidden() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        for (name, content) in [("first", "Первый текст"), ("second", "Второй текст")] {
+            post_json(
+                "/shortcuts",
+                &alice,
+                state.clone(),
+                serde_json::json!({"name": name, "content": content}),
+            )
+            .await;
+        }
+        let chat_id = create_chat(&alice, &state).await;
+        let (_, body) = send_chat_message(chat_id, "/first и /second", &alice, &state).await;
+        // Оба текста в скрытой части, порядок — по появлению в сообщении.
+        assert_eq!(
+            json_get(&body, &["message", "hidden"]).unwrap().as_str(),
+            Some("Первый текст\nВторой текст")
+        );
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn shortcut_in_thread_first_message_adds_hidden() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "review", "content": "Проверять диф"}),
+        )
+        .await;
+        let chat_id = create_chat(&alice, &state).await;
+        let (_, body) = send_chat_message(chat_id, "задача", &alice, &state).await;
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        // Первое сообщение нити — тоже обычное сообщение: сокращение работает.
+        let (status, body) = post_json(
+            &format!("/messages/{msg_id}/thread"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"title": "Обсуждение", "body": "Смотри /review"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            json_get(&body, &["message", "hidden"]).unwrap().as_str(),
+            Some("Проверять диф")
+        );
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn hidden_not_in_agent_context() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "secret", "content": "СЕКРЕТНАЯ ЗАМЕТКА"}),
+        )
+        .await;
+        let chat_id = create_chat(&alice, &state).await;
+        send_chat_message(chat_id, "/secret вопрос", &alice, &state).await;
+        // В контекст агентов идёт только тело: скрытой заметки там нет.
+        let context = build_context(&state, chat_id).await.unwrap();
+        assert!(context.contains("/secret вопрос"));
+        assert!(!context.contains("СЕКРЕТНАЯ ЗАМЕТКА"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn editing_or_deleting_shortcut_does_not_change_sent_message_hidden() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (_, body) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "review", "content": "Версия 1"}),
+        )
+        .await;
+        let shortcut_id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let chat_id = create_chat(&alice, &state).await;
+        let (_, body) = send_chat_message(chat_id, "/review", &alice, &state).await;
+        let msg_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        // Правка и удаление сокращения не трогают уже отправленное сообщение:
+        // скрытая часть — снимок на момент отправки.
+        patch_json(
+            &format!("/shortcuts/{shortcut_id}"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"content": "Версия 2"}),
+        )
+        .await;
+        delete_json(
+            &format!("/shortcuts/{shortcut_id}"),
+            &alice,
+            state.clone(),
+        )
+        .await;
+        let (_, body) = get(&format!("/chats/{chat_id}"), &alice, state.clone()).await;
+        let messages = json_get(&body, &["messages"]).unwrap();
+        let msg = messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"].as_i64() == Some(msg_id))
+            .unwrap();
+        assert_eq!(msg["hidden"].as_str(), Some("Версия 1"));
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn sent_message_hidden_cannot_be_changed() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let chat_id = create_chat(&alice, &state).await;
+        // Скрытую часть нельзя задать вводом: присланное поле игнорируется,
+        // она собирается только из сокращений.
+        let (_, body) = post_json(
+            &format!("/chats/{chat_id}/messages"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"body": "текст", "hidden": "подмена"}),
+        )
+        .await;
+        assert_eq!(
+            json_get(&body, &["message", "hidden"]).unwrap().as_str(),
+            Some("")
+        );
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn shortcut_name_allows_any_alphabet_without_spaces() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        // Имя может быть на любом алфавите.
+        let (status, _) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "проверка", "content": "Текст"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Пробел в имени недопустим: слово `/имя` не набрать.
+        let (status, _) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "my shortcut", "content": "Текст"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Переименование в имя с пробелом тоже отклоняется.
+        let (_, body) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "ok", "content": "Текст"}),
+        )
+        .await;
+        let id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let (status, _) = patch_json(
+            &format!("/shortcuts/{id}"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "bad name"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn shortcut_occupied_name_rejected() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (status, _) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "dup", "content": "a"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "dup", "content": "b"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn shortcut_changes_written_to_history() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (_, body) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "review", "content": "v1"}),
+        )
+        .await;
+        let id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        patch_json(
+            &format!("/shortcuts/{id}"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"content": "v2"}),
+        )
+        .await;
+        patch_json(
+            &format!("/shortcuts/{id}"),
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "review2"}),
+        )
+        .await;
+        delete_json(&format!("/shortcuts/{id}"), &alice, state.clone()).await;
+        let (status, body) = get(
+            &format!("/shortcuts/{id}/history"),
+            &alice,
+            state.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let actions: Vec<&str> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(actions, vec!["create", "update", "rename", "delete"]);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn deleted_shortcut_stays_with_history() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let (_, body) = post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "review", "content": "v1"}),
+        )
+        .await;
+        let id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        delete_json(&format!("/shortcuts/{id}"), &alice, state.clone()).await;
+        // Удалённая запись видна в списке «Удалённые» и её историю можно открыть.
+        let (status, body) = get("/shortcuts?deleted=1", &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("review"));
+        let (status, _) = get(&format!("/shortcuts/{id}/history"), &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn any_participant_can_edit_shortcuts_and_see_hidden() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let bob = auth_headers("bob", &["participant"]);
+        // Сокращение создал alice — перечень общий, его видит и правит bob.
+        post_json(
+            "/shortcuts",
+            &alice,
+            state.clone(),
+            serde_json::json!({"name": "review", "content": "Проверять диф"}),
+        )
+        .await;
+        let (status, body) = get("/shortcuts", &bob, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("review"));
+        let (_, body) = send_chat_message(
+            create_chat(&bob, &state).await,
+            "/review",
+            &bob,
+            &state,
+        )
+        .await;
+        // Скрытую часть видит любой участник.
+        assert_eq!(
+            json_get(&body, &["message", "hidden"]).unwrap().as_str(),
+            Some("Проверять диф")
+        );
         cleanup(&file).await;
     }
 }

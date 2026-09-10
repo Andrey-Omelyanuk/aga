@@ -108,12 +108,15 @@ pub struct LlmConnectionSpec {
     pub model_name: String,
 }
 
-/// Вид способности каталога: скилл или команда.
+/// Вид способности каталога: скилл, команда или сокращение. Скиллы и команды
+/// даются агентам; сокращения агентам не даются — это текст, который вставляется
+/// в скрытую часть сообщения по слову `/имя`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CapabilityKind {
     Skill,
     Command,
+    Shortcut,
 }
 
 impl CapabilityKind {
@@ -121,6 +124,7 @@ impl CapabilityKind {
         match self {
             CapabilityKind::Skill => "skill",
             CapabilityKind::Command => "command",
+            CapabilityKind::Shortcut => "shortcut",
         }
     }
 }
@@ -1360,10 +1364,10 @@ fn capability_from_row(r: &sqlx::sqlite::SqliteRow) -> CapabilityItem {
     let kind: String = r.get("kind");
     CapabilityItem {
         id: r.get("id"),
-        kind: if kind == "skill" {
-            CapabilityKind::Skill
-        } else {
-            CapabilityKind::Command
+        kind: match kind.as_str() {
+            "skill" => CapabilityKind::Skill,
+            "shortcut" => CapabilityKind::Shortcut,
+            _ => CapabilityKind::Command,
         },
         name: r.get("name"),
         content: r.get("content"),

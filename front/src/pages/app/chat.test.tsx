@@ -387,4 +387,60 @@ describe('ChatPage', () => {
     expect(container.textContent).toContain('Что падает?');
     act(() => root.unmount());
   });
+
+  it('у сообщения со скрытой частью есть ссылка «скрытое», по клику текст разворачивается', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(
+      makeChat({
+        id: 42,
+        title: 'Тест',
+        state: 'OPEN',
+        participants: [{ id: 1, name: 'alice' }],
+        messages: [
+          {
+            id: 5,
+            body: 'задача /review',
+            author_id: 1,
+            created_at: '2026-09-06T10:00:00Z',
+            share_of_id: null,
+            hidden: 'Проверять диф',
+          },
+        ],
+        threads: [],
+      }),
+    );
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const toggle = [...container.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('скрытое'),
+    );
+    expect(toggle).toBeTruthy();
+    // По умолчанию скрытая часть свёрнута.
+    expect(container.textContent).not.toContain('Проверять диф');
+    act(() => toggle!.click());
+    await act(async () => {});
+    expect(container.textContent).toContain('Проверять диф');
+    act(() => root.unmount());
+  });
+
+  it('у сообщения без скрытой части ссылки «скрытое» нет', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(
+      makeChat({
+        id: 42,
+        title: 'Тест',
+        state: 'OPEN',
+        participants: [{ id: 1, name: 'alice' }],
+        messages: [
+          { id: 5, body: 'задача', author_id: 1, created_at: '2026-09-06T10:00:00Z', share_of_id: null },
+        ],
+        threads: [],
+      }),
+    );
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const toggle = [...container.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('скрытое'),
+    );
+    expect(toggle).toBeUndefined();
+    act(() => root.unmount());
+  });
 });

@@ -155,7 +155,7 @@ impl ReactiveRunner {
                 tracing::info!("reactive: posting error message for agent={name}");
                 let _ = self
                     .chat_store
-                    .send_message(chat_id, agent_user_id, &format!("Ошибка: {e}"), None, None)
+                    .send_message(chat_id, agent_user_id, &format!("Ошибка: {e}"), "", None, None)
                     .await;
                 return;
             }
@@ -172,7 +172,7 @@ impl ReactiveRunner {
 
         if let Ok(Some(msg)) = self
             .chat_store
-            .send_message(chat_id, agent_user_id, &result, None, None)
+            .send_message(chat_id, agent_user_id, &result, "", None, None)
             .await
         {
             let _ = self

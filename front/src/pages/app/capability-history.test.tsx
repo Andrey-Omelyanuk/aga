@@ -65,4 +65,30 @@ describe('CapabilityHistoryPage', () => {
 
     act(() => root.unmount());
   });
+
+  it('shows shortcut history with a back link to the Shortcuts config page', async () => {
+    const get = http.get as unknown as ReturnType<typeof vi.fn>;
+    get.mockResolvedValue({ data: entries });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/shortcuts/1/history']}>
+          <Routes>
+            <Route path="shortcuts/:id/history" element={<CapabilityHistoryPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+    await act(async () => {});
+
+    // История сокращения — та же страница, что у скиллов: кто, когда и что.
+    expect(container.textContent).toContain('создал');
+    expect(container.textContent).toContain('alice');
+    expect(container.querySelector('a[href="/config/shortcuts"]')).not.toBeNull();
+
+    act(() => root.unmount());
+  });
 });

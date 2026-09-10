@@ -12,7 +12,27 @@ import { Markdown } from '@/components/core/Markdown';
 import { cn } from '@/lib/utils';
 import type { CatalogItem } from '@/models/project';
 
-export type CapabilityKind = 'skills' | 'commands';
+export type CapabilityKind = 'skills' | 'commands' | 'shortcuts';
+
+/** Подписи зависят от вида: сокращения — не «способности». */
+function kindText(kind: CapabilityKind) {
+  const shortcut = kind === 'shortcuts';
+  return {
+    created: shortcut ? 'Сокращение создано' : 'Способность создана',
+    createFailed: shortcut ? 'Не удалось создать сокращение' : 'Не удалось создать способность',
+    deleted: shortcut ? 'Сокращение удалено' : 'Способность удалена',
+    deleteFailed: shortcut ? 'Не удалось удалить сокращение' : 'Не удалось удалить',
+    confirmTitle: shortcut ? 'Удалить сокращение?' : 'Удалить способность?',
+    confirmMessage: (name: string) =>
+      shortcut
+        ? `«${name}» будет удалено, но его история сохранится.`
+        : `«${name}» будет удалена, но её история сохранится.`,
+    newLabel: shortcut ? 'Новое сокращение' : 'Новая способность',
+    contentPlaceholder: shortcut
+      ? 'Текст сокращения (уйдёт в скрытую часть сообщения по /имя)'
+      : 'Содержимое скилла/команды (markdown; агент берёт его всегда)',
+  };
+}
 
 export interface CapabilityEditorProps {
   kind: CapabilityKind;
@@ -38,6 +58,7 @@ interface CapabilityListProps {
 
 const CapabilityList = observer(
   ({ kind, items, selectedId, onSelect, onChanged }: CapabilityListProps) => {
+    const t = kindText(kind);
     const [name, setName] = useState('');
     const [busy, setBusy] = useState(false);
     const [confirming, setConfirming] = useState<CatalogItem | null>(null);
@@ -48,11 +69,11 @@ const CapabilityList = observer(
       setBusy(true);
       try {
         await http.post(`/${kind}`, { name: trimmed, content: '' });
-        toaster.show({ message: 'Способность создана', intent: 'success' });
+        toaster.show({ message: t.created, intent: 'success' });
         setName('');
         onChanged();
       } catch {
-        toaster.show({ message: 'Не удалось создать способность', intent: 'danger' });
+        toaster.show({ message: t.createFailed, intent: 'danger' });
       } finally {
         setBusy(false);
       }
@@ -63,10 +84,10 @@ const CapabilityList = observer(
       setBusy(true);
       try {
         await http.delete(`/${kind}/${item.id}`);
-        toaster.show({ message: 'Способность удалена', intent: 'success' });
+        toaster.show({ message: t.deleted, intent: 'success' });
         onChanged();
       } catch {
-        toaster.show({ message: 'Не удалось удалить', intent: 'danger' });
+        toaster.show({ message: t.deleteFailed, intent: 'danger' });
       } finally {
         setBusy(false);
       }
@@ -75,7 +96,7 @@ const CapabilityList = observer(
     return (
       <div className={cn(columnClass, 'gap-3')}>
         <div>
-          <div className="mb-2 text-sm font-medium text-slate-700">Новая способность</div>
+          <div className="mb-2 text-sm font-medium text-slate-700">{t.newLabel}</div>
           <div className="flex items-center gap-2">
             <Input
               placeholder="Имя"
@@ -144,8 +165,8 @@ const CapabilityList = observer(
 
         {confirming && (
           <ConfirmDialog
-            title="Удалить способность?"
-            message={`«${confirming.name}» будет удалена, но её история сохранится.`}
+            title={t.confirmTitle}
+            message={t.confirmMessage(confirming.name)}
             onConfirm={() => void remove(confirming)}
             onCancel={() => setConfirming(null)}
           />
@@ -164,6 +185,7 @@ interface CapabilityDetailProps {
 
 const CapabilityDetail = observer(
   ({ kind, item, onChanged }: CapabilityDetailProps) => {
+    const t = kindText(kind);
     const [name, setName] = useState(item.name);
     const [content, setContent] = useState(item.content);
     const [mode, setMode] = useState<'edit' | 'view'>('edit');
@@ -219,7 +241,7 @@ const CapabilityDetail = observer(
           ) : (
             <textarea
               className={cn(textareaClass, 'h-full min-h-[300px]')}
-              placeholder="Содержимое скилла/команды (markdown; агент берёт его всегда)"
+              placeholder={t.contentPlaceholder}
               value={content}
               onChange={(e) => setContent(e.target.value)}
             />

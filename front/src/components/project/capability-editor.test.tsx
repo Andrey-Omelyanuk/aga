@@ -10,7 +10,7 @@ import type { CatalogItem } from '@/models/project';
 function renderEditor(
   items: CatalogItem[],
   deleted: CatalogItem[],
-  kind: 'skills' | 'commands' = 'skills',
+  kind: 'skills' | 'commands' | 'shortcuts' = 'skills',
 ) {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -63,6 +63,24 @@ describe('CapabilityEditor', () => {
     expect(text).toContain('Удалённые');
     expect(text).toContain('old-skill');
     expect(container.querySelector('a[href="/skills/3/history"]')).not.toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it('edits shortcuts: name and text on the right, history on the record', () => {
+    const items: CatalogItem[] = [
+      { id: 7, name: 'review', content: 'Проверять диф', deleted: false },
+    ];
+    const { container, root } = renderEditor(items, [], 'shortcuts');
+    const text = container.textContent ?? '';
+
+    // Сокращения — отдельный вид: заголовок создания и ссылка на историю
+    // ведут на /shortcuts, а не на скиллы.
+    expect(text).toContain('Новое сокращение');
+    expect(text).toContain('review');
+    expect(container.querySelector('a[href="/shortcuts/7/history"]')).not.toBeNull();
+    clickItem(container, 'review');
+    expect(container.textContent).toContain('Проверять диф');
 
     act(() => root.unmount());
   });

@@ -13,6 +13,9 @@ export interface ChatMessage {
   /** Копия сообщения нити в родительском чате: ссылка на сообщение, от
    *  которого нить началась. */
   thread_of_id?: number | null;
+  /** Скрытая часть — заметка, по умолчанию свёрнутая. Заполняется
+   *  сокращениями (`/имя`), вводом не задаётся. */
+  hidden?: string | null;
 }
 
 export interface ChatParticipant {

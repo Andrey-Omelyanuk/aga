@@ -39,3 +39,15 @@ export class Command extends Capability {
   @field(STRING()) content!: string;
   @field() deleted = false;
 }
+
+/** Глобальное сокращение: слово `/имя` в сообщении добавляет `content` в
+ *  скрытую часть. Живёт в том же каталоге, что скиллы и команды (kind
+ *  'shortcut'), с той же историей; агентам не даётся. */
+@api('shortcuts')
+@model
+export class Shortcut extends Capability {
+  @id(NUMBER()) id!: number;
+  @field(STRING()) name!: string;
+  @field(STRING()) content!: string;
+  @field() deleted = false;
+}

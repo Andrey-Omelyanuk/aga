@@ -57,3 +57,18 @@ export const Commands: Story = {
     ],
   },
 };
+
+export const Shortcuts: Story = {
+  args: {
+    kind: 'shortcuts',
+    items: [
+      {
+        id: 5,
+        name: 'review',
+        content: 'Проверь дифф и тесты, напиши замечания.',
+        deleted: false,
+      },
+    ],
+    deleted: [],
+  },
+};
