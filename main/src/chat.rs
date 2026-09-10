@@ -61,6 +61,11 @@ pub struct Message {
     /// сообщения нити со ссылкой на сообщение, от которого нить началась.
     pub thread_of_id: Option<i64>,
     pub body: String,
+    /// Скрытая часть сообщения — заметка, которую не видно в ленте, пока её не
+    /// развернут. Заполняется не вводом, а сокращениями: при отправке каждое
+    /// слово `/имя` добавляет в `hidden` текст, привязанный к имени. В контекст
+    /// агентов (LLM) не уходит.
+    pub hidden: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +253,7 @@ impl ChatStore {
                 title TEXT,
                 thread_of_id INTEGER,
                 body TEXT NOT NULL,
+                hidden TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (chat_id) REFERENCES chats(id)
             )
             "#,
@@ -309,6 +315,9 @@ impl ChatStore {
             .await?;
         store
             .ensure_column("messages", "thread_of_id", "thread_of_id INTEGER")
+            .await?;
+        store
+            .ensure_column("messages", "hidden", "hidden TEXT NOT NULL DEFAULT ''")
             .await?;
 
         // Миграция старых БД: сессионные поля жили в chats, теперь — в
@@ -703,6 +712,7 @@ impl ChatStore {
         chat_id: i64,
         author_id: i64,
         body: &str,
+        hidden: &str,
         parent_id: Option<i64>,
         last_message_id: Option<i64>,
     ) -> Result<Option<Message>, sqlx::Error> {
@@ -723,13 +733,14 @@ impl ChatStore {
         let current_last = last_msgs.first().copied().or(last_message_id);
 
         let result = sqlx::query(
-            "INSERT INTO messages (chat_id, parent_id, author_id, last_message_id, body) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO messages (chat_id, parent_id, author_id, last_message_id, body, hidden) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(chat_id)
         .bind(parent_id)
         .bind(author_id)
         .bind(current_last)
         .bind(body)
+        .bind(hidden)
         .execute(&self.pool)
         .await?;
         let msg_id = result.last_insert_rowid();
@@ -744,7 +755,7 @@ impl ChatStore {
 
     pub async fn get_message(&self, id: i64) -> Result<Option<Message>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body FROM messages WHERE id = ?",
+            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden FROM messages WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -754,7 +765,7 @@ impl ChatStore {
 
     pub async fn list_messages(&self, chat_id: i64) -> Result<Vec<Message>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body FROM messages WHERE chat_id = ? ORDER BY created_at, id",
+            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden FROM messages WHERE chat_id = ? ORDER BY created_at, id",
         )
         .bind(chat_id)
         .fetch_all(&self.pool)
@@ -773,6 +784,7 @@ impl ChatStore {
         message_id: i64,
         title: &str,
         body: &str,
+        hidden: &str,
         author_id: i64,
     ) -> Result<Option<(Chat, Message)>, sqlx::Error> {
         let parent = self.get_chat(parent_chat_id).await?;
@@ -806,13 +818,14 @@ impl ChatStore {
             .await?;
 
         let first = sqlx::query(
-            "INSERT INTO messages (chat_id, parent_id, author_id, title, body) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO messages (chat_id, parent_id, author_id, title, body, hidden) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(thread_id)
         .bind(message_id)
         .bind(author_id)
         .bind(title)
         .bind(body)
+        .bind(hidden)
         .execute(&mut *tx)
         .await?;
         let first_id = first.last_insert_rowid();
@@ -859,13 +872,14 @@ impl ChatStore {
         }
 
         let result = sqlx::query(
-            "INSERT INTO messages (chat_id, parent_id, author_id, title, thread_of_id, body) VALUES (?, NULL, ?, ?, ?, ?)",
+            "INSERT INTO messages (chat_id, parent_id, author_id, title, thread_of_id, body, hidden) VALUES (?, NULL, ?, ?, ?, ?, ?)",
         )
         .bind(parent_id)
         .bind(original.author_id)
         .bind(&original.title)
         .bind(origin_id)
         .bind(&original.body)
+        .bind(&original.hidden)
         .execute(&self.pool)
         .await?;
         let new_id = result.last_insert_rowid();
@@ -901,7 +915,7 @@ impl ChatStore {
 
         let share_of = original.share_of_id.unwrap_or(original.id);
         let result = sqlx::query(
-            "INSERT INTO messages (chat_id, parent_id, author_id, shared_by_id, share_of_id, body) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (chat_id, parent_id, author_id, shared_by_id, share_of_id, body, hidden) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(chat_id)
         .bind(original.parent_id)
@@ -909,6 +923,7 @@ impl ChatStore {
         .bind(shared_by_id)
         .bind(share_of)
         .bind(&original.body)
+        .bind(&original.hidden)
         .execute(&self.pool)
         .await?;
         let new_id = result.last_insert_rowid();
@@ -1410,6 +1425,7 @@ fn message_from_row(r: &sqlx::sqlite::SqliteRow) -> Message {
         title: r.get("title"),
         thread_of_id: r.get("thread_of_id"),
         body: r.get("body"),
+        hidden: r.get("hidden"),
     }
 }
 
@@ -1457,6 +1473,28 @@ pub fn mentioned_roles(body: &str) -> Vec<String> {
     roles
 }
 
+/// Найти сокращения, вызванные в тексте: слова вида `/имя`. Возвращает имена
+/// без слэша, каждое один раз, в порядке первого появления. Имя не может быть
+/// пустым и не содержит `/` (по слэшу в слове видно путь, а не сокращение).
+pub fn shortcut_names(body: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for token in body.split_whitespace() {
+        let Some(rest) = token.strip_prefix('/') else {
+            continue;
+        };
+        let name = rest
+            .trim_end_matches([',', '.', '!', '?', ':', ';'])
+            .to_string();
+        if name.is_empty() || name.contains('/') {
+            continue;
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1486,6 +1524,19 @@ mod tests {
         );
         assert!(mentioned_roles("no mention").is_empty());
         assert_eq!(mentioned_roles("@Agent.a @Agent.b!"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn finds_shortcut_names_once_in_order() {
+        // Слова вида `/имя`, по одному разу, в порядке появления.
+        assert_eq!(shortcut_names("/review текст"), vec!["review"]);
+        assert_eq!(
+            shortcut_names("/first и /second, /first"),
+            vec!["first", "second"]
+        );
+        // Без слэша — не сокращение; путь с внутренним слэшем пропускается.
+        assert!(shortcut_names("review /usr/bin").is_empty());
+        assert!(shortcut_names("http://example.com/x").is_empty());
     }
 
     #[tokio::test]
@@ -1988,12 +2039,12 @@ mod tests {
         let (store, path, user) = chat_fixture().await;
         let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let msg = store
-            .send_message(root.id, user, "задача", None, None)
+            .send_message(root.id, user, "задача", "", None, None)
             .await
             .unwrap()
             .unwrap();
         let (thread, first) = store
-            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", user)
+            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", "", user)
             .await
             .unwrap()
             .unwrap();
@@ -2017,17 +2068,17 @@ mod tests {
         let (store, path, user) = chat_fixture().await;
         let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let msg = store
-            .send_message(root.id, user, "задача", None, None)
+            .send_message(root.id, user, "задача", "", None, None)
             .await
             .unwrap()
             .unwrap();
         store
-            .start_thread(root.id, msg.id, "Разбор демо", "Первое.", user)
+            .start_thread(root.id, msg.id, "Разбор демо", "Первое.", "", user)
             .await
             .unwrap()
             .unwrap();
         store
-            .start_thread(root.id, msg.id, "Таймеры", "Второе.", user)
+            .start_thread(root.id, msg.id, "Таймеры", "Второе.", "", user)
             .await
             .unwrap()
             .unwrap();
@@ -2053,12 +2104,12 @@ mod tests {
         let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let general = store.create_chat(None, Some("g"), user).await.unwrap();
         let msg = store
-            .send_message(root.id, user, "задача", None, None)
+            .send_message(root.id, user, "задача", "", None, None)
             .await
             .unwrap()
             .unwrap();
         store
-            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", user)
+            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", "", user)
             .await
             .unwrap()
             .unwrap();
@@ -2082,17 +2133,17 @@ mod tests {
             .unwrap();
         let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let msg = store
-            .send_message(root.id, user, "задача", None, None)
+            .send_message(root.id, user, "задача", "", None, None)
             .await
             .unwrap()
             .unwrap();
         let (thread, _) = store
-            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", user)
+            .start_thread(root.id, msg.id, "Обсуждение", "Что падает?", "", user)
             .await
             .unwrap()
             .unwrap();
         let reply = store
-            .send_message(thread.id, other, "Гоняю run-tests.", None, None)
+            .send_message(thread.id, other, "Гоняю run-tests.", "", None, None)
             .await
             .unwrap()
             .unwrap();
@@ -2115,23 +2166,23 @@ mod tests {
         let (store, path, user) = chat_fixture().await;
         let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let msg = store
-            .send_message(root.id, user, "задача", None, None)
+            .send_message(root.id, user, "задача", "", None, None)
             .await
             .unwrap()
             .unwrap();
         let (thread, _) = store
-            .start_thread(root.id, msg.id, "Первая", "тело", user)
+            .start_thread(root.id, msg.id, "Первая", "тело", "", user)
             .await
             .unwrap()
             .unwrap();
         let tmsg = store
-            .send_message(thread.id, user, "внутри", None, None)
+            .send_message(thread.id, user, "внутри", "", None, None)
             .await
             .unwrap()
             .unwrap();
         // Вложенная нить: начинается от сообщения внутри нити, родитель — нить.
         let (nested, _) = store
-            .start_thread(thread.id, tmsg.id, "Вторая", "глубже", user)
+            .start_thread(thread.id, tmsg.id, "Вторая", "глубже", "", user)
             .await
             .unwrap()
             .unwrap();
@@ -2150,27 +2201,27 @@ mod tests {
         let root = store.create_chat(None, Some("s"), user).await.unwrap();
         let mut parent = root.clone();
         let mut origin = store
-            .send_message(root.id, user, "start", None, None)
+            .send_message(root.id, user, "start", "", None, None)
             .await
             .unwrap()
             .unwrap();
         // Допустимо до MAX_CHAT_LEVEL уровней вложенности.
         for _ in 0..crate::chat::MAX_CHAT_LEVEL {
             let (thread, _) = store
-                .start_thread(parent.id, origin.id, "т", "б", user)
+                .start_thread(parent.id, origin.id, "т", "б", "", user)
                 .await
                 .unwrap()
                 .unwrap();
             parent = thread;
             origin = store
-                .send_message(parent.id, user, "сообщение", None, None)
+                .send_message(parent.id, user, "сообщение", "", None, None)
                 .await
                 .unwrap()
                 .unwrap();
         }
         // Следующий уровень за пределом не создаётся.
         assert!(store
-            .start_thread(parent.id, origin.id, "т", "б", user)
+            .start_thread(parent.id, origin.id, "т", "б", "", user)
             .await
             .unwrap()
             .is_none());

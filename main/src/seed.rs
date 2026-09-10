@@ -227,6 +227,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             session.id,
             alice,
             "Проверь пул-реквест #42 в ветке feature/auth",
+            "",
             None,
             None,
         )
@@ -237,6 +238,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             session.id,
             bot,
             "Ревью сделал: конфликт в auth.rs, тесты проваливаются — см. артефакт.",
+            "",
             Some(task_msg.id),
             None,
         )
@@ -257,6 +259,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             review_msg.id,
             "Обсуждение ревью",
             "Что именно падает в тестах?",
+            "",
             alice,
         )
         .await?
@@ -265,12 +268,13 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         thread.id,
         bob,
         "Гоняю run-tests, приложу вывод.",
+        "",
         None,
         None,
     )
     .await?;
 
-    chat.send_message(session.id, bob, "Отправил фикс в ветку.", None, None)
+    chat.send_message(session.id, bob, "Отправил фикс в ветку.", "", None, None)
         .await?;
 
     // --- Общий чат (без воркстейшна) с зашаренным сообщением.
@@ -280,6 +284,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         general.id,
         bob,
         "Привет! Кто возьмёт мобильный клиент?",
+        "",
         None,
         None,
     )
