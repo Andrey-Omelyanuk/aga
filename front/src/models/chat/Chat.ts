@@ -21,6 +21,9 @@ export interface ChatMessage {
 export interface ChatParticipant {
   id: number;
   name: string;
+  /** Вид участника: 'human' (человек) или 'agent'. Подсказка по «@» предлагает
+   *  только людей. */
+  kind?: string;
 }
 
 export interface ChatArtifact {

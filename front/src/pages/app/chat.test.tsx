@@ -107,6 +107,22 @@ function shortcutFixtures(): any[] {
   ];
 }
 
+function participantsChat(): any {
+  return makeChat({
+    id: 42,
+    title: 'Тест',
+    state: 'OPEN',
+    participants: [
+      { id: 1, name: 'alice', kind: 'human' },
+      { id: 2, name: 'bob', kind: 'human' },
+      { id: 3, name: 'Agent.docker-helper', kind: 'agent' },
+    ],
+    messages: [],
+    threads: [],
+    action: vi.fn(),
+  });
+}
+
 function chatInput(container: HTMLElement): HTMLTextAreaElement {
   return container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Введите сообщение..."]')!;
 }
@@ -645,6 +661,180 @@ describe('ChatPage', () => {
     // В отправленном теле «/имя» сохраняется (пробел после него send срезает) —
     // ядро по нему заполнит скрытую часть, как и для введённого вручную.
     expect(chat.action).toHaveBeenCalledWith('messages', { body: '/review' });
+    act(() => root.unmount());
+  });
+
+  it('при вводе «@» в начале сообщения или после пробела появляется список людей-участников', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+
+    // В начале сообщения — видны люди, агент-участник нет.
+    setInput(input, '@');
+    expect(container.querySelector('ul[role="listbox"]')).not.toBeNull();
+    expect(container.textContent).toContain('@alice');
+    expect(container.textContent).toContain('@bob');
+    expect(container.textContent).not.toContain('Agent.docker-helper');
+
+    // Без «@» в начале слова списка нет.
+    setInput(input, 'сделай ');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+
+    // После пробела — текущее слово начинается с «@», список снова виден.
+    setInput(input, 'сделай @');
+    expect(container.querySelector('ul[role="listbox"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('по мере набора после «@» список фильтруется по началу имени', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '@b');
+    const names = [...container.querySelectorAll('li')].map((li) => li.textContent).join(' ');
+    expect(names).toContain('@bob');
+    expect(names).not.toContain('@alice');
+    act(() => root.unmount());
+  });
+
+  it('пункт списка участников показывает имя', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(container), '@al');
+    const item = [...container.querySelectorAll('li')][0]!;
+    expect(item.textContent).toContain('@alice');
+    act(() => root.unmount());
+  });
+
+  it('агенты-участники в списке по «@» не показываются', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(container), '@Agent');
+    const names = [...container.querySelectorAll('li')].map((li) => li.textContent).join(' ');
+    expect(names).not.toContain('Agent');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('если в чате нет людей-участников или ни одно имя не начинается с набранного текста, список не показывается', async () => {
+    // Только агент-участник — людей нет.
+    vi.mocked(loadChatDetail).mockResolvedValue(
+      makeChat({
+        id: 42,
+        title: 'Тест',
+        state: 'OPEN',
+        participants: [{ id: 3, name: 'Agent.Bot', kind: 'agent' }],
+        messages: [],
+        threads: [],
+        action: vi.fn(),
+      }),
+    );
+    const { container: agentContainer, root: agentRoot } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(agentContainer), '@');
+    expect(agentContainer.querySelector('ul[role="listbox"]')).toBeNull();
+    act(() => agentRoot.unmount());
+
+    // Ни одно имя не начинается с набранного.
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(container), '@zzz');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('стрелки вниз и вверх перемещают выбор по списку участников', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '@');
+    // Список отсортирован: alice, bob. Вниз — на bob, вверх — обратно.
+    keyDown(input, 'ArrowDown');
+    keyDown(input, 'ArrowUp');
+    keyDown(input, 'Enter');
+    expect(input.value).toBe('@alice ');
+    act(() => root.unmount());
+  });
+
+  it('Tab дополняет выбранное имя до «@имя» и вставляет после него пробел, список закрывается', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '@al');
+    keyDown(input, 'Tab');
+    expect(input.value).toBe('@alice ');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('клик по пункту списка участников дополняет имя, как Tab', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '@b');
+    const item = [...container.querySelectorAll('li')].find((li) =>
+      li.textContent?.includes('bob'),
+    )!;
+    act(() => {
+      item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(input.value).toBe('@bob ');
+    act(() => root.unmount());
+  });
+
+  it('Enter при открытом списке участников дополняет, как Tab, без списка отправляет', async () => {
+    const chat = participantsChat();
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+
+    setInput(input, '@al');
+    keyDown(input, 'Enter');
+    expect(input.value).toBe('@alice ');
+    expect(chat.action).not.toHaveBeenCalled();
+
+    setInput(input, 'привет');
+    keyDown(input, 'Enter');
+    expect(chat.action).toHaveBeenCalledWith('messages', { body: 'привет' });
+    act(() => root.unmount());
+  });
+
+  it('Escape закрывает список участников, оставляя набранный текст как есть', async () => {
+    const chat = participantsChat();
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '@al');
+    expect(container.querySelector('ul[role="listbox"]')).not.toBeNull();
+    keyDown(input, 'Escape');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+    expect(input.value).toBe('@al');
+    expect(chat.action).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
+  it('дополненное «@имя» остаётся в видимом тексте и уходит при отправке', async () => {
+    const chat = participantsChat();
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '@al');
+    keyDown(input, 'Tab');
+    expect(input.value).toBe('@alice ');
+    keyDown(input, 'Enter');
+    expect(chat.action).toHaveBeenCalledWith('messages', { body: '@alice' });
     act(() => root.unmount());
   });
 });

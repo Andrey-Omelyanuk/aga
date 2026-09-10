@@ -22,6 +22,14 @@ function lastWordStart(text: string): number {
   return 0;
 }
 
+// Пункт подсказки: имя для дополнения и необязательная подсказка (у сокращений
+// — их текст, у участников её нет).
+interface MentionItem {
+  id: number;
+  name: string;
+  hint?: string;
+}
+
 const ChatPage = observer(() => {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -112,19 +120,33 @@ const ChatPage = observer(() => {
     if (chatId !== null) loadDetail(chatId, setCurrentChat);
   };
 
-  // Автодополнение сокращений: при вводе «/» в начале текущего слова показываем
-  // перечень сокращений, фильтруем по мере набора, Tab/Enter дополняет до
-  // «/имя » (пробел вставляется сам). Escape прячет список, не трогая текст.
+  // Автодополнение при вводе: «/» — сокращения (перечень с Config → Shortcuts),
+  // «@» — люди-участники открытого чата (агентов в список не берём). Список
+  // фильтруется по мере набора, Tab/Enter дополняет до «/имя » / «@имя »
+  // (пробел вставляется сам). Escape прячет список, не трогая текст.
   const wordStart = lastWordStart(draft);
   const currentWord = draft.slice(wordStart);
-  const queryPart = currentWord.startsWith('/') ? currentWord.slice(1) : null;
-  const matches = useMemo(() => {
+  const trigger = currentWord.startsWith('/') ? '/' : currentWord.startsWith('@') ? '@' : null;
+  const queryPart = trigger !== null ? currentWord.slice(1) : null;
+
+  const matches = useMemo<MentionItem[]>(() => {
     if (queryPart === null) return [];
     const q = queryPart.toLowerCase();
-    return shortcuts.items
-      .filter((s) => s.name.toLowerCase().startsWith(q))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [queryPart, shortcuts.items]);
+    if (trigger === '/') {
+      return shortcuts.items
+        .filter((s) => s.name.toLowerCase().startsWith(q))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((s) => ({ id: s.id, name: s.name, hint: s.content }));
+    }
+    if (trigger === '@') {
+      return (currentChat?.participants ?? [])
+        .filter((p) => p.kind !== 'agent')
+        .filter((p) => p.name.toLowerCase().startsWith(q))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((p) => ({ id: p.id, name: p.name }));
+    }
+    return [];
+  }, [queryPart, trigger, shortcuts.items, currentChat?.participants]);
 
   const [dismissed, setDismissed] = useState(false);
   const [highlight, setHighlight] = useState(0);
@@ -137,12 +159,12 @@ const ChatPage = observer(() => {
   const listOpen = !dismissed && queryPart !== null && matches.length > 0;
   const selected = matches.length > 0 ? matches[Math.min(highlight, matches.length - 1)] : null;
 
-  const complete = (s: { id: number; name: string }) => {
-    const value = `${draft.slice(0, wordStart)}/${s.name} `;
+  const complete = (item: MentionItem) => {
+    const value = `${draft.slice(0, wordStart)}${trigger}${item.name} `;
     setDraft(value);
     const el = inputRef.current;
     if (el) {
-      // Каретку — в конец вставленного «/имя », дальше печатается текст.
+      // Каретку — в конец вставленного «/имя »/«@имя », дальше печатается текст.
       requestAnimationFrame(() => el.setSelectionRange(value.length, value.length));
       el.focus();
     }
@@ -236,9 +258,9 @@ const ChatPage = observer(() => {
                 role="listbox"
                 className="absolute bottom-full left-0 mb-1 max-h-48 w-full overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
               >
-                {matches.map((s, i) => (
+                {matches.map((item, i) => (
                   <li
-                    key={s.id}
+                    key={item.id}
                     role="option"
                     aria-selected={i === highlight}
                     className={cn(
@@ -247,13 +269,16 @@ const ChatPage = observer(() => {
                     )}
                     onMouseDown={(e) => {
                       e.preventDefault();
-                      complete(s);
+                      complete(item);
                     }}
                     onMouseEnter={() => setHighlight(i)}
                   >
-                    <span className="shrink-0 font-semibold text-slate-800">/{s.name}</span>
-                    {s.content ? (
-                      <span className="truncate text-xs text-slate-500">{s.content}</span>
+                    <span className="shrink-0 font-semibold text-slate-800">
+                      {trigger}
+                      {item.name}
+                    </span>
+                    {item.hint ? (
+                      <span className="truncate text-xs text-slate-500">{item.hint}</span>
                     ) : null}
                   </li>
                 ))}
