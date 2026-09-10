@@ -7,10 +7,14 @@ import ChatPage from './chat';
 import pub_sub from '@/services/pub-sub';
 import http from '@/services/http';
 import { loadChatDetail } from '@/models/chat';
+import { Shortcut } from '@/models/project';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let messageHandler: ((data: any) => void) | null = null;
+
+// Сокращения для подсказки: тесты подставляют фикстуры до рендера.
+let shortcutItems: any[] = [];
 
 vi.mock('@/services/pub-sub', () => ({
   default: {
@@ -43,7 +47,12 @@ vi.mock('@/models/chat', () => ({
 }));
 
 vi.mock('@/utils/mobx', () => ({
-  useQuery: () => [{ items: [], load: vi.fn() }, Promise.resolve(true)],
+  useQuery: (model: any) => {
+    if (model === Shortcut) {
+      return [{ items: shortcutItems, load: vi.fn() }, Promise.resolve(true)];
+    }
+    return [{ items: [], load: vi.fn() }, Promise.resolve(true)];
+  },
 }));
 
 async function renderChat(id: string) {
@@ -71,6 +80,35 @@ function setInput(el: Element, value: string) {
     setter.call(el, value);
     el.dispatchEvent(new Event('input', { bubbles: true }));
   });
+}
+
+function keyDown(el: Element, key: string) {
+  act(() => {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+  });
+}
+
+function openChat(): any {
+  return {
+    id: 42,
+    title: 'Тест',
+    state: 'OPEN',
+    participants: [],
+    messages: [],
+    threads: [],
+    action: vi.fn(),
+  };
+}
+
+function shortcutFixtures(): any[] {
+  return [
+    { id: 1, name: 'review', content: 'Проверять диф', deleted: false },
+    { id: 2, name: 'deploy-check', content: 'Проверка деплоя', deleted: false },
+  ];
+}
+
+function chatInput(container: HTMLElement): HTMLTextAreaElement {
+  return container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Введите сообщение..."]')!;
 }
 
 function threadChat(): any {
@@ -119,6 +157,7 @@ beforeEach(() => {
   vi.mocked(http.post).mockReset();
   vi.mocked(http.post).mockResolvedValue({});
   messageHandler = null;
+  shortcutItems = [];
 });
 
 describe('ChatPage', () => {
@@ -441,6 +480,171 @@ describe('ChatPage', () => {
       b.textContent?.includes('скрытое'),
     );
     expect(toggle).toBeUndefined();
+    act(() => root.unmount());
+  });
+
+  it('при вводе «/» в начале сообщения или после пробела появляется список сокращений', async () => {
+    shortcutItems = shortcutFixtures();
+    vi.mocked(loadChatDetail).mockResolvedValue(openChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+
+    // В начале сообщения.
+    setInput(input, '/');
+    expect(container.querySelector('ul[role="listbox"]')).not.toBeNull();
+    expect(container.textContent).toContain('/review');
+    expect(container.textContent).toContain('/deploy-check');
+
+    // Без слэша в начале слова списка нет.
+    setInput(input, 'сделай ');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+
+    // После пробела — текущее слово начинается со слэша, список снова виден.
+    setInput(input, 'сделай /');
+    expect(container.querySelector('ul[role="listbox"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('по мере набора после «/» список фильтруется по началу имени', async () => {
+    shortcutItems = shortcutFixtures();
+    vi.mocked(loadChatDetail).mockResolvedValue(openChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '/de');
+    const names = [...container.querySelectorAll('li')].map((li) => li.textContent).join(' ');
+    expect(names).toContain('/deploy-check');
+    expect(names).not.toContain('/review');
+    act(() => root.unmount());
+  });
+
+  it('пункт списка показывает имя сокращения и его текст-подсказку', async () => {
+    shortcutItems = shortcutFixtures();
+    vi.mocked(loadChatDetail).mockResolvedValue(openChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(container), '/rev');
+    const item = [...container.querySelectorAll('li')][0]!;
+    expect(item.textContent).toContain('/review');
+    expect(item.textContent).toContain('Проверять диф');
+    act(() => root.unmount());
+  });
+
+  it('если сокращений нет или ни одно не начинается с набранного текста, список не показывается', async () => {
+    // Перечня нет вовсе.
+    shortcutItems = [];
+    vi.mocked(loadChatDetail).mockResolvedValue(openChat());
+    const { container: emptyContainer, root: emptyRoot } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(emptyContainer), '/');
+    expect(emptyContainer.querySelector('ul[role="listbox"]')).toBeNull();
+    act(() => emptyRoot.unmount());
+
+    // Ни одно имя не начинается с набранного.
+    shortcutItems = shortcutFixtures();
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(container), '/zzz');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('стрелки вниз и вверх перемещают выбор по списку', async () => {
+    shortcutItems = shortcutFixtures();
+    vi.mocked(loadChatDetail).mockResolvedValue(openChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '/');
+    // Список отсортирован: deploy-check, review. Вниз — на review, вверх — обратно.
+    keyDown(input, 'ArrowDown');
+    keyDown(input, 'ArrowUp');
+    keyDown(input, 'Enter');
+    expect(input.value).toBe('/deploy-check ');
+    act(() => root.unmount());
+  });
+
+  it('Tab дополняет выбранное сокращение до «/имя» и вставляет после него пробел, список закрывается', async () => {
+    shortcutItems = shortcutFixtures();
+    vi.mocked(loadChatDetail).mockResolvedValue(openChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '/rev');
+    keyDown(input, 'Tab');
+    expect(input.value).toBe('/review ');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('Enter при открытом списке дополняет, как Tab, без списка отправляет сообщение', async () => {
+    shortcutItems = shortcutFixtures();
+    const chat = openChat();
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+
+    setInput(input, '/rev');
+    keyDown(input, 'Enter');
+    expect(input.value).toBe('/review ');
+    expect(chat.action).not.toHaveBeenCalled();
+
+    setInput(input, 'привет');
+    keyDown(input, 'Enter');
+    expect(chat.action).toHaveBeenCalledWith('messages', { body: 'привет' });
+    act(() => root.unmount());
+  });
+
+  it('Escape закрывает список, оставляя набранный текст как есть', async () => {
+    shortcutItems = shortcutFixtures();
+    const chat = openChat();
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '/rev');
+    expect(container.querySelector('ul[role="listbox"]')).not.toBeNull();
+    keyDown(input, 'Escape');
+    expect(container.querySelector('ul[role="listbox"]')).toBeNull();
+    expect(input.value).toBe('/rev');
+    expect(chat.action).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
+  it('клик по пункту списка дополняет сокращение, как Tab', async () => {
+    shortcutItems = shortcutFixtures();
+    vi.mocked(loadChatDetail).mockResolvedValue(openChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '/de');
+    const item = [...container.querySelectorAll('li')].find((li) =>
+      li.textContent?.includes('deploy-check'),
+    )!;
+    act(() => {
+      item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(input.value).toBe('/deploy-check ');
+    act(() => root.unmount());
+  });
+
+  it('дополненное «/имя» остаётся в видимом тексте и уходит при отправке', async () => {
+    shortcutItems = shortcutFixtures();
+    const chat = openChat();
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const input = chatInput(container);
+    setInput(input, '/rev');
+    keyDown(input, 'Tab');
+    expect(input.value).toBe('/review ');
+    keyDown(input, 'Enter');
+    // В отправленном теле «/имя» сохраняется (пробел после него send срезает) —
+    // ядро по нему заполнит скрытую часть, как и для введённого вручную.
+    expect(chat.action).toHaveBeenCalledWith('messages', { body: '/review' });
     act(() => root.unmount());
   });
 });
