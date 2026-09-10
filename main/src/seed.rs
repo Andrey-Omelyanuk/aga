@@ -100,6 +100,26 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             "alice",
         )
         .await?;
+    // Сокращения (kind='shortcut'): слово `/имя` в сообщении добавляет этот
+    // текст в скрытую часть. Агентам не даются — это заметка к сообщению.
+    trace
+        .create_capability(
+            CapabilityKind::Shortcut,
+            "review",
+            "Проверь дифф и прогони тесты, замечания — списком.",
+            alice,
+            "alice",
+        )
+        .await?;
+    trace
+        .create_capability(
+            CapabilityKind::Shortcut,
+            "deploy-check",
+            "Перед деплоем: миграции, health-check, план отката.",
+            alice,
+            "alice",
+        )
+        .await?;
 
     // --- Набор агентов: дерево backend → api. LLM — подключение, созданное
     // ниже (дефолтное, с моделью): backend ходит к ollama-local, api — без
@@ -222,12 +242,19 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let session = chat
         .open_workstation_session(ws1.id, p1, Some("Сессия: backend"), alice)
         .await?;
+    // Демонстрация скрытой части: в тексте есть `/review`, в реальной отправке
+    // ядро само собрало бы `hidden` из сокращения — сид ставит его напрямую
+    // (сообщения сида идут мимо HTTP-обработчика).
+    let review_note = trace
+        .resolve_capability(CapabilityKind::Shortcut, "review")
+        .await?
+        .unwrap_or_default();
     let task_msg = chat
         .send_message(
             session.id,
             alice,
-            "Проверь пул-реквест #42 в ветке feature/auth",
-            "",
+            "Проверь пул-реквест #42 в ветке feature/auth /review",
+            &review_note,
             None,
             None,
         )
