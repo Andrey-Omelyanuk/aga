@@ -9,13 +9,19 @@ import http from '@/services/http';
 import { formatTime } from '@/utils/dates';
 import type { CapabilityHistoryEntry } from '@/models/project';
 
-type RouteKind = 'skills' | 'commands';
+type RouteKind = 'skills' | 'commands' | 'shortcuts';
 
 const ACTION_LABEL: Record<CapabilityHistoryEntry['action'], string> = {
   create: 'создал',
   update: 'изменил содержимое',
   rename: 'переименовал',
   delete: 'удалил',
+};
+
+const KIND_LABEL: Record<RouteKind, string> = {
+  skills: 'Skills',
+  commands: 'Commands',
+  shortcuts: 'Shortcuts',
 };
 
 /** Дифф содержимого этой записи к предыдущей: предыдущее содержимое берём из
@@ -47,7 +53,7 @@ const CapabilityHistoryPage = observer(() => {
   return (
     <div>
       <Link to={`/config/${kind}`} className="text-xs text-blue-600 hover:underline">
-        ← {kind === 'skills' ? 'Skills' : 'Commands'}
+        ← {KIND_LABEL[kind] ?? kind}
       </Link>
       <Card>
         <CardTitle>История изменений</CardTitle>

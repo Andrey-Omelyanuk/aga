@@ -105,6 +105,7 @@ const MessageRow = observer(
   ({ scopeId, participants, message, onStart, onToParent, onOpenThread }: MessageRowProps) => {
     const isUser = message.author_id === scopeId;
     const author = participants.find((p) => p.id === message.author_id)?.name ?? `#${message.author_id}`;
+    const [showHidden, setShowHidden] = useState(false);
 
     return (
       <div className={`mb-3 flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -136,6 +137,21 @@ const MessageRow = observer(
               </button>
             ) : null}
           </div>
+          {message.hidden ? (
+            <div className="mt-0.5">
+              <button
+                onClick={() => setShowHidden((v) => !v)}
+                className="text-[11px] text-slate-400 hover:text-blue-600"
+              >
+                {showHidden ? '▾ скрытое' : '▸ скрытое'}
+              </button>
+              {showHidden && (
+                <div className="mt-1 whitespace-pre-wrap break-words rounded-md border border-dashed border-slate-300 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600">
+                  {message.hidden}
+                </div>
+              )}
+            </div>
+          ) : null}
           <Artifacts messageId={message.id} />
         </div>
       </div>

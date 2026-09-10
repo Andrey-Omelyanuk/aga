@@ -58,6 +58,27 @@ describe('ConfigHelpPage', () => {
     act(() => root.unmount());
   });
 
+  it('Config tab menu has a Shortcuts item opening the shortcuts page', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root: Root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ activeProject: stubProjectInput() }}>
+          <MemoryRouter initialEntries={['/config/env']}>
+            <AppHeader />
+          </MemoryRouter>
+        </AppContext.Provider>,
+      );
+    });
+
+    const link = container.querySelector('a[href="/config/shortcuts"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toBe('Shortcuts');
+
+    act(() => root.unmount());
+  });
+
   it('route /config/help opens the help page', async () => {
     const { container, root } = await renderHelp();
     const text = container.textContent ?? '';
