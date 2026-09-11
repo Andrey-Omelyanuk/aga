@@ -449,23 +449,6 @@ impl ChatStore {
         Ok(result.last_insert_rowid())
     }
 
-    /// Получить (создать при отсутствии) учётку агента для роли.
-    pub async fn ensure_agent_user(&self, role: &str) -> Result<i64, sqlx::Error> {
-        if let Some(id) = self.find_user_id_by_role(role).await? {
-            return Ok(id);
-        }
-        self.insert_user(&format!("Agent.{role}"), "agent", false, None, Some(role))
-            .await
-    }
-
-    async fn find_user_id_by_role(&self, role: &str) -> Result<Option<i64>, sqlx::Error> {
-        let row = sqlx::query("SELECT id FROM chat_users WHERE kind = 'agent' AND role = ?")
-            .bind(role)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| r.get("id")))
-    }
-
     pub async fn get_user(&self, id: i64) -> Result<Option<ChatUser>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT id, name, kind, is_super_user, sso_subject, role, created_at FROM chat_users WHERE id = ?",
@@ -788,6 +771,21 @@ impl ChatStore {
             .await?;
 
         self.get_message(msg_id).await
+    }
+
+    /// Хвост диалога для контекста агента: тела последних 10 сообщений чата,
+    /// по порядку. Скрытая часть (`hidden`) не входит — в LLM уходит только
+    /// видимый текст.
+    pub async fn context_tail(&self, chat_id: i64) -> Option<String> {
+        let messages = self.list_messages(chat_id).await.ok()?;
+        let tail: Vec<String> = messages
+            .iter()
+            .rev()
+            .take(10)
+            .rev()
+            .map(|m| m.body.clone())
+            .collect();
+        Some(tail.join("\n"))
     }
 
     pub async fn get_message(&self, id: i64) -> Result<Option<Message>, sqlx::Error> {
@@ -1499,20 +1497,6 @@ fn clean_at(name: &str) -> String {
     name.trim_start_matches('@').to_string()
 }
 
-/// Найти всех агентов, упомянутых в сообщении вида `@Agent.<role>`.
-pub fn mentioned_roles(body: &str) -> Vec<String> {
-    let mut roles = Vec::new();
-    for token in body.split_whitespace() {
-        if let Some(rest) = token.strip_prefix("@Agent.") {
-            let role = rest.trim_end_matches([',', '.', '!']).to_string();
-            if !role.is_empty() {
-                roles.push(role);
-            }
-        }
-    }
-    roles
-}
-
 /// Найти сокращения, вызванные в тексте: слова вида `/имя`. Возвращает имена
 /// без слэша, каждое один раз, в порядке первого появления. Имя не может быть
 /// пустым и не содержит `/` (по слэшу в слове видно путь, а не сокращение).
@@ -1554,16 +1538,6 @@ mod tests {
         assert_eq!(parse_command("\n#start X"), None);
         // #start больше не команда: нити начинаются действием у сообщения.
         assert_eq!(parse_command("#start New thread"), None);
-    }
-
-    #[test]
-    fn mentions_roles() {
-        assert_eq!(
-            mentioned_roles("hi @Agent.docker-helper please"),
-            vec!["docker-helper"]
-        );
-        assert!(mentioned_roles("no mention").is_empty());
-        assert_eq!(mentioned_roles("@Agent.a @Agent.b!"), vec!["a", "b"]);
     }
 
     #[test]

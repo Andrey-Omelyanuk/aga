@@ -22,7 +22,6 @@ use crate::centrifuge::CentrifugeClient;
 use crate::chat::{parse_command, Chat, ChatCommand, ChatStore, Message, SessionError};
 use crate::cluster::Cluster;
 use crate::config::Config;
-use crate::reactive::ReactiveRunner;
 use crate::trace::TraceStore;
 
 #[derive(Clone)]
@@ -30,7 +29,6 @@ pub struct AppState {
     pub config: Config,
     pub trace_store: TraceStore,
     pub chat_store: ChatStore,
-    pub reactive: ReactiveRunner,
     pub cluster: Cluster,
     /// Клиент Centrifugo (реальное время для чата). Не настроен — `disabled()`.
     pub centrifuge: CentrifugeClient,
@@ -1598,18 +1596,8 @@ async fn send_message(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
-        // Реактивные агенты по упоминаниям @Agent.<имя> из набора проекта.
-        for name in crate::chat::mentioned_roles(&payload.body) {
-            if let Ok(agent_user_id) = state.chat_store.ensure_agent_user(&name).await {
-                let context = build_context(&state, chat_id)
-                    .await
-                    .unwrap_or_else(|| payload.body.clone());
-                state
-                    .reactive
-                    .enqueue(chat_id, &name, agent_user_id, context);
-            }
-        }
-
+        // Чат не знает про агентов: только публикует событие в каналы. Подписчик
+        // (`aga agent`) сам решает, запускать ли агента по привязке к автору.
         state
             .centrifuge
             .publish_message(chat_id, message.id, user_id)
@@ -1670,19 +1658,8 @@ async fn start_message_thread(
         return Err(StatusCode::BAD_REQUEST);
     };
 
-    // Первое сообщение нити — обычное сообщение: реактивные агенты по
-    // упоминаниям @Agent.<имя> из набора проекта работают в нити как в чате.
-    for name in crate::chat::mentioned_roles(&payload.body) {
-        if let Ok(agent_user_id) = state.chat_store.ensure_agent_user(&name).await {
-            let context = build_context(&state, chat.id)
-                .await
-                .unwrap_or_else(|| payload.body.clone());
-            state
-                .reactive
-                .enqueue(chat.id, &name, agent_user_id, context);
-        }
-    }
-
+    // Первое сообщение нити — обычное сообщение: событие уходит в каналы,
+    // агент-процесс реагирует по привязке к автору, как в любом чате.
     // Обновление и родителю (появилась свёрнутая нить), и самой нити.
     state
         .centrifuge
@@ -2394,22 +2371,9 @@ async fn hidden_from_shortcuts(state: &AppState, body: &str) -> String {
     parts.join("\n")
 }
 
-async fn build_context(state: &AppState, chat_id: i64) -> Option<String> {
-    let messages = state.chat_store.list_messages(chat_id).await.ok()?;
-    let tail: Vec<String> = messages
-        .iter()
-        .rev()
-        .take(10)
-        .rev()
-        .map(|m| m.body.clone())
-        .collect();
-    Some(tail.join("\n"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::LlmClient;
     use axum::body::Body;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -2426,7 +2390,6 @@ mod tests {
             sso: None,
             centrifuge: None,
         };
-        let llm_client = LlmClient::new();
         let cluster = Cluster {
             backend: crate::cluster::Backend::K8s,
             kubectl: "kubectl".into(),
@@ -2441,13 +2404,6 @@ mod tests {
             secret: "secret".into(),
             channel: "common".into(),
         });
-        let reactive = ReactiveRunner::new(
-            llm_client.clone(),
-            trace_store.clone(),
-            chat_store.clone(),
-            cluster.clone(),
-            centrifuge.clone(),
-        );
         let sso_verifier = Arc::new(RwLock::new(if sso {
             Some(auth::JwtVerifier::from_jwks_json(auth::TEST_JWKS).unwrap())
         } else {
@@ -2457,7 +2413,6 @@ mod tests {
             config,
             trace_store,
             chat_store,
-            reactive,
             cluster,
             centrifuge,
             sso_verifier,
@@ -4420,7 +4375,7 @@ mod tests {
         let chat_id = create_chat(&alice, &state).await;
         send_chat_message(chat_id, "/secret вопрос", &alice, &state).await;
         // В контекст агентов идёт только тело: скрытой заметки там нет.
-        let context = build_context(&state, chat_id).await.unwrap();
+        let context = state.chat_store.context_tail(chat_id).await.unwrap();
         assert!(context.contains("/secret вопрос"));
         assert!(!context.contains("СЕКРЕТНАЯ ЗАМЕТКА"));
         cleanup(&file).await;
@@ -4693,6 +4648,34 @@ mod tests {
             .iter()
             .find(|(ch, data)| ch == channel && data["type"] == kind)
             .map(|(_, data)| data.clone())
+    }
+
+    #[tokio::test]
+    async fn mentioning_agent_by_name_does_not_trigger_agent() {
+        // Отменено историей agent-listens-user: триггер @Agent.<имя> уходит —
+        // сервер только публикует события, агенты живут в отдельном процессе.
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let chat_id = create_chat(&alice, &state).await;
+        let (status, _) =
+            send_chat_message(chat_id, "@Agent.helper привет", &alice, &state).await;
+        assert_eq!(status, StatusCode::OK);
+        // Сообщение доставлено, но никто на него не ответил — сервер агентов
+        // не запускает.
+        let (status, body) = get(&format!("/chats/{chat_id}/messages"), &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let messages: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(messages.len(), 1, "лишних сообщений нет");
+        // «Агент-пользователь» Agent.helper не создаётся.
+        let (_, users) = get("/users", &alice, state).await;
+        let users: Vec<serde_json::Value> = serde_json::from_str(&users).unwrap();
+        assert!(
+            !users
+                .iter()
+                .any(|u| u["name"].as_str() == Some("Agent.helper")),
+            "агент-пользователи больше не авто-создаются"
+        );
+        cleanup(&file).await;
     }
 
     #[tokio::test]

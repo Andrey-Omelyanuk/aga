@@ -7,7 +7,6 @@ mod config;
 mod git_changes;
 mod llm;
 mod project_files;
-mod reactive;
 mod scope;
 mod seed;
 mod server;
@@ -158,8 +157,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("AGA_FRONT_URL").unwrap_or_else(|_| "http://dev.localhost".to_string());
     tracing::info!("Frontend origin: {}", front_url);
 
-    let llm_client = llm::LlmClient::new();
-
     let cluster = cluster::Cluster::from_env();
     tracing::info!(
         "Workstations: backend={:?} kubectl={} namespace={} template={} image={}",
@@ -170,20 +167,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cluster.image
     );
 
-    let reactive = reactive::ReactiveRunner::new(
-        llm_client.clone(),
-        trace_store.clone(),
-        chat_store.clone(),
-        cluster.clone(),
-        centrifuge.clone(),
-    );
-
     // Создаём состояние приложения
     let state = server::AppState {
         config,
         trace_store,
         chat_store,
-        reactive,
         cluster,
         centrifuge,
         sso_verifier,
