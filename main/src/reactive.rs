@@ -180,7 +180,7 @@ impl ReactiveRunner {
                 .add_artifact(msg.id, "result", Some("Ответ агента"), &result)
                 .await;
             self.centrifuge
-                .publish(crate::centrifuge::message_payload(msg.chat_id, msg.id))
+                .publish_message(msg.chat_id, msg.id, agent_user_id)
                 .await;
         }
     }

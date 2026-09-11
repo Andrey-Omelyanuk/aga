@@ -66,6 +66,11 @@ pub struct Message {
     /// слово `/имя` добавляет в `hidden` текст, привязанный к имени. В контекст
     /// агентов (LLM) не уходит.
     pub hidden: String,
+    /// Источник сообщения: 'user' — набрано человеком, иначе — кем сообщение
+    /// записано (ответ агент-процесса пишет 'agent'). Чат это поле не
+    /// интерпретирует — оно нейтральное; различает источники подписчик
+    /// (`runtime.rs`), чтобы не реагировать на записи, сделанные не человеком.
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +259,7 @@ impl ChatStore {
                 thread_of_id INTEGER,
                 body TEXT NOT NULL,
                 hidden TEXT NOT NULL DEFAULT '',
+                origin TEXT NOT NULL DEFAULT 'user',
                 FOREIGN KEY (chat_id) REFERENCES chats(id)
             )
             "#,
@@ -318,6 +324,13 @@ impl ChatStore {
             .await?;
         store
             .ensure_column("messages", "hidden", "hidden TEXT NOT NULL DEFAULT ''")
+            .await?;
+        store
+            .ensure_column(
+                "messages",
+                "origin",
+                "origin TEXT NOT NULL DEFAULT 'user'",
+            )
             .await?;
 
         // Миграция старых БД: сессионные поля жили в chats, теперь — в
@@ -716,6 +729,25 @@ impl ChatStore {
         parent_id: Option<i64>,
         last_message_id: Option<i64>,
     ) -> Result<Option<Message>, sqlx::Error> {
+        self.send_message_with_origin(chat_id, author_id, body, hidden, parent_id, last_message_id, "user")
+            .await
+    }
+
+    /// Сообщение с указанным источником (`origin`): чат его не интерпретирует —
+    /// пишет как есть. HTTP-путь (набор человеком) идёт с 'user'; ответ
+    /// агент-процесса пишется с 'agent' (см. `runtime.rs`), чтобы подписчик не
+    /// реагировал на нечеловеческие записи.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_with_origin(
+        &self,
+        chat_id: i64,
+        author_id: i64,
+        body: &str,
+        hidden: &str,
+        parent_id: Option<i64>,
+        last_message_id: Option<i64>,
+        origin: &str,
+    ) -> Result<Option<Message>, sqlx::Error> {
         let chat = self.get_chat(chat_id).await?;
         let Some(chat) = chat else { return Ok(None) };
         if chat.state != "OPEN" {
@@ -733,7 +765,7 @@ impl ChatStore {
         let current_last = last_msgs.first().copied().or(last_message_id);
 
         let result = sqlx::query(
-            "INSERT INTO messages (chat_id, parent_id, author_id, last_message_id, body, hidden) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (chat_id, parent_id, author_id, last_message_id, body, hidden, origin) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(chat_id)
         .bind(parent_id)
@@ -741,6 +773,7 @@ impl ChatStore {
         .bind(current_last)
         .bind(body)
         .bind(hidden)
+        .bind(origin)
         .execute(&self.pool)
         .await?;
         let msg_id = result.last_insert_rowid();
@@ -755,7 +788,7 @@ impl ChatStore {
 
     pub async fn get_message(&self, id: i64) -> Result<Option<Message>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden FROM messages WHERE id = ?",
+            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden, origin FROM messages WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -765,7 +798,7 @@ impl ChatStore {
 
     pub async fn list_messages(&self, chat_id: i64) -> Result<Vec<Message>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden FROM messages WHERE chat_id = ? ORDER BY created_at, id",
+            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden, origin FROM messages WHERE chat_id = ? ORDER BY created_at, id",
         )
         .bind(chat_id)
         .fetch_all(&self.pool)
@@ -872,7 +905,7 @@ impl ChatStore {
         }
 
         let result = sqlx::query(
-            "INSERT INTO messages (chat_id, parent_id, author_id, title, thread_of_id, body, hidden) VALUES (?, NULL, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (chat_id, parent_id, author_id, title, thread_of_id, body, hidden, origin) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)",
         )
         .bind(parent_id)
         .bind(original.author_id)
@@ -880,6 +913,7 @@ impl ChatStore {
         .bind(origin_id)
         .bind(&original.body)
         .bind(&original.hidden)
+        .bind(&original.origin)
         .execute(&self.pool)
         .await?;
         let new_id = result.last_insert_rowid();
@@ -915,7 +949,7 @@ impl ChatStore {
 
         let share_of = original.share_of_id.unwrap_or(original.id);
         let result = sqlx::query(
-            "INSERT INTO messages (chat_id, parent_id, author_id, shared_by_id, share_of_id, body, hidden) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (chat_id, parent_id, author_id, shared_by_id, share_of_id, body, hidden, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(chat_id)
         .bind(original.parent_id)
@@ -924,6 +958,7 @@ impl ChatStore {
         .bind(share_of)
         .bind(&original.body)
         .bind(&original.hidden)
+        .bind(&original.origin)
         .execute(&self.pool)
         .await?;
         let new_id = result.last_insert_rowid();
@@ -1426,6 +1461,7 @@ fn message_from_row(r: &sqlx::sqlite::SqliteRow) -> Message {
         thread_of_id: r.get("thread_of_id"),
         body: r.get("body"),
         hidden: r.get("hidden"),
+        origin: r.get("origin"),
     }
 }
 
