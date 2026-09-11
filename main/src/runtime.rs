@@ -116,7 +116,10 @@ impl AgentRuntime {
     /// Одна подписка: SSE-стрим Centrifugo с серверными подписками из токена.
     /// События обрабатываются последовательно — единственный подписчик уже
     /// сериализует запуски, отдельная очередь на воркстейшн не нужна.
-    async fn session(&self, channels: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn session(
+        &self,
+        channels: &[String],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.centrifuge.subscriber_jwt(channels)?;
         let response = self.centrifuge.sse_stream(&token).await?;
         let mut stream = response.bytes_stream();
@@ -139,10 +142,9 @@ impl AgentRuntime {
         if data["type"] != "message" {
             return; // lifecycle-события — дело веба, агентов они не касаются
         }
-        let (Some(chat_id), Some(message_id)) = (
-            data["chat_id"].as_i64(),
-            data["message_id"].as_i64(),
-        ) else {
+        let (Some(chat_id), Some(message_id)) =
+            (data["chat_id"].as_i64(), data["message_id"].as_i64())
+        else {
             return;
         };
         self.handle_message(chat_id, message_id).await;
@@ -172,12 +174,14 @@ impl AgentRuntime {
         let Some(agent) = self.trace_store.agent_listening_to(&set, msg.author_id) else {
             return false;
         };
-        let Some((role_config, territory)) =
-            resolve_agent(&self.trace_store, &set, &agent.name)
-                .await
-                .unwrap_or(None)
+        let Some((role_config, territory)) = resolve_agent(&self.trace_store, &set, &agent.name)
+            .await
+            .unwrap_or(None)
         else {
-            tracing::error!("runtime: агент {} не найден в наборе {project_id}", agent.name);
+            tracing::error!(
+                "runtime: агент {} не найден в наборе {project_id}",
+                agent.name
+            );
             return false;
         };
 
@@ -242,8 +246,9 @@ pub async fn agent_main(db_path: &str) -> Result<(), Box<dyn std::error::Error>>
     // Centrifugo — обязательная зависимость агент-процесса: единственный
     // источник событий. Без него запуск бессмысленен.
     let Some(centrifuge_cfg) = config.centrifuge.as_ref() else {
-        return Err("aga agent требует настроенного Centrifugo (блок `centrifuge:` в конфиге)"
-            .into());
+        return Err(
+            "aga agent требует настроенного Centrifugo (блок `centrifuge:` в конфиге)".into(),
+        );
     };
     let centrifuge = CentrifugeClient::from_config(centrifuge_cfg);
     let trace_store = TraceStore::new(db_path).await?;
@@ -384,7 +389,15 @@ mod tests {
             cluster(),
             CentrifugeClient::disabled(),
         );
-        (runtime, listener_user, session.id, trace, chat, file, llm_server)
+        (
+            runtime,
+            listener_user,
+            session.id,
+            trace,
+            chat,
+            file,
+            llm_server,
+        )
     }
 
     #[tokio::test]
@@ -424,7 +437,10 @@ mod tests {
         // Событие о собственном ответе (тот же автор) — реакции нет.
         let reply = chat.list_messages(chat_id).await.unwrap().pop().unwrap();
         assert!(!runtime.handle_message(chat_id, reply.id).await);
-        assert_eq!(chat.list_messages(chat_id).await.unwrap().len(), after_first);
+        assert_eq!(
+            chat.list_messages(chat_id).await.unwrap().len(),
+            after_first
+        );
         llm.abort();
         cleanup(&file).await;
     }
@@ -453,15 +469,16 @@ mod tests {
     async fn agent_without_binding_does_not_react() {
         let (runtime, alice, chat_id, trace, chat, file, llm) = fixture("Готово").await;
         // Пересобираем набор без привязки — состав меняется целиком.
-        let set = trace.get_project_agent_set(
-            trace
-                .upsert_project("https://example.com/rt.git")
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let set = trace
+            .get_project_agent_set(
+                trace
+                    .upsert_project("https://example.com/rt.git")
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         trace
             .update_agent_set(set.id, "ops", &[spec("dev", None)])
             .await
@@ -541,8 +558,14 @@ mod tests {
     #[tokio::test]
     async fn listen_channels_cover_each_bound_user_once() {
         let (trace, chat, file) = temp_stores().await;
-        let u1 = chat.insert_user("a", "human", false, None, None).await.unwrap();
-        let u2 = chat.insert_user("b", "human", false, None, None).await.unwrap();
+        let u1 = chat
+            .insert_user("a", "human", false, None, None)
+            .await
+            .unwrap();
+        let u2 = chat
+            .insert_user("b", "human", false, None, None)
+            .await
+            .unwrap();
         trace
             .create_agent_set(
                 "ops",

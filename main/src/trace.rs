@@ -2257,7 +2257,9 @@ mod tests {
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
         // Привязка слышна сразу после создания набора.
         assert_eq!(set.agents[0].listen_user_id, Some(42));
-        let found = store.agent_listening_to(&set, 42).expect("агент слушает 42");
+        let found = store
+            .agent_listening_to(&set, 42)
+            .expect("агент слушает 42");
         assert_eq!(found.name, "dev");
         // Чужой пользователь не триггерит этого агента.
         assert!(store.agent_listening_to(&set, 7).is_none());
@@ -2265,10 +2267,7 @@ mod tests {
         // Правка набора без привязки — она сброшена (состав меняется целиком).
         let mut api = spec("api", None);
         api.listen_user_id = Some(99);
-        store
-            .update_agent_set(set_id, "ops", &[api])
-            .await
-            .unwrap();
+        store.update_agent_set(set_id, "ops", &[api]).await.unwrap();
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
         assert_eq!(set.agents[0].listen_user_id, Some(99));
         assert_eq!(store.agent_listening_to(&set, 99).unwrap().name, "api");

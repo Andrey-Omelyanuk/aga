@@ -4657,12 +4657,12 @@ mod tests {
         let (state, file) = test_state(true).await;
         let alice = auth_headers("alice", &["participant"]);
         let chat_id = create_chat(&alice, &state).await;
-        let (status, _) =
-            send_chat_message(chat_id, "@Agent.helper привет", &alice, &state).await;
+        let (status, _) = send_chat_message(chat_id, "@Agent.helper привет", &alice, &state).await;
         assert_eq!(status, StatusCode::OK);
         // Сообщение доставлено, но никто на него не ответил — сервер агентов
         // не запускает.
-        let (status, body) = get(&format!("/chats/{chat_id}/messages"), &alice, state.clone()).await;
+        let (status, body) =
+            get(&format!("/chats/{chat_id}/messages"), &alice, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         let messages: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
         assert_eq!(messages.len(), 1, "лишних сообщений нет");

@@ -142,7 +142,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             "dev-team",
             &[
                 AgentSpec {
-                    name: "backend".into(),  // слушает alice
+                    name: "backend".into(), // слушает alice
                     description: "Бэкенд-разработчик: API, БД, интеграции.".into(),
                     tools: vec!["cat".into(), "ls".into(), "grep".into(), "find".into()],
                     max_iterations: 5,
