@@ -24,6 +24,9 @@ export interface Agent {
   skills: AgentCapability[];
   commands: AgentCapability[];
   territory: Territory;
+  /** Привязка к пользователю чата: агент слушает его сообщения и отвечает от
+   * его имени (режим `aga agent`). Нет — агент ни на что не реагирует. */
+  listen_user_id?: number | null;
 }
 
 export interface CatalogVersion {

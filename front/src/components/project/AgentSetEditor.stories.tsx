@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react';
 import { AgentSetEditor } from './AgentSetEditor';
 import type { Agent, CatalogItem, Llm } from '@/models/project';
+import type { User } from '@/models/core';
 
 const agents: Agent[] = [
   {
@@ -53,6 +54,11 @@ const connections: Llm[] = [
   },
 ] as Llm[];
 
+const users = [
+  { id: 2, name: 'alice', kind: 'human' },
+  { id: 3, name: 'bob', kind: 'human' },
+] as unknown as User[];
+
 const meta = {
   title: 'project/AgentSetEditor',
   component: AgentSetEditor,
@@ -63,6 +69,7 @@ const meta = {
     skills,
     commands,
     connections,
+    users,
     onSaved: () => {},
   },
 } satisfies Meta<typeof AgentSetEditor>;
