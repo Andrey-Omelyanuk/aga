@@ -1,7 +1,9 @@
 # infra/k8s — Стенд и воркстейшны как поды Kubernetes
 
 ## Overview
-Уровень описывает тестовый стенд целиком в Kubernetes: ядро, веб-клиент (front)
+## Overview
+Уровень описывает тестовый стенд целиком в Kubernetes: ядро, агент-рантайм
+(`aga agent`), веб-клиент (front)
 и Keycloak поднимаются в кластере (minikube), воркстейшны — поды рядом.
 Ядро на хосте не запускается. Для локальной разработки есть отдельный
 dev-стенд без кластера — docker compose (`infra/dev-compose.yml`, `make dev-*`).
@@ -27,12 +29,13 @@ infra/k8s/
 ├── workstation-image/        # образ машины-воркстейшна (DinD + git)
 │   ├── Dockerfile
 │   └── entrypoint.sh
-├── core/                     # стенд: ядро + Keycloak + ingress
+├── core/                     # стенд: ядро + агент-рантайм + Keycloak + ingress
 │   ├── deploy.sh             # собирает конфиги и применяет манифесты
 │   ├── 00-namespace.yaml     # ns aga
-│   ├── 10-rbac.yaml          # SA + Role/RoleBinding ядра
-│   ├── 20-pvc.yaml           # БД ядра (trace.db) — на PVC
+│   ├── 10-rbac.yaml          # SA + Role/RoleBinding ядра (и рантайма — тот же SA)
+│   ├── 20-pvc.yaml           # БД ядра (trace.db) — на PVC (общая с рантаймом)
 │   ├── 30-deployment-core.yaml
+│   ├── 35-deployment-agent.yaml  # aga agent: подписчик Centrifugo, цикл агента
 │   ├── 40-service-core.yaml  # NodePort 30080 (API)
 │   ├── 50-deployment-keycloak.yaml
 │   ├── 60-service-keycloak.yaml  # NodePort 30081 (вход в браузере)
@@ -88,8 +91,12 @@ infra/k8s/
   (их дергает только ядро).
 - SPA и API разнесены: `dev.localhost` → сервис `aga-front` (nginx, порт 80),
   `api.localhost` → сервис `aga` (ядро, порт 8080). Ядро статику не раздаёт.
-- Centrifugo (`pub-sub.localhost`): общий канал `common` для аутентифицированных.
-  Секреты в `52-deployment-centrifugo.yaml` (`aga-api-key`/`aga-hmac-secret`)
+- Centrifugo (`pub-sub.localhost`): события чата в каналах `common` (веб +
+  жизненные события), `chat:<id>` и `user:<id>` (автор). Включён unidirectional-SSE
+  (`CENTRIFUGO_UNI_SSE`) — им пользуется `aga-agent` (35-deployment) для серверных
+  подписок на каналы привязанных пользователей; токен рантайм подписывает сам тем
+  же HMAC-секретом. Секреты в `52-deployment-centrifugo.yaml`
+  (`aga-api-key`/`aga-hmac-secret`)
   должны совпадать с центрифуго-блоком roles.yaml ядра (дефолты
   `config.example.yml`); при смене править оба места. Веб-клиент берёт
   connection-JWT у ядра (`/connection-jwt/`), публикует ядро по HTTP API с api_key.

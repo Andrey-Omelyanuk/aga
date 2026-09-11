@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { AgentSetEditor } from './AgentSetEditor';
 import type { Agent, CatalogItem, Llm } from '@/models/project';
+import type { User } from '@/models/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -11,6 +12,7 @@ function renderEditor(
   skills: CatalogItem[],
   commands: CatalogItem[],
   connections: Llm[] = [],
+  users: User[] = [],
 ) {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -24,6 +26,7 @@ function renderEditor(
         skills={skills}
         commands={commands}
         connections={connections}
+        users={users}
         onSaved={() => {}}
       />,
     );
@@ -107,6 +110,43 @@ describe('AgentSetEditor', () => {
     // Своей модели и температуры у агента в редакторе нет.
     expect(text).not.toContain('temperature');
     expect(text).not.toContain('модел');
+
+    act(() => root.unmount());
+  });
+
+  it('shows the chat user the agent listens to, by name, selected', () => {
+    const agent: Agent = {
+      id: 10,
+      name: 'src/backend',
+      description: 'Правила бэкенда',
+      tools: ['git'],
+      max_iterations: 3,
+      llm_id: null,
+      parent_id: null,
+      skills: [],
+      commands: [],
+      territory: { folder: 'src/backend', excludes: [] },
+      listen_user_id: 7,
+    };
+    const users = [
+      { id: 7, name: 'alice', kind: 'human' },
+      { id: 8, name: 'Agent.Bot', kind: 'agent' },
+    ] as unknown as User[];
+
+    const { container, root } = renderEditor([agent], [], [], [], users);
+    // Пользователя видно в редакторе: он выбран в селекторе прослушивания.
+    const selects = Array.from(container.querySelectorAll('select'));
+    const listener = selects.find((s) =>
+      Array.from((s as HTMLSelectElement).options).some((o) => o.value === '7'),
+    ) as HTMLSelectElement | undefined;
+    expect(listener, 'есть селектор слушаемого пользователя').toBeTruthy();
+    expect(listener!.value).toBe('7');
+    expect(listener!.selectedOptions[0].textContent).toContain('alice');
+    // Агент-пользователи в список прослушивания не попадают.
+    const options = Array.from(listener!.options).map((o) => o.textContent);
+    expect(options.some((t) => t?.includes('Agent.Bot'))).toBe(false);
+    // Люди — видны.
+    expect(options.some((t) => t?.includes('alice'))).toBe(true);
 
     act(() => root.unmount());
   });

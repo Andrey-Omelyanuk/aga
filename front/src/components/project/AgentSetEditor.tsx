@@ -8,6 +8,7 @@ import { Select } from '@/components/ui/select';
 import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
 import type { Agent, AgentCapability, CatalogItem, Llm } from '@/models/project';
+import type { User } from '@/models/core';
 export interface AgentSetEditorProps {
   setId: number;
   name: string;
@@ -16,6 +17,9 @@ export interface AgentSetEditorProps {
   commands: CatalogItem[];
   /** Подключения к LLM: у агента набора выбирается одно из них. */
   connections: Llm[];
+  /** Пользователи чата: агент привязывается к одному — слушает его сообщения
+   * и отвечает от его имени (режим `aga agent`). */
+  users: User[];
   onSaved: () => void;
 }
 
@@ -30,13 +34,14 @@ const emptyAgent = (name: string): Agent => ({
   skills: [],
   commands: [],
   territory: { folder: name, excludes: [] },
+  listen_user_id: null,
 });
 
 /** Редактор состава набора: агенты, их территория (по дереву), данные скиллы
  * и команды по имени (без версии), инструменты, выбранное подключение к LLM.
  * Сохраняется целиком (PATCH). */
 export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
-  const { setId, skills, commands, connections, onSaved } = props;
+  const { setId, skills, commands, connections, users, onSaved } = props;
   const [name, setName] = useState(props.name);
   const [agents, setAgents] = useState<Agent[]>(() =>
     props.agents.map((a) => ({
@@ -112,6 +117,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
         parent: a.parent ?? null,
         skills: a.skills,
         commands: a.commands,
+        listen_user_id: a.listen_user_id ?? null,
       }));
       await http.patch(`/agent-sets/${setId}`, { name, agents: payloadAgents });
       toaster.show({ message: 'Набор сохранён', intent: 'success' });
@@ -203,6 +209,25 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                     {c.name}
                   </option>
                 ))}
+              </Select>
+              <Select
+                className="max-w-44"
+                value={agent.listen_user_id != null ? String(agent.listen_user_id) : ''}
+                onChange={(e) =>
+                  patchAgent(i, {
+                    listen_user_id: e.target.value ? Number(e.target.value) : null,
+                  })
+                }
+                title="Пользователь чата: слушать его сообщения и отвечать от его имени"
+              >
+                <option value="">— слушает: нет —</option>
+                {users
+                  .filter((u) => u.kind === 'human')
+                  .map((u) => (
+                    <option key={u.id} value={String(u.id)}>
+                      @{u.name}
+                    </option>
+                  ))}
               </Select>
               <Button variant="ghost" size="sm" onClick={() => removeAgent(i)}>
                 Удалить агента

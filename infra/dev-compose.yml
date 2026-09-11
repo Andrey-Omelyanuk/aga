@@ -53,6 +53,32 @@ services:
       - AGA_FRONT_URL=http://dev.localhost
     restart: "no"
 
+  # Агент-рантайм — отдельный процесс того же образа (`aga agent`): подписан на
+  # Centrifugo (SSE), реагирует на сообщения привязанных пользователей (runtime.rs).
+  # HTTP не раздаёт — чат обслуживает core. Общая БД (тот же aga-data, SQLite WAL),
+  # команды агентов идут в контейнеры ws через docker.sock (AGA_WS_BACKEND=docker).
+  # Centrifugo обязателен: без него рантайм не поднимается (нет источника событий).
+  agent:
+    image: aga-core:dev
+    container_name: aga-agent
+    command: ["agent"]
+    user: "0:0"
+    volumes:
+      - ./dev-roles.yaml:/etc/aga/roles.yaml:ro
+      - aga-data:/var/lib/aga
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - AGA_CONFIG_PATH=/etc/aga/roles.yaml
+      - AGA_DB_PATH=/var/lib/aga/trace.db
+      - AGA_WS_BACKEND=docker
+      - AGA_K8S_IMAGE=aga-workstation:dev
+      - AGA_SSH_PRIVATE_KEY=${AGA_SSH_PRIVATE_KEY:-}
+    depends_on:
+      - core
+      - centrifugo
+    restart: "no"
+
   # Маленькая LLM для dev — только проверить, что цикл запускается, интеллект
   # не важен (модель до 1B). Модель тянется при старте, чтобы агенты работали
   # из коробки после make dev-up. Подключение к ней ядро не создаёт само: LLM
@@ -117,6 +143,9 @@ services:
       - CENTRIFUGO_API_KEY=aga-api-key
       # SPA живёт на dev.localhost (прокси) — это и есть Origin websocket-соединения.
       - CENTRIFUGO_ALLOWED_ORIGINS=http://dev.localhost
+      # Unidirectional SSE (/connection/sse): им пользуется агент-рантайм
+      # (`aga agent`) для серверных подписок на каналы user:<id> (runtime.rs).
+      - CENTRIFUGO_UNI_SSE=true
       - CENTRIFUGO_LOG_LEVEL=info
     restart: "no"
 

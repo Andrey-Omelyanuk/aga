@@ -53,7 +53,7 @@ pub struct CentrifugeConfig {
     pub channel: String,
 }
 
-fn default_channel() -> String {
+pub(crate) fn default_channel() -> String {
     "common".to_string()
 }
 

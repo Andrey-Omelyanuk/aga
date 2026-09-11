@@ -11,7 +11,9 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     trace.clear_all().await?;
     chat.clear_all().await?;
 
-    // --- Юзеры: anonymous создаёт ChatStore, участники и агент — фикстура.
+    // --- Юзеры: anonymous создаёт ChatStore, участники — фикстура.
+    // Агент-пользователей нет: агент-процесс отвечает от имени привязанного
+    // человека (origin='agent' на сообщении), «Agent.<роль>» больше не заводится.
     // Участники alice/bob — те же учётки, что в Keycloak (см.
     // infra/k8s/core/keycloak-realm.json): фиксированные sso_subject = id из
     // realm, пароли alice-pass / bob-pass. Вход через SSO находит этих юзеров,
@@ -36,9 +38,6 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             Some("2b2b2b2b-2b2b-4b2b-8b2b-2b2b2b2b2b2b"),
             Some("participant"),
         )
-        .await?;
-    let bot = chat
-        .insert_user("Agent.Bot", "agent", false, None, Some("dev"))
         .await?;
     let _ = anonymous;
 
@@ -143,7 +142,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             "dev-team",
             &[
                 AgentSpec {
-                    name: "backend".into(),
+                    name: "backend".into(), // слушает alice
                     description: "Бэкенд-разработчик: API, БД, интеграции.".into(),
                     tools: vec!["cat".into(), "ls".into(), "grep".into(), "find".into()],
                     max_iterations: 5,
@@ -160,6 +159,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     commands: vec![AgentCapability {
                         name: "run-tests".into(),
                     }],
+
+                    listen_user_id: Some(alice),
                 },
                 AgentSpec {
                     name: "api".into(),
@@ -172,6 +173,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     commands: vec![AgentCapability {
                         name: "deploy".into(),
                     }],
+
+                    listen_user_id: None,
                 },
             ],
         )
@@ -203,6 +206,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     commands: vec![AgentCapability {
                         name: "run-ui-tests".into(),
                     }],
+
+                    listen_user_id: Some(alice),
                 },
                 AgentSpec {
                     name: "src/model".into(),
@@ -213,6 +218,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     parent: Some("ui".into()),
                     skills: Vec::new(),
                     commands: Vec::new(),
+
+                    listen_user_id: None,
                 },
             ],
         )
@@ -260,14 +267,17 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?
         .ok_or("message failed")?;
+    // Ответ агента в фикстуре: от имени alice (она привязана к агенту backend),
+    // origin='agent' — как это делает рантайм, а не человек.
     let review_msg = chat
-        .send_message(
+        .send_message_with_origin(
             session.id,
-            bot,
+            alice,
             "Ревью сделал: конфликт в auth.rs, тесты проваливаются — см. артефакт.",
             "",
             Some(task_msg.id),
             None,
+            "agent",
         )
         .await?
         .ok_or("message failed")?;
@@ -364,7 +374,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         "Тестовый набор восстановлен: users={}, sets={} (dev-team)/{} (ui-kit), \
          projects={}/{}/{} ws, chats={}; вход в Keycloak: alice/alice-pass, bob/bob-pass",
-        4,
+        3,
         set_id,
         ui_set_id,
         p1,

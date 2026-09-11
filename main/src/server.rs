@@ -22,7 +22,6 @@ use crate::centrifuge::CentrifugeClient;
 use crate::chat::{parse_command, Chat, ChatCommand, ChatStore, Message, SessionError};
 use crate::cluster::Cluster;
 use crate::config::Config;
-use crate::reactive::ReactiveRunner;
 use crate::trace::TraceStore;
 
 #[derive(Clone)]
@@ -30,7 +29,6 @@ pub struct AppState {
     pub config: Config,
     pub trace_store: TraceStore,
     pub chat_store: ChatStore,
-    pub reactive: ReactiveRunner,
     pub cluster: Cluster,
     /// Клиент Centrifugo (реальное время для чата). Не настроен — `disabled()`.
     pub centrifuge: CentrifugeClient,
@@ -1005,13 +1003,7 @@ async fn delete_shortcut(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    delete_capability(
-        crate::trace::CapabilityKind::Shortcut,
-        id,
-        &state,
-        &headers,
-    )
-    .await
+    delete_capability(crate::trace::CapabilityKind::Shortcut, id, &state, &headers).await
 }
 
 async fn attach_agent_set(
@@ -1406,7 +1398,10 @@ async fn create_chat(
         .create_chat(None, payload.title.as_deref(), user_id)
         .await
     {
-        Ok(chat) => Ok(Json(chat)),
+        Ok(chat) => {
+            publish_lifecycle(&state, "chat_created", chat.id).await;
+            Ok(Json(chat))
+        }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -1484,7 +1479,10 @@ async fn close_chat(
         .close_workstation_session(id, user_id)
         .await
     {
-        Ok(()) => Ok(StatusCode::OK),
+        Ok(()) => {
+            publish_lifecycle(&state, "session_closed", id).await;
+            Ok(StatusCode::OK)
+        }
         Err(SessionError::NotFound) => Err(StatusCode::NOT_FOUND),
         Err(SessionError::Forbidden) => Err(StatusCode::FORBIDDEN),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1598,21 +1596,11 @@ async fn send_message(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
-        // Реактивные агенты по упоминаниям @Agent.<имя> из набора проекта.
-        for name in crate::chat::mentioned_roles(&payload.body) {
-            if let Ok(agent_user_id) = state.chat_store.ensure_agent_user(&name).await {
-                let context = build_context(&state, chat_id)
-                    .await
-                    .unwrap_or_else(|| payload.body.clone());
-                state
-                    .reactive
-                    .enqueue(chat_id, &name, agent_user_id, context);
-            }
-        }
-
+        // Чат не знает про агентов: только публикует событие в каналы. Подписчик
+        // (`aga agent`) сам решает, запускать ли агента по привязке к автору.
         state
             .centrifuge
-            .publish(crate::centrifuge::message_payload(chat_id, message.id))
+            .publish_message(chat_id, message.id, user_id)
             .await;
 
         Ok(Json(SendMessageResponse { message, invited }))
@@ -1670,30 +1658,16 @@ async fn start_message_thread(
         return Err(StatusCode::BAD_REQUEST);
     };
 
-    // Первое сообщение нити — обычное сообщение: реактивные агенты по
-    // упоминаниям @Agent.<имя> из набора проекта работают в нити как в чате.
-    for name in crate::chat::mentioned_roles(&payload.body) {
-        if let Ok(agent_user_id) = state.chat_store.ensure_agent_user(&name).await {
-            let context = build_context(&state, chat.id)
-                .await
-                .unwrap_or_else(|| payload.body.clone());
-            state
-                .reactive
-                .enqueue(chat.id, &name, agent_user_id, context);
-        }
-    }
-
+    // Первое сообщение нити — обычное сообщение: событие уходит в каналы,
+    // агент-процесс реагирует по привязке к автору, как в любом чате.
     // Обновление и родителю (появилась свёрнутая нить), и самой нити.
     state
         .centrifuge
-        .publish(crate::centrifuge::message_payload(
-            origin.chat_id,
-            message.id,
-        ))
+        .publish_message(origin.chat_id, message.id, user_id)
         .await;
     state
         .centrifuge
-        .publish(crate::centrifuge::message_payload(chat.id, message.id))
+        .publish_message(chat.id, message.id, user_id)
         .await;
     Ok(Json(StartThreadResponse { chat, message }))
 }
@@ -1738,7 +1712,7 @@ async fn post_message_to_parent(
     };
     state
         .centrifuge
-        .publish(crate::centrifuge::message_payload(parent_id, message.id))
+        .publish_message(parent_id, message.id, message.author_id)
         .await;
     Ok(Json(message))
 }
@@ -1845,7 +1819,7 @@ async fn share_message(
         Ok(Some(msg)) => {
             state
                 .centrifuge
-                .publish(crate::centrifuge::message_payload(msg.chat_id, msg.id))
+                .publish_message(msg.chat_id, msg.id, msg.author_id)
                 .await;
             Ok(Json(msg))
         }
@@ -2326,6 +2300,7 @@ async fn open_workstation_session(
             }
         }
     }
+    publish_lifecycle(&state, "session_opened", chat.id).await;
     Ok(Json(chat))
 }
 
@@ -2367,6 +2342,19 @@ async fn can_write(state: &AppState, chat_id: i64, user_id: i64) -> bool {
 /// добавляет текст привязанного сокращения (одно имя — один раз). Неизвестные
 /// имена и пустой текст пропускаются. Скрытая часть — заметка: в контекст
 /// агентов (`build_context`) она не входит.
+/// Событие жизненного цикла чата (создание чата, открытие/закрытие сессии) —
+/// в общий канал, best-effort: подписчик (веб-клиент) по нему обновляет список.
+async fn publish_lifecycle(state: &AppState, action: &str, chat_id: i64) {
+    let channel = state.centrifuge.channel();
+    state
+        .centrifuge
+        .publish(
+            &channel,
+            crate::centrifuge::lifecycle_payload(action, chat_id),
+        )
+        .await;
+}
+
 async fn hidden_from_shortcuts(state: &AppState, body: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     for name in crate::chat::shortcut_names(body) {
@@ -2383,22 +2371,9 @@ async fn hidden_from_shortcuts(state: &AppState, body: &str) -> String {
     parts.join("\n")
 }
 
-async fn build_context(state: &AppState, chat_id: i64) -> Option<String> {
-    let messages = state.chat_store.list_messages(chat_id).await.ok()?;
-    let tail: Vec<String> = messages
-        .iter()
-        .rev()
-        .take(10)
-        .rev()
-        .map(|m| m.body.clone())
-        .collect();
-    Some(tail.join("\n"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::LlmClient;
     use axum::body::Body;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -2415,7 +2390,6 @@ mod tests {
             sso: None,
             centrifuge: None,
         };
-        let llm_client = LlmClient::new();
         let cluster = Cluster {
             backend: crate::cluster::Backend::K8s,
             kubectl: "kubectl".into(),
@@ -2430,13 +2404,6 @@ mod tests {
             secret: "secret".into(),
             channel: "common".into(),
         });
-        let reactive = ReactiveRunner::new(
-            llm_client.clone(),
-            trace_store.clone(),
-            chat_store.clone(),
-            cluster.clone(),
-            centrifuge.clone(),
-        );
         let sso_verifier = Arc::new(RwLock::new(if sso {
             Some(auth::JwtVerifier::from_jwks_json(auth::TEST_JWKS).unwrap())
         } else {
@@ -2446,7 +2413,6 @@ mod tests {
             config,
             trace_store,
             chat_store,
-            reactive,
             cluster,
             centrifuge,
             sso_verifier,
@@ -3130,6 +3096,57 @@ mod tests {
         })
     }
 
+    /// Агент с привязкой к пользователю чата: слушает его и отвечает от его
+    /// имени (настройка на странице агента).
+    fn bound_agent_json(name: &str, listen_user_id: i64) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "description": format!("Правила {name}"),
+            "tools": ["git", "make"],
+            "max_iterations": 3,
+            "llm_id": null,
+            "parent": null,
+            "skills": [],
+            "commands": [],
+            "listen_user_id": listen_user_id
+        })
+    }
+
+    #[tokio::test]
+    async fn agent_listen_binding_saved_and_stays_visible_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/agent-sets",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [bound_agent_json("dev", 42)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let set_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        // Выбор слушаемого виден в деталях набора — страница настройки
+        // показывает его после сохранения.
+        let (status, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(detail["agents"][0]["listen_user_id"], 42);
+        // Правка состава с другой привязкой — сохраняется свежая.
+        patch_json(
+            &format!("/agent-sets/{set_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [bound_agent_json("dev", 77)] }),
+        )
+        .await;
+        let (_, body) = get(&format!("/agent-sets/{set_id}"), &headers, state).await;
+        let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(detail["agents"][0]["listen_user_id"], 77);
+        cleanup(&file).await;
+    }
+
     #[tokio::test]
     async fn created_agent_set_listed_via_api() {
         let (state, file) = test_state(true).await;
@@ -3365,6 +3382,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -3405,6 +3424,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -3422,6 +3443,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -4285,7 +4308,8 @@ mod tests {
     async fn several_shortcuts_added_to_hidden() {
         let (state, file) = test_state(true).await;
         let alice = auth_headers("alice", &["participant"]);
-        for (name, content) in [("first", "Первый текст"), ("second", "Второй текст")] {
+        for (name, content) in [("first", "Первый текст"), ("second", "Второй текст")]
+        {
             post_json(
                 "/shortcuts",
                 &alice,
@@ -4351,7 +4375,7 @@ mod tests {
         let chat_id = create_chat(&alice, &state).await;
         send_chat_message(chat_id, "/secret вопрос", &alice, &state).await;
         // В контекст агентов идёт только тело: скрытой заметки там нет.
-        let context = build_context(&state, chat_id).await.unwrap();
+        let context = state.chat_store.context_tail(chat_id).await.unwrap();
         assert!(context.contains("/secret вопрос"));
         assert!(!context.contains("СЕКРЕТНАЯ ЗАМЕТКА"));
         cleanup(&file).await;
@@ -4384,12 +4408,7 @@ mod tests {
             serde_json::json!({"content": "Версия 2"}),
         )
         .await;
-        delete_json(
-            &format!("/shortcuts/{shortcut_id}"),
-            &alice,
-            state.clone(),
-        )
-        .await;
+        delete_json(&format!("/shortcuts/{shortcut_id}"), &alice, state.clone()).await;
         let (_, body) = get(&format!("/chats/{chat_id}"), &alice, state.clone()).await;
         let messages = json_get(&body, &["messages"]).unwrap();
         let msg = messages
@@ -4515,12 +4534,7 @@ mod tests {
         )
         .await;
         delete_json(&format!("/shortcuts/{id}"), &alice, state.clone()).await;
-        let (status, body) = get(
-            &format!("/shortcuts/{id}/history"),
-            &alice,
-            state.clone(),
-        )
-        .await;
+        let (status, body) = get(&format!("/shortcuts/{id}/history"), &alice, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         let entries: serde_json::Value = serde_json::from_str(&body).unwrap();
         let actions: Vec<&str> = entries
@@ -4571,18 +4585,218 @@ mod tests {
         let (status, body) = get("/shortcuts", &bob, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("review"));
-        let (_, body) = send_chat_message(
-            create_chat(&bob, &state).await,
-            "/review",
-            &bob,
-            &state,
-        )
-        .await;
+        let (_, body) =
+            send_chat_message(create_chat(&bob, &state).await, "/review", &bob, &state).await;
         // Скрытую часть видит любой участник.
         assert_eq!(
             json_get(&body, &["message", "hidden"]).unwrap().as_str(),
             Some("Проверять диф")
         );
+        cleanup(&file).await;
+    }
+
+    // === События Centrifugo: чат публикует изменения в каналы чата,
+    // пользователя-автора и общий канал (агенты — подписчики, не часть чата).
+
+    type PublishedEvents = std::sync::Arc<tokio::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// Мок HTTP API Centrifugo: записывает публикации (канал + данные).
+    async fn mock_centrifugo() -> (String, tokio::task::JoinHandle<()>, PublishedEvents) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sink: PublishedEvents = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let sink2 = sink.clone();
+        let app = axum::Router::new().route(
+            "/api",
+            axum::routing::post(move |req: axum::extract::Request| {
+                let sink = sink2.clone();
+                async move {
+                    let body: serde_json::Value = axum::body::to_bytes(req.into_body(), usize::MAX)
+                        .await
+                        .ok()
+                        .and_then(|b| serde_json::from_slice(&b).ok())
+                        .unwrap_or_default();
+                    let channel = body["params"]["channel"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let data = body["params"]["data"].clone();
+                    sink.lock().await.push((channel, data));
+                    axum::Json(serde_json::json!({ "result": {} }))
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), handle, sink)
+    }
+
+    fn centrifuge_at(api_url: String) -> CentrifugeClient {
+        CentrifugeClient::from_config(&crate::config::CentrifugeConfig {
+            api_url,
+            api_key: "key".into(),
+            secret: "secret".into(),
+            channel: "common".into(),
+        })
+    }
+
+    fn published(
+        events: &[(String, serde_json::Value)],
+        channel: &str,
+        kind: &str,
+    ) -> Option<serde_json::Value> {
+        events
+            .iter()
+            .find(|(ch, data)| ch == channel && data["type"] == kind)
+            .map(|(_, data)| data.clone())
+    }
+
+    #[tokio::test]
+    async fn mentioning_agent_by_name_does_not_trigger_agent() {
+        // Отменено историей agent-listens-user: триггер @Agent.<имя> уходит —
+        // сервер только публикует события, агенты живут в отдельном процессе.
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        let chat_id = create_chat(&alice, &state).await;
+        let (status, _) = send_chat_message(chat_id, "@Agent.helper привет", &alice, &state).await;
+        assert_eq!(status, StatusCode::OK);
+        // Сообщение доставлено, но никто на него не ответил — сервер агентов
+        // не запускает.
+        let (status, body) =
+            get(&format!("/chats/{chat_id}/messages"), &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let messages: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(messages.len(), 1, "лишних сообщений нет");
+        // «Агент-пользователь» Agent.helper не создаётся.
+        let (_, users) = get("/users", &alice, state).await;
+        let users: Vec<serde_json::Value> = serde_json::from_str(&users).unwrap();
+        assert!(
+            !users
+                .iter()
+                .any(|u| u["name"].as_str() == Some("Agent.helper")),
+            "агент-пользователи больше не авто-создаются"
+        );
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn sent_message_event_reaches_chat_channel() {
+        let (mut state, file) = test_state(true).await;
+        let (api_url, server, events) = mock_centrifugo().await;
+        state.centrifuge = centrifuge_at(api_url);
+        let alice = auth_headers("alice", &["participant"]);
+        let chat_id = create_chat(&alice, &state).await;
+        let (status, body) = send_chat_message(chat_id, "привет", &alice, &state).await;
+        assert_eq!(status, StatusCode::OK);
+        let message_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        let evs = events.lock().await;
+        let data = published(&evs, &format!("chat:{chat_id}"), "message")
+            .expect("событие сообщения не пришло в канал чата");
+        // Событие несёт id чата и id сообщения — подписчику этого хватает,
+        // детали он дочитает сам.
+        assert_eq!(data["chat_id"], chat_id);
+        assert_eq!(data["message_id"], message_id);
+        server.abort();
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn sent_message_event_reaches_author_user_channel() {
+        let (mut state, file) = test_state(true).await;
+        let (api_url, server, events) = mock_centrifugo().await;
+        state.centrifuge = centrifuge_at(api_url);
+        let alice = auth_headers("alice", &["participant"]);
+        let chat_id = create_chat(&alice, &state).await;
+        let (status, body) = send_chat_message(chat_id, "привет", &alice, &state).await;
+        assert_eq!(status, StatusCode::OK);
+        let message_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        let alice_id = json_get(&body, &["message", "author_id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        let evs = events.lock().await;
+        let data = published(&evs, &format!("user:{alice_id}"), "message")
+            .expect("событие сообщения не пришло в канал автора");
+        assert_eq!(data["message_id"], message_id);
+        assert_eq!(data["author_id"], alice_id);
+        server.abort();
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn chat_lifecycle_events_reach_common_channel() {
+        let (mut state, file) = test_state(true).await;
+        let (api_url, server, events) = mock_centrifugo().await;
+        state.centrifuge = centrifuge_at(api_url);
+        let alice = auth_headers("alice", &["participant"]);
+        // Создание чата.
+        let chat_id = create_chat(&alice, &state).await;
+        // Сессия: проект + готовая станция (станции создаёт только суперпользователь
+        // вне API — здесь фиксируем её в БД напрямую, как сид).
+        let (status, body) = post_json(
+            "/projects",
+            &alice,
+            state.clone(),
+            serde_json::json!({"git_url": "https://example.com/lifecycle.git"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let project_id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let ws = state
+            .chat_store
+            .create_workstation("ws-lifecycle", None)
+            .await
+            .unwrap();
+        state
+            .chat_store
+            .set_workstation_state(ws.id, "ready")
+            .await
+            .unwrap();
+        let (status, body) = post_json(
+            &format!("/workstations/{}/session", ws.id),
+            &alice,
+            state.clone(),
+            serde_json::json!({"project_id": project_id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let session_id = json_get(&body, &["id"]).unwrap().as_i64().unwrap();
+        let (status, _) = post_json(
+            &format!("/chats/{session_id}/close"),
+            &alice,
+            state.clone(),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let evs = events.lock().await;
+        let actions: Vec<(&str, i64)> = evs
+            .iter()
+            .filter(|(ch, _)| ch == "common")
+            .filter_map(|(_, data)| {
+                let action = data["action"].as_str()?;
+                Some((action, data["chat_id"].as_i64()?))
+            })
+            .collect();
+        assert!(
+            actions.contains(&("chat_created", chat_id)),
+            "нет события создания чата: {actions:?}"
+        );
+        assert!(
+            actions.contains(&("session_opened", session_id)),
+            "нет события открытия сессии: {actions:?}"
+        );
+        assert!(
+            actions.contains(&("session_closed", session_id)),
+            "нет события закрытия сессии: {actions:?}"
+        );
+        server.abort();
         cleanup(&file).await;
     }
 }
