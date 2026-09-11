@@ -1069,6 +1069,19 @@ impl TraceStore {
             .cloned()
     }
 
+    /// Различные id пользователей, к которым привязаны агенты, по порядку.
+    /// Это каналы (`user:<id>`), на которые подписывается агент-рантайм.
+    pub async fn listen_user_ids(&self) -> Result<Vec<i64>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT listen_user_id FROM agents
+             WHERE listen_user_id IS NOT NULL
+             ORDER BY listen_user_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get("listen_user_id")).collect())
+    }
+
     // === Каталог способностей (скиллы и команды) ===
 
     /// Список записей каталога одного вида: активные и (если `include_deleted`)

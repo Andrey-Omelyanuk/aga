@@ -7,6 +7,7 @@ mod config;
 mod git_changes;
 mod llm;
 mod project_files;
+mod runtime;
 mod scope;
 mod seed;
 mod server;
@@ -51,6 +52,24 @@ async fn refresh_jwks_loop(url: String, verifier: Arc<RwLock<Option<auth::JwtVer
     }
 }
 
+/// Режимы одного бинаря: HTTP-сервер ядра (`aga`), восстановление тестового
+/// набора (`aga seed`) и агент-рантайм (`aga agent`) — отдельный процесс,
+/// подписанный на Centrifugo.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunMode {
+    Server,
+    Seed,
+    Agent,
+}
+
+pub fn mode_from_args(args: &[String]) -> RunMode {
+    match args.get(1).map(String::as_str) {
+        Some("seed") => RunMode::Seed,
+        Some("agent") => RunMode::Agent,
+        _ => RunMode::Server,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Инициализация логирования
@@ -61,12 +80,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Путь к БД читаем до конфига: seed работает без roles.yaml.
+    // Путь к БД читаем до конфига: seed и agent-режим живут по своим путям.
     let db_path = env::var("AGA_DB_PATH").unwrap_or_else(|_| "./data/trace.db".to_string());
 
-    // `aga seed` — восстановить тестовый набор в БД (см. seed.rs).
-    if std::env::args().nth(1).as_deref() == Some("seed") {
-        return seed::seed(&db_path).await;
+    let args: Vec<String> = std::env::args().collect();
+    match mode_from_args(&args) {
+        // `aga seed` — восстановить тестовый набор в БД (см. seed.rs).
+        RunMode::Seed => return seed::seed(&db_path).await,
+        // `aga agent` — агент-рантайм: отдельный процесс без HTTP-сервера
+        // (см. runtime.rs).
+        RunMode::Agent => return runtime::agent_main(&db_path).await,
+        RunMode::Server => {}
     }
 
     // Загружаем конфигурацию из переменных окружения
@@ -190,4 +214,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(rest: &[&str]) -> Vec<String> {
+        std::iter::once("aga".to_string())
+            .chain(rest.iter().map(|s| s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn agent_arg_selects_runtime_not_http_server() {
+        assert_eq!(mode_from_args(&args(&["agent"])), RunMode::Agent);
+    }
+
+    #[test]
+    fn no_arg_selects_http_server() {
+        assert_eq!(mode_from_args(&args(&[])), RunMode::Server);
+    }
+
+    #[test]
+    fn seed_arg_selects_seed() {
+        assert_eq!(mode_from_args(&args(&["seed"])), RunMode::Seed);
+    }
 }
