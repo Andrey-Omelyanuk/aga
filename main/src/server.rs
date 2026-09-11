@@ -1005,13 +1005,7 @@ async fn delete_shortcut(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    delete_capability(
-        crate::trace::CapabilityKind::Shortcut,
-        id,
-        &state,
-        &headers,
-    )
-    .await
+    delete_capability(crate::trace::CapabilityKind::Shortcut, id, &state, &headers).await
 }
 
 async fn attach_agent_set(
@@ -3147,6 +3141,57 @@ mod tests {
         })
     }
 
+    /// Агент с привязкой к пользователю чата: слушает его и отвечает от его
+    /// имени (настройка на странице агента).
+    fn bound_agent_json(name: &str, listen_user_id: i64) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "description": format!("Правила {name}"),
+            "tools": ["git", "make"],
+            "max_iterations": 3,
+            "llm_id": null,
+            "parent": null,
+            "skills": [],
+            "commands": [],
+            "listen_user_id": listen_user_id
+        })
+    }
+
+    #[tokio::test]
+    async fn agent_listen_binding_saved_and_stays_visible_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/agent-sets",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [bound_agent_json("dev", 42)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let set_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        // Выбор слушаемого виден в деталях набора — страница настройки
+        // показывает его после сохранения.
+        let (status, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(detail["agents"][0]["listen_user_id"], 42);
+        // Правка состава с другой привязкой — сохраняется свежая.
+        patch_json(
+            &format!("/agent-sets/{set_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [bound_agent_json("dev", 77)] }),
+        )
+        .await;
+        let (_, body) = get(&format!("/agent-sets/{set_id}"), &headers, state).await;
+        let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(detail["agents"][0]["listen_user_id"], 77);
+        cleanup(&file).await;
+    }
+
     #[tokio::test]
     async fn created_agent_set_listed_via_api() {
         let (state, file) = test_state(true).await;
@@ -3382,6 +3427,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -3422,6 +3469,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -3439,6 +3488,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -4302,7 +4353,8 @@ mod tests {
     async fn several_shortcuts_added_to_hidden() {
         let (state, file) = test_state(true).await;
         let alice = auth_headers("alice", &["participant"]);
-        for (name, content) in [("first", "Первый текст"), ("second", "Второй текст")] {
+        for (name, content) in [("first", "Первый текст"), ("second", "Второй текст")]
+        {
             post_json(
                 "/shortcuts",
                 &alice,
@@ -4401,12 +4453,7 @@ mod tests {
             serde_json::json!({"content": "Версия 2"}),
         )
         .await;
-        delete_json(
-            &format!("/shortcuts/{shortcut_id}"),
-            &alice,
-            state.clone(),
-        )
-        .await;
+        delete_json(&format!("/shortcuts/{shortcut_id}"), &alice, state.clone()).await;
         let (_, body) = get(&format!("/chats/{chat_id}"), &alice, state.clone()).await;
         let messages = json_get(&body, &["messages"]).unwrap();
         let msg = messages
@@ -4532,12 +4579,7 @@ mod tests {
         )
         .await;
         delete_json(&format!("/shortcuts/{id}"), &alice, state.clone()).await;
-        let (status, body) = get(
-            &format!("/shortcuts/{id}/history"),
-            &alice,
-            state.clone(),
-        )
-        .await;
+        let (status, body) = get(&format!("/shortcuts/{id}/history"), &alice, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         let entries: serde_json::Value = serde_json::from_str(&body).unwrap();
         let actions: Vec<&str> = entries
@@ -4588,13 +4630,8 @@ mod tests {
         let (status, body) = get("/shortcuts", &bob, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("review"));
-        let (_, body) = send_chat_message(
-            create_chat(&bob, &state).await,
-            "/review",
-            &bob,
-            &state,
-        )
-        .await;
+        let (_, body) =
+            send_chat_message(create_chat(&bob, &state).await, "/review", &bob, &state).await;
         // Скрытую часть видит любой участник.
         assert_eq!(
             json_get(&body, &["message", "hidden"]).unwrap().as_str(),
@@ -4606,8 +4643,7 @@ mod tests {
     // === События Centrifugo: чат публикует изменения в каналы чата,
     // пользователя-автора и общий канал (агенты — подписчики, не часть чата).
 
-    type PublishedEvents =
-        std::sync::Arc<tokio::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+    type PublishedEvents = std::sync::Arc<tokio::sync::Mutex<Vec<(String, serde_json::Value)>>>;
 
     /// Мок HTTP API Centrifugo: записывает публикации (канал + данные).
     async fn mock_centrifugo() -> (String, tokio::task::JoinHandle<()>, PublishedEvents) {
@@ -4668,7 +4704,10 @@ mod tests {
         let chat_id = create_chat(&alice, &state).await;
         let (status, body) = send_chat_message(chat_id, "привет", &alice, &state).await;
         assert_eq!(status, StatusCode::OK);
-        let message_id = json_get(&body, &["message", "id"]).unwrap().as_i64().unwrap();
+        let message_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
         let evs = events.lock().await;
         let data = published(&evs, &format!("chat:{chat_id}"), "message")
             .expect("событие сообщения не пришло в канал чата");
@@ -4689,8 +4728,14 @@ mod tests {
         let chat_id = create_chat(&alice, &state).await;
         let (status, body) = send_chat_message(chat_id, "привет", &alice, &state).await;
         assert_eq!(status, StatusCode::OK);
-        let message_id = json_get(&body, &["message", "id"]).unwrap().as_i64().unwrap();
-        let alice_id = json_get(&body, &["message", "author_id"]).unwrap().as_i64().unwrap();
+        let message_id = json_get(&body, &["message", "id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
+        let alice_id = json_get(&body, &["message", "author_id"])
+            .unwrap()
+            .as_i64()
+            .unwrap();
         let evs = events.lock().await;
         let data = published(&evs, &format!("user:{alice_id}"), "message")
             .expect("событие сообщения не пришло в канал автора");

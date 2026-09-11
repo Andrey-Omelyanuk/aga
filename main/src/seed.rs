@@ -160,6 +160,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     commands: vec![AgentCapability {
                         name: "run-tests".into(),
                     }],
+
+                    listen_user_id: None,
                 },
                 AgentSpec {
                     name: "api".into(),
@@ -172,6 +174,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     commands: vec![AgentCapability {
                         name: "deploy".into(),
                     }],
+
+                    listen_user_id: None,
                 },
             ],
         )
@@ -203,6 +207,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     commands: vec![AgentCapability {
                         name: "run-ui-tests".into(),
                     }],
+
+                    listen_user_id: None,
                 },
                 AgentSpec {
                     name: "src/model".into(),
@@ -213,6 +219,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     parent: Some("ui".into()),
                     skills: Vec::new(),
                     commands: Vec::new(),
+
+                    listen_user_id: None,
                 },
             ],
         )

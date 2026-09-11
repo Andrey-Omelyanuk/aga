@@ -55,6 +55,45 @@ pub fn lifecycle_payload(action: &str, chat_id: i64) -> serde_json::Value {
 /// Продолжительность жизни connection-JWT (Centrifugo проверяет `exp`).
 const TOKEN_TTL_SECS: u64 = 60 * 60;
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+fn sign_jwt(
+    secret: &str,
+    claims: &serde_json::Value,
+) -> Result<String, jsonwebtoken::errors::Error> {
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    jsonwebtoken::encode(
+        &header,
+        claims,
+        &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+    )
+}
+
+/// Один кадр событий unidirectional-SSE Centrifugo (`/connection/sse`,
+/// JSON-протокол): из `data:`-строк собираем JSON и достаём публикацию —
+/// (канал, данные). Кадры без публикации (соединение, ping) → None.
+pub fn parse_sse_event(frame: &str) -> Option<(String, serde_json::Value)> {
+    let mut data = String::new();
+    for line in frame.lines() {
+        // Комментарий (`: ping`) — не данные; поле `data:` — кадр события.
+        if let Some(rest) = line.strip_prefix("data:") {
+            data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+        }
+    }
+    if data.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&data).ok()?;
+    let publication = value.get("pub")?;
+    let channel = publication["channel"].as_str()?.to_string();
+    Some((channel, publication["data"].clone()))
+}
+
 #[derive(Clone)]
 pub struct CentrifugeClient {
     inner: Option<Inner>,
@@ -98,23 +137,33 @@ impl CentrifugeClient {
     /// channel-токена нет: канал общий для всех аутентифицированных.
     pub fn connection_jwt(&self, user_id: i64) -> Result<String, CentrifugeError> {
         let inner = self.inner.as_ref().ok_or(CentrifugeError::NotConfigured)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| {
-                jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ExpiredSignature)
-            })?
-            .as_secs();
-        let claims = json!({
-            "sub": user_id.to_string(),
-            "exp": now + TOKEN_TTL_SECS,
-            "channels": [inner.channel],
-        });
-        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
-        Ok(jsonwebtoken::encode(
-            &header,
-            &claims,
-            &jsonwebtoken::EncodingKey::from_secret(inner.secret.as_bytes()),
-        )?)
+        let token = sign_jwt(
+            &inner.secret,
+            &json!({
+                "sub": user_id.to_string(),
+                "exp": now_secs() + TOKEN_TTL_SECS,
+                "channels": [inner.channel],
+            }),
+        )?;
+        Ok(token)
+    }
+
+    /// Connection-JWT агент-рантайма (`aga agent`): серверная подписка
+    /// (`subscriptions`) на каналы прослушиваемых пользователей. Рантайм —
+    /// доверенный серверный процесс, токен подписывает тем же HMAC-секретом из
+    /// конфига (того же roles.yaml), без прохода через HTTP-ядро.
+    pub fn subscriber_jwt(&self, channels: &[String]) -> Result<String, CentrifugeError> {
+        let inner = self.inner.as_ref().ok_or(CentrifugeError::NotConfigured)?;
+        sign_jwt(
+            &inner.secret,
+            &json!({
+                "sub": "aga-runtime",
+                "exp": now_secs() + TOKEN_TTL_SECS,
+                "channels": channels,
+                "subscriptions": channels,
+            }),
+        )
+        .map_err(Into::into)
     }
 
     /// Публикует payload в именованный канал через HTTP API Centrifugo.
@@ -151,12 +200,7 @@ impl CentrifugeClient {
     /// Публикует событие нового сообщения в три канала: общий (`channel` из
     /// конфига), канал чата и канал автора. Веб-клиент слушает общий канал,
     /// агент-процесс — каналы пользователей. Best-effort, как `publish`.
-    pub async fn publish_message(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-        author_id: i64,
-    ) {
+    pub async fn publish_message(&self, chat_id: i64, message_id: i64, author_id: i64) {
         let payload = message_payload(chat_id, message_id, author_id);
         let channel = self.channel();
         self.publish(&channel, payload.clone()).await;
@@ -170,6 +214,20 @@ impl CentrifugeClient {
             .as_ref()
             .map(|i| i.channel.clone())
             .unwrap_or_else(crate::config::default_channel)
+    }
+
+    /// Открывает unidirectional-SSE соединение Centrifugo с готовым
+    /// connection-JWT (`subscriber_jwt`): серверная подписка из токена
+    /// подключает каналы, публикации приходят кадрами `parse_sse_event`.
+    /// Ответ остаётся открытым стримом — читает его вызывающий (`runtime.rs`).
+    pub async fn sse_stream(&self, token: &str) -> Result<reqwest::Response, CentrifugeError> {
+        let inner = self.inner.as_ref().ok_or(CentrifugeError::NotConfigured)?;
+        let url = format!(
+            "{}/connection/sse?format=json&token={}",
+            inner.api_url, token
+        );
+        let resp = inner.http.get(url).send().await?.error_for_status()?;
+        Ok(resp)
     }
 }
 
@@ -201,6 +259,36 @@ mod tests {
         assert_eq!(claims["sub"], "42");
         assert_eq!(claims["channels"][0], "common");
         assert!(claims["exp"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn subscriber_jwt_has_server_side_subscriptions_for_bound_users() {
+        let client = CentrifugeClient::from_config(&config());
+        let token = client
+            .subscriber_jwt(&["user:5".to_string(), "user:9".to_string()])
+            .unwrap();
+        let data = decode::<serde_json::Value>(
+            &token,
+            &DecodingKey::from_secret(b"secret"),
+            &Validation::new(Algorithm::HS256),
+        )
+        .unwrap();
+        let claims = data.claims;
+        // Серверная подписка из токена: рантайму не нужно уметь подписываться
+        // самому — Centrifugo подключает каналы при connect.
+        assert_eq!(claims["subscriptions"][0], "user:5");
+        assert_eq!(claims["subscriptions"][1], "user:9");
+    }
+
+    #[test]
+    fn sse_frames_carry_publications_and_ignore_pings() {
+        let frame = "data: {\"pub\":{\"channel\":\"user:5\",\"data\":{\"type\":\"message\"}}}";
+        let (channel, data) = parse_sse_event(frame).expect("публикация в SSE-кадре");
+        assert_eq!(channel, "user:5");
+        assert_eq!(data["type"], "message");
+        // Комментарий-пин и кадр соединения — не публикация.
+        assert!(parse_sse_event(": ping").is_none());
+        assert!(parse_sse_event("data: {\"connect\":{}}").is_none());
     }
 
     #[test]

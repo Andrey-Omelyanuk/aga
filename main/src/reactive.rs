@@ -155,7 +155,14 @@ impl ReactiveRunner {
                 tracing::info!("reactive: posting error message for agent={name}");
                 let _ = self
                     .chat_store
-                    .send_message(chat_id, agent_user_id, &format!("Ошибка: {e}"), "", None, None)
+                    .send_message(
+                        chat_id,
+                        agent_user_id,
+                        &format!("Ошибка: {e}"),
+                        "",
+                        None,
+                        None,
+                    )
                     .await;
                 return;
             }
@@ -238,6 +245,8 @@ mod tests {
                         parent: None,
                         skills: vec![],
                         commands: vec![],
+
+                        listen_user_id: None,
                     },
                     AgentSpec {
                         name: "deploy".to_string(),
@@ -248,6 +257,8 @@ mod tests {
                         parent: None,
                         skills: vec![],
                         commands: vec![],
+
+                        listen_user_id: None,
                     },
                 ],
             )
@@ -298,6 +309,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -337,6 +350,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -391,6 +406,8 @@ mod tests {
                         commands: vec![AgentCapability {
                             name: "deploy".to_string(),
                         }],
+
+                        listen_user_id: None,
                     },
                     AgentSpec {
                         name: "src/backend".to_string(),
@@ -405,6 +422,8 @@ mod tests {
                         commands: vec![AgentCapability {
                             name: "deploy".to_string(),
                         }],
+
+                        listen_user_id: None,
                     },
                 ],
             )

@@ -326,11 +326,7 @@ impl ChatStore {
             .ensure_column("messages", "hidden", "hidden TEXT NOT NULL DEFAULT ''")
             .await?;
         store
-            .ensure_column(
-                "messages",
-                "origin",
-                "origin TEXT NOT NULL DEFAULT 'user'",
-            )
+            .ensure_column("messages", "origin", "origin TEXT NOT NULL DEFAULT 'user'")
             .await?;
 
         // Миграция старых БД: сессионные поля жили в chats, теперь — в
@@ -729,8 +725,16 @@ impl ChatStore {
         parent_id: Option<i64>,
         last_message_id: Option<i64>,
     ) -> Result<Option<Message>, sqlx::Error> {
-        self.send_message_with_origin(chat_id, author_id, body, hidden, parent_id, last_message_id, "user")
-            .await
+        self.send_message_with_origin(
+            chat_id,
+            author_id,
+            body,
+            hidden,
+            parent_id,
+            last_message_id,
+            "user",
+        )
+        .await
     }
 
     /// Сообщение с указанным источником (`origin`): чат его не интерпретирует —

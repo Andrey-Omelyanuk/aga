@@ -61,6 +61,10 @@ pub struct AgentDef {
     pub commands: Vec<AgentCapability>,
     /// Территория по узлу в дереве набора: папка узла минус папки наследников.
     pub territory: crate::scope::Territory,
+    /// Привязка к пользователю чата: агент слушает его сообщения и отвечает от
+    /// его имени. Нет — агент ни на что не реагирует (настройка на странице
+    /// агента; использует `runtime.rs`).
+    pub listen_user_id: Option<i64>,
 }
 
 /// Набор агентов с их деревом. Прикрепляется к одному или нескольким проектам.
@@ -83,6 +87,9 @@ pub struct AgentSpec {
     pub parent: Option<String>,
     pub skills: Vec<AgentCapability>,
     pub commands: Vec<AgentCapability>,
+    /// Привязка к пользователю чата (слушать и отвечать от его имени).
+    #[serde(default)]
+    pub listen_user_id: Option<i64>,
 }
 
 /// Подключение к LLM: название, url API, ключ доступа и модель. Агент набора
@@ -393,6 +400,7 @@ impl TraceStore {
                 max_iterations INTEGER NOT NULL DEFAULT 3,
                 llm_id INTEGER,
                 parent_id INTEGER,
+                listen_user_id INTEGER,
                 UNIQUE (set_id, name),
                 FOREIGN KEY (set_id) REFERENCES agent_sets(id) ON DELETE CASCADE,
                 FOREIGN KEY (parent_id) REFERENCES agents(id) ON DELETE CASCADE,
@@ -405,6 +413,9 @@ impl TraceStore {
 
         // Миграция старых БД: у агента появилось подключение к LLM (llm_id).
         migrate_agents_llm_column(&pool).await?;
+        // Миграция старых БД: привязка агента к пользователю чата
+        // (listen_user_id — слушает его и отвечает от его имени).
+        migrate_agents_listen_user_column(&pool).await?;
 
         sqlx::query(
             r#"
@@ -728,8 +739,8 @@ impl TraceStore {
             let parent_id: Option<i64> = spec.parent.as_deref().and_then(|p| ids.get(p).copied());
             let tools = serde_json::to_string(&spec.tools).unwrap_or_else(|_| "[]".into());
             let result = sqlx::query(
-                "INSERT INTO agents (set_id, name, description, tools, max_iterations, llm_id, parent_id)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO agents (set_id, name, description, tools, max_iterations, llm_id, parent_id, listen_user_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(set_id)
             .bind(&spec.name)
@@ -738,6 +749,7 @@ impl TraceStore {
             .bind(spec.max_iterations as i64)
             .bind(spec.llm_id)
             .bind(parent_id)
+            .bind(spec.listen_user_id)
             .execute(&mut **tx)
             .await?;
             let agent_id = result.last_insert_rowid();
@@ -788,7 +800,7 @@ impl TraceStore {
         };
         let name: String = name_row.get("name");
         let rows = sqlx::query(
-            "SELECT id, name, description, tools, max_iterations, llm_id, parent_id
+            "SELECT id, name, description, tools, max_iterations, llm_id, parent_id, listen_user_id
              FROM agents WHERE set_id = ? ORDER BY id",
         )
         .bind(set_id)
@@ -831,6 +843,7 @@ impl TraceStore {
                 skills,
                 commands,
                 territory: Default::default(),
+                listen_user_id: r.get("listen_user_id"),
             });
         }
         let mut set = AgentSet {
@@ -1043,6 +1056,17 @@ impl TraceStore {
             Some(r) => self.load_set(r.get("agent_set_id")).await,
             None => Ok(None),
         }
+    }
+
+    /// Агент из набора проекта, привязанный к пользователю (`listen_user_id`).
+    /// Использует подписчик (`runtime.rs`): по событию сообщения находит, есть ли
+    /// в наборе проекта чата агент, слушающий автора, — и запускает его. Нет
+    /// привязки — None, агент не реагирует.
+    pub fn agent_listening_to(&self, set: &AgentSet, user_id: i64) -> Option<AgentDef> {
+        set.agents
+            .iter()
+            .find(|a| a.listen_user_id == Some(user_id))
+            .cloned()
     }
 
     // === Каталог способностей (скиллы и команды) ===
@@ -1505,6 +1529,22 @@ async fn migrate_agents_llm_column(pool: &SqlitePool) -> Result<(), sqlx::Error>
     Ok(())
 }
 
+/// Миграция старых БД: привязка агента к пользователю чата (`listen_user_id`).
+async fn migrate_agents_listen_user_column(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let cols: Vec<String> = sqlx::query("PRAGMA table_info(agents)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    if !cols.iter().any(|c| c == "listen_user_id") {
+        sqlx::query("ALTER TABLE agents ADD COLUMN listen_user_id INTEGER")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Миграция старых БД: у подключения к LLM появились модель (`model`) и флаг
 /// дефолта (`is_default`). Модель больше не из env — она живёт в подключении;
 /// старые строки получают пустую модель (их правит пользователь на странице).
@@ -1740,6 +1780,7 @@ mod tests {
             parent: parent.map(|s| s.to_string()),
             skills: vec![],
             commands: vec![],
+            listen_user_id: None,
         }
     }
 
@@ -1796,6 +1837,8 @@ mod tests {
             parent: None,
             skills: vec![],
             commands: vec![],
+
+            listen_user_id: None,
         };
         let s2 = AgentSpec {
             name: "deploy".to_string(),
@@ -1806,6 +1849,8 @@ mod tests {
             parent: None,
             skills: vec![],
             commands: vec![],
+
+            listen_user_id: None,
         };
         let set_id = store.create_agent_set("ops", &[s1, s2]).await.unwrap();
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
@@ -1848,6 +1893,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -1909,6 +1956,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -1959,6 +2008,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -2010,6 +2061,8 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -2182,6 +2235,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_binds_to_listening_user_survives_update() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let mut dev = spec("dev", None);
+        dev.listen_user_id = Some(42);
+        let set_id = store.create_agent_set("ops", &[dev]).await.unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        // Привязка слышна сразу после создания набора.
+        assert_eq!(set.agents[0].listen_user_id, Some(42));
+        let found = store.agent_listening_to(&set, 42).expect("агент слушает 42");
+        assert_eq!(found.name, "dev");
+        // Чужой пользователь не триггерит этого агента.
+        assert!(store.agent_listening_to(&set, 7).is_none());
+
+        // Правка набора без привязки — она сброшена (состав меняется целиком).
+        let mut api = spec("api", None);
+        api.listen_user_id = Some(99);
+        store
+            .update_agent_set(set_id, "ops", &[api])
+            .await
+            .unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        assert_eq!(set.agents[0].listen_user_id, Some(99));
+        assert_eq!(store.agent_listening_to(&set, 99).unwrap().name, "api");
+        assert!(store.agent_listening_to(&set, 42).is_none());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn agent_without_binding_listens_to_nobody() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        let set_id = store
+            .create_agent_set("ops", &[spec("dev", None)])
+            .await
+            .unwrap();
+        let set = store.get_agent_set(set_id).await.unwrap().unwrap();
+        assert_eq!(set.agents[0].listen_user_id, None);
+        // Ни один пользователь не находит агента без привязки.
+        assert!(store.agent_listening_to(&set, 1).is_none());
+        assert!(store.agent_listening_to(&set, 42).is_none());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
     async fn each_agent_owns_territory_by_its_tree_node() {
         let (path, file) = temp_db_path();
         let store = TraceStore::new(&path).await.unwrap();
@@ -2248,6 +2346,8 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     commands: vec![cap("deploy")],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -2328,6 +2428,8 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     commands: vec![cap("deploy")],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -2367,6 +2469,8 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
@@ -2501,6 +2605,8 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     commands: vec![],
+
+                    listen_user_id: None,
                 }],
             )
             .await
