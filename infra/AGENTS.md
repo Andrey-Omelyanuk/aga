@@ -7,8 +7,8 @@
 ## Boundaries
 - **Делает:** docker-образ ядра (`main/Dockerfile`, включая kubectl и docker CLI),
   docker-образ веб-клиента (`front/Dockerfile`, nginx), параметризация через `.env`,
-  dev-стенд без кластера (`dev-compose.yml`: ядро + Keycloak + веб-клиент +
-  ws-1/ws-2, SSO как в стенде),
+  dev-стенд без кластера (`dev-compose.yml`: ядро + агент-рантайм (`aga agent`) +
+  Keycloak + веб-клиент + ws-1/ws-2, SSO как в стенде),
   манифесты стенда
   (`k8s/core/`, `k8s/front/`), воркстейшны как поды Kubernetes (`k8s/`).
 - **Не делает:** не содержит логики приложения (это `main/src/` и `front/`),
@@ -21,6 +21,9 @@
 - `front/Dockerfile` — nginx, раздаёт `front/dist` (отдельный сервис).
 - `.env.example` — шаблон, копируется в корневой `.env` через `make init`.
 - `dev-compose.yml` — dev-стенд: ядро (docker.sock, `AGA_WS_BACKEND=docker`),
+  агент-рантайм (`agent`: тот же образ `aga-core:dev`, команда `aga agent`,
+  общий с ядром том БД `aga-data` и docker.sock — подписан на Centrifugo,
+  агентов ядро не запускает),
   веб-клиент (`front`, vite dev-server с HMR, образ `node:22`, bind-mount
   `../front`, host-порт `${AGA_FRONT_PORT:-8081}:80`; прод-сборка nginx из
   `dist/` — отдельно, `make build` + k8s/front),
@@ -31,8 +34,10 @@
   git-репо в отдельных named volumes `ws-1-data`/`ws-2-data` — на хосте файлов
   воркстейшнов нет) + маленькая LLM (`ollama`, модель до 1B `qwen3:0.6b` —
   тянется при старте; подключение к ней в БД создаёт сид (`make dev-seed`,
-  адрес `ollama:11434/v1`) или админ вручную на странице «LLM») + Centrifugo (реальное время для чата, общий канал
-  `common` для аутентифицированных; секреты — `aga-api-key`/`aga-hmac-secret`,
+  адрес `ollama:11434/v1`) или админ вручную на странице «LLM») + Centrifugo (события чата: общий канал
+  `common` для аутентифицированных + каналы `chat:<id>`/`user:<id>`; включён
+  unidirectional-SSE (`CENTRIFUGO_UNI_SSE=true`) — транспорт подписки
+  агент-рантайма; секреты — `aga-api-key`/`aga-hmac-secret`,
   совпадают с центрифуго-блоком roles.yaml). Прокси маршрутизирует как ingress
   в k8s: `dev.localhost` → front, `api.localhost` → core, `auth.localhost` →
   Keycloak, `pub-sub.localhost` → centrifugo.
@@ -75,11 +80,13 @@
   ws-1/ws-2 ready, фронт отвечает на `${AGA_FRONT_PORT:-8081}`, прокси отдаёт
   SPA на `dev.localhost`, API на `api.localhost`, Keycloak на `auth.localhost`.
 - `make dev-e2e` — e2e всего рабочего цикла агента на dev-стенде
-  (`infra/dev-e2e.sh`): форсит пересоздание core и ws-контейнеров (свежие
-  образы), сидит БД и через HTTP API со SSO закрывает сессию занятого
+  (`infra/dev-e2e.sh`): перезапускает агент-рантайм (свежие привязки после сида),
+  сидит БД и через HTTP API со SSO закрывает сессию занятого
   воркстейшна, отпускает его, открывает сессию с проектом mobx-model-ui
-  (ядро разворачивает git-клон в `/work/project`) и ждёт непустой ответ
-  `@Agent.ui` с артефактом. Требует SSH-доступа по `AGA_SSH_PRIVATE_KEY` к репозиторию
+  (ядро разворачивает git-клон в `/work/project`); alice (привязанный пользователь
+  агента `ui`) пишет вопрос — рантайм слушает её канал и отвечает от её имени
+  (`origin='agent'`), ждёт непустой ответ с артефактом. Требует SSH-доступа по
+  `AGA_SSH_PRIVATE_KEY` к репозиторию
   `git@github.com:Andrey-Omelyanuk/mobx-model-ui.git`.
 - Вход в Keycloak — тестовые учётки `alice`/`alice-pass` (participant) и
   `bob`/`bob-pass` (admin); фиксированные `sso_subject` заданы в
