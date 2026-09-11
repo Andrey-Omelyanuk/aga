@@ -32,6 +32,10 @@ spec:
             # SPA живёт на dev.localhost (ingress) — это Origin websocket-соединения.
             - name: CENTRIFUGO_ALLOWED_ORIGINS
               value: http://dev.localhost
+            # Unidirectional SSE (/connection/sse): транспорт агент-рантайма
+            # (`aga agent`, runtime.rs) — серверные подписки на user:<id>.
+            - name: CENTRIFUGO_UNI_SSE
+              value: "true"
             - name: CENTRIFUGO_LOG_LEVEL
               value: info
           ports:

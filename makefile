@@ -21,7 +21,7 @@ K8S_FRONT = infra/k8s/front
 # Cargo-команды выполняются в main/ (CWD ядра): пути конфига (.env) относительно него.
 CARGO_IN_MAIN = cd main && $(CARGO)
 
-.PHONY: help init build release test lint fmt fmt-fix run run-front \
+.PHONY: help init build release test lint fmt fmt-fix run run-agent run-front \
         front-test storybook storybook-build \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
@@ -37,6 +37,7 @@ help:
 	@echo "fmt         - Check formatting (cargo fmt --check)"
 	@echo "fmt-fix     - Apply formatting"
 	@echo "run         - Run core locally (cargo run in main/)"
+	@echo "run-agent   - Run the agent runtime locally (aga agent, needs Centrifugo)"
 	@echo "run-front   - Serve front locally (vite dev, port 8081)"
 	@echo "front-test  - Run frontend unit tests (vitest)"
 	@echo "storybook   - Run Storybook dev server"
@@ -97,6 +98,12 @@ fmt-fix:
 
 run: init
 	$(CARGO_IN_MAIN) run
+
+# Агент-рантайм отдельным процессом (`aga agent`): локально, рядом с `make run`.
+# Тот же бинарь и та же БД; требует поднятого Centrifugo (dev-стенд) — без него
+# рантайм не стартует (единственный источник событий агентов).
+run-agent: init
+	$(CARGO_IN_MAIN) run -- agent
 
 # Локальный дев-сервер фронта без стенда (API_BASE — адрес ядра).
 run-front:

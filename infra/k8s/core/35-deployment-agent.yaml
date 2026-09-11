@@ -1,0 +1,87 @@
+# Агент-рантайм — отдельный процесс того же образа (`/app/aga agent`): подписан
+# на Centrifugo, реагирует на сообщения привязанных пользователей (runtime.rs).
+# HTTP не раздаёт — чат обслуживает aga-core. Общая БД: тот же PVC aga-data
+# (SQLite WAL; стенд — один узел minikube). Команды агентов идут в поды
+# воркстейшнов через kubectl — тот же SA и RBAC, что у ядра.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aga-agent
+  namespace: aga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aga-agent
+  template:
+    metadata:
+      labels:
+        app: aga-agent
+    spec:
+      serviceAccountName: aga-core
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        # Как у ядра: рендерим kubeconfig из токена ServiceAccount'а — kubectl
+        # в поде без него не применит RBAC к воркстейшнам.
+        - name: kubectl-context
+          image: aga-core:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - >
+              if [ ! -f /etc/aga/kube/kubeconfig ]; then
+                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) &&
+                CA=$(base64 < /var/run/secrets/kubernetes.io/serviceaccount/ca.crt | tr -d '\n') &&
+                printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: incluster\n  cluster:\n    server: https://kubernetes.default.svc\n    certificate-authority-data: %s\ncontexts:\n- name: incluster\n  context:\n    cluster: incluster\n    user: sa\ncurrent-context: incluster\nusers:\n- name: sa\n  user:\n    token: %s\n' "$CA" "$TOKEN" > /etc/aga/kube/kubeconfig;
+              fi
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /etc/aga/kube
+      containers:
+        - name: agent
+          image: aga-core:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/app/aga", "agent"]
+          envFrom:
+            # SSH-ключ aga нужен рантайму так же, как ядру: git+ssh в воркстейшнах.
+            - secretRef:
+                name: aga-ssh-env
+          env:
+            - name: AGA_CONFIG_PATH
+              value: /etc/aga/roles.yaml
+            - name: AGA_DB_PATH
+              value: /var/lib/aga/trace.db
+            - name: AGA_K8S_NAMESPACE
+              value: aga
+            - name: AGA_K8S_IMAGE
+              value: aga-workstation:latest
+            - name: AGA_K8S_KUBECTL
+              value: kubectl
+            - name: KUBECONFIG
+              value: /etc/aga/kube/kubeconfig
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef:
+                  name: aga-env
+                  key: RUST_LOG
+          volumeMounts:
+            - name: roles
+              mountPath: /etc/aga/roles.yaml
+              subPath: roles.yaml
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/aga
+            - name: kubeconfig
+              mountPath: /etc/aga/kube
+      volumes:
+        - name: roles
+          configMap:
+            name: aga-roles
+        - name: data
+          persistentVolumeClaim:
+            claimName: aga-data
+        - name: kubeconfig
+          emptyDir: {}

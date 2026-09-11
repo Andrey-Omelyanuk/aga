@@ -4,10 +4,10 @@
 # Проверяет вертикальный срез на живом стенде: HTTP API через SSO (роли
 # участника и суперпользователя), жизненный цикл воркстейшна (закрыть сессию,
 # отпустить, открыть сессию с проектом mobx-model-ui — ядро разворачивает
-# git-клон в /work/project), сессию
-# и реактивного агента (@Agent.ui), который отвечает о проекте через маленькую
-# LLM dev-стенда. Качество ответа не проверяем — хватает непустого ответа с
-# артефактом.
+# git-клон в /work/project), сессию и агент-рантайм (aga agent): сообщение
+# alice — привязанного пользователя агента ui — уходит в Centrifugo, рантайм
+# слушает её канал и отвечает от её имени через маленькую LLM dev-стенда.
+# Качество ответа не проверяем — хватает непустого ответа с артефактом.
 #
 # Требует поднятого и засеянного dev-стенда (`make dev-up`, `make dev-seed`),
 # jq и SSH-доступа по AGA_SSH_PRIVATE_KEY к git@github.com:Andrey-Omelyanuk/mobx-model-ui.git.
@@ -25,6 +25,10 @@ for _ in $(seq 1 90); do
 done
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$CORE/users")" = "401" ] || \
   [ "$(curl -s -o /dev/null -w '%{http_code}' "$CORE/users")" = "200" ]
+
+# Перезапускаем агент-рантайм: после сида он мог висеть на каналах до привязок;
+# свежий старт перечитывает listen_user_id из БД и подписывается заново.
+docker restart aga-agent >/dev/null 2>&1 || true
 
 echo "==> wait for Keycloak realm"
 for _ in $(seq 1 90); do
@@ -106,20 +110,22 @@ done
 [ -n "$CODE_OK" ]
 echo "mobx-model-ui code cloned (README.md present)"
 
-echo "==> ask the agent what the project is (@Agent.ui)"
-curl -sf -X POST -H "Authorization: Bearer $ALICE" -H 'content-type: application/json' \
+echo "==> ask the agent what the project is (agent ui listens to alice)"
+QRES=$(curl -sf -X POST -H "Authorization: Bearer $ALICE" -H 'content-type: application/json' \
   "$CORE/chats/$CHAT_ID/messages" \
-  -d '{"body":"@Agent.ui что за проект?"}' >/dev/null
+  -d '{"body":"что за проект?"}')
+QID=$(echo "$QRES" | jq -r '.message.id')
+[ -n "$QID" ] && [ "$QID" != "null" ]
 
-AGENT_ID=$(curl -sf -H "Authorization: Bearer $ALICE" "$CORE/users" \
-  | jq -r '.[] | select(.name == "Agent.ui") | .id' | head -1)
-[ -n "$AGENT_ID" ]
+ALICE_ID=$(echo "$QRES" | jq -r '.message.author_id')
+[ -n "$ALICE_ID" ]
 
-echo "==> wait for a non-empty reply from the agent with an artifact"
+echo "==> wait for a non-empty agent reply as alice (origin=agent) with an artifact"
 REPLY_OK=""
 for _ in $(seq 1 300); do
   MSG=$(curl -sf -H "Authorization: Bearer $ALICE" "$CORE/chats/$CHAT_ID/messages" \
-    | jq -c --argjson a "$AGENT_ID" '[.[] | select(.author_id == $a and (.body | length > 0))] | last // empty')
+    | jq -c --argjson a "$ALICE_ID" --argjson q "$QID" \
+      '[.[] | select(.origin == "agent" and .author_id == $a and .id > $q and (.body | length > 0))] | last // empty')
   if [ -n "$MSG" ]; then
     BODY=$(echo "$MSG" | jq -r '.body')
     case "$BODY" in
@@ -134,7 +140,7 @@ for _ in $(seq 1 300); do
   sleep 2
 done
 [ -n "$REPLY_OK" ]
-echo "agent replied (message $MID), artifact attached"
+echo "agent replied as alice (message $MID, origin=agent), artifact attached"
 echo "reply: $BODY"
 
 echo "==> OK"
