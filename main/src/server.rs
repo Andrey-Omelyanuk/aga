@@ -5,16 +5,13 @@ use axum::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         HeaderMap, HeaderValue, Method, StatusCode,
     },
-    response::sse::{Event, Sse},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use futures_util::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
-use std::convert::Infallible;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::auth;
@@ -58,11 +55,6 @@ async fn current_actor(state: &AppState, headers: &HeaderMap) -> Result<(i64, St
         .map(|u| u.name)
         .unwrap_or_else(|| format!("#{id}"));
     Ok((id, name))
-}
-
-#[derive(Deserialize)]
-pub struct HumanAnswerRequest {
-    pub answer: String,
 }
 
 #[derive(Serialize)]
@@ -139,8 +131,6 @@ pub fn create_router(state: AppState) -> Router {
         .allow_headers([CONTENT_TYPE, AUTHORIZATION]);
     Router::new()
         .route("/trace/:task_id", get(get_trace))
-        .route("/human/pending", get(pending_human_requests))
-        .route("/human/answer/:id", post(answer_human_request))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/:id", get(get_project).delete(delete_project))
         .route(
@@ -257,47 +247,6 @@ async fn get_trace(
     match state.trace_store.get_trace(&task_id).await {
         Ok(Some(trace)) => Ok(Json(serde_json::to_value(trace).unwrap())),
         Ok(None) => Err(StatusCode::NOT_FOUND),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-    }
-}
-
-async fn pending_human_requests(
-    State(state): State<AppState>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    let (tx, rx) = mpsc::channel::<String>(100);
-
-    if let Ok(requests) = state.trace_store.get_pending_human_requests().await {
-        for (id, task_id, question) in requests {
-            let json = serde_json::json!({
-                "id": id,
-                "task_id": task_id,
-                "question": question,
-            });
-            let _ = tx.send(format!("data: {}\n\n", json)).await;
-        }
-    }
-
-    let stream = stream::unfold(rx, |mut rx| async move {
-        rx.recv()
-            .await
-            .map(|data| (Ok(Event::default().data(data)), rx))
-    });
-
-    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
-}
-
-async fn answer_human_request(
-    Path(id): Path<String>,
-    State(state): State<AppState>,
-    Json(payload): Json<HumanAnswerRequest>,
-) -> Result<StatusCode, StatusCode> {
-    match state
-        .trace_store
-        .answer_human_request(&id, &payload.answer)
-        .await
-    {
-        Ok(true) => Ok(StatusCode::OK),
-        Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

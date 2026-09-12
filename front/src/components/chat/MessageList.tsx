@@ -28,6 +28,7 @@ export const MessageList = observer((props: MessageListProps) => {
   const { chat, onChanged } = props;
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [startFor, setStartFor] = useState<number | null>(null);
+  const [replyFor, setReplyFor] = useState<number | null>(null);
 
   const toggle = (id: number) => {
     const next = new Set(expanded);
@@ -65,6 +66,7 @@ export const MessageList = observer((props: MessageListProps) => {
             participants={chat.participants}
             message={msg}
             onStart={() => setStartFor(startFor === msg.id ? null : msg.id)}
+            onReply={() => setReplyFor(replyFor === msg.id ? null : msg.id)}
             onOpenThread={() => (msg.thread_of_id ? openThreadAt(msg.thread_of_id) : undefined)}
           />
           {startFor === msg.id && (
@@ -75,6 +77,17 @@ export const MessageList = observer((props: MessageListProps) => {
                 reload();
               }}
               onCancel={() => setStartFor(null)}
+            />
+          )}
+          {replyFor === msg.id && (
+            <ReplyForm
+              chatId={chat.id}
+              message={msg}
+              onDone={() => {
+                setReplyFor(null);
+                reload();
+              }}
+              onCancel={() => setReplyFor(null)}
             />
           )}
           <Threads
@@ -95,6 +108,8 @@ interface MessageRowProps {
   participants: ChatParticipant[];
   message: ChatMessage;
   onStart: () => void;
+  /** «Ответить» — сообщение с parent_id на это (резолвит pending-вопрос агента). */
+  onReply: () => void;
   /** У сообщений нити — отправка копии в родительский чат. */
   onToParent?: () => void;
   /** У копии нити в родителе — раскрытие нити у сообщения-источника. */
@@ -102,7 +117,7 @@ interface MessageRowProps {
 }
 
 const MessageRow = observer(
-  ({ scopeId, participants, message, onStart, onToParent, onOpenThread }: MessageRowProps) => {
+  ({ scopeId, participants, message, onStart, onReply, onToParent, onOpenThread }: MessageRowProps) => {
     const isUser = message.author_id === scopeId;
     const author = participants.find((p) => p.id === message.author_id)?.name ?? `#${message.author_id}`;
     const [showHidden, setShowHidden] = useState(false);
@@ -131,6 +146,9 @@ const MessageRow = observer(
                 ↳ начать нить
               </button>
             )}
+            <button onClick={onReply} className="text-slate-400 hover:text-blue-600">
+              ↩ ответить
+            </button>
             {onToParent ? (
               <button onClick={onToParent} className="text-slate-400 hover:text-blue-600">
                 → в родителя
@@ -219,6 +237,56 @@ interface ThreadsProps {
   onChanged: () => void;
 }
 
+interface ReplyFormProps {
+  chatId: number;
+  message: ChatMessage;
+  onDone: () => void;
+  onCancel: () => void;
+}
+
+/** Ответ на сообщение: обычное сообщение чата с `parent_id` на источник. Для
+ *  вопроса агента это и есть механизм human-in-the-loop (рантайм закроет
+ *  pending-запрос и продолжит агента). */
+const ReplyForm = observer(({ chatId, message, onDone, onCancel }: ReplyFormProps) => {
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const text = body.trim();
+    if (!text || busy) return;
+    setBusy(true);
+    try {
+      await http.post(`/chats/${chatId}/messages`, { body: text, parent_id: message.id });
+      onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mb-3 ml-6 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+      <div className="mb-1.5 truncate text-xs text-slate-400" title={message.body}>
+        в ответ на #{message.id}: {message.body}
+      </div>
+      <textarea
+        className="mb-1.5 min-h-[44px] w-full resize-none rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-500"
+        placeholder="Ответ…"
+        rows={2}
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+      />
+      <div className="flex gap-2">
+        <Button size="sm" onClick={submit}>
+          Отправить
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onCancel}>
+          Отмена
+        </Button>
+      </div>
+    </div>
+  );
+});
+
 /** Начатые от сообщения originId нити, свёрнутые по умолчанию. */
 const Threads = observer(({ threads, originId, expanded, onToggle, onChanged }: ThreadsProps) => {
   const items = threads.filter((t) => t.start_message_id === originId);
@@ -272,6 +340,7 @@ const ThreadBody = observer(({ thread, onChanged }: ThreadBodyProps) => {
   const [draft, setDraft] = useState('');
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [startFor, setStartFor] = useState<number | null>(null);
+  const [replyFor, setReplyFor] = useState<number | null>(null);
 
   const send = async () => {
     const body = draft.trim();
@@ -320,6 +389,7 @@ const ThreadBody = observer(({ thread, onChanged }: ThreadBodyProps) => {
             participants={thread.participants}
             message={m}
             onStart={() => setStartFor(startFor === m.id ? null : m.id)}
+            onReply={() => setReplyFor(replyFor === m.id ? null : m.id)}
             onToParent={() => toParent(m.id)}
             onOpenThread={() => (m.thread_of_id ? openNestedAt(m.thread_of_id) : undefined)}
           />
@@ -328,6 +398,17 @@ const ThreadBody = observer(({ thread, onChanged }: ThreadBodyProps) => {
               messageId={m.id}
               onDone={reload}
               onCancel={() => setStartFor(null)}
+            />
+          )}
+          {replyFor === m.id && (
+            <ReplyForm
+              chatId={thread.id}
+              message={m}
+              onDone={() => {
+                setReplyFor(null);
+                onChanged();
+              }}
+              onCancel={() => setReplyFor(null)}
             />
           )}
           <Threads

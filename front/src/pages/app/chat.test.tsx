@@ -356,6 +356,31 @@ describe('ChatPage', () => {
     act(() => root.unmount());
   });
 
+  it('ответ на сообщение уходит с parent_id (human-ответ агенту)', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(threadChat());
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const reply = [...container.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('ответить'),
+    );
+    expect(reply).toBeTruthy();
+    act(() => reply!.click());
+    await act(async () => {});
+    const body = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Ответ…"]');
+    setInput(body!, 'Порт 8080');
+    act(() => {
+      [...container.querySelectorAll('button')]
+        .find((b) => b.textContent?.trim() === 'Отправить')!
+        .click();
+    });
+    await act(async () => {});
+    expect(http.post).toHaveBeenCalledWith('/chats/42/messages', {
+      body: 'Порт 8080',
+      parent_id: 5,
+    });
+    act(() => root.unmount());
+  });
+
   it('внутри раскрытой нити от сообщения можно начать вложенную нить', async () => {
     vi.mocked(loadChatDetail).mockResolvedValue(threadChat());
     const { container, root } = await renderChat('42');

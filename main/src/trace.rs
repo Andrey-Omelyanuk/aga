@@ -24,6 +24,18 @@ pub struct TaskTrace {
     pub entries: Vec<TraceEntry>,
 }
 
+/// Pending-запрос человека, привязанный к сообщению-вопросу в чате: ответ —
+/// «ответ на это сообщение», продолжение выполняет агент `agent_name` от
+/// своего имени в чате `chat_id`.
+#[derive(Debug, Clone, Serialize)]
+pub struct HumanRequest {
+    pub id: String,
+    pub task_id: String,
+    pub question: String,
+    pub agent_name: String,
+    pub chat_id: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: i64,
@@ -241,6 +253,9 @@ impl TraceStore {
                 question TEXT NOT NULL,
                 answer TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
+                chat_id INTEGER,
+                question_message_id INTEGER,
+                agent_name TEXT NOT NULL DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 answered_at DATETIME,
                 FOREIGN KEY (task_id) REFERENCES tasks(id)
@@ -416,6 +431,9 @@ impl TraceStore {
         // Миграция старых БД: привязка агента к пользователю чата
         // (listen_user_id — слушает его и отвечает от его имени).
         migrate_agents_listen_user_column(&pool).await?;
+        // Миграция старых БД: human-запрос живёт в чате — привязка к сообщению
+        // вопроса (ответ — «ответ на это сообщение») и имени агента.
+        migrate_human_request_chat_columns(&pool).await?;
 
         sqlx::query(
             r#"
@@ -492,6 +510,16 @@ impl TraceStore {
         Ok(())
     }
 
+    /// Задача остановлена на вопросе человеку: ждёт ответ в чате (не «running»,
+    /// иначе досрочный выход из цикла оставлял бы её запущенной навсегда).
+    pub async fn wait_human_task(&self, task_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE tasks SET status = 'waiting_human' WHERE id = ?")
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_trace(&self, task_id: &str) -> Result<Option<TaskTrace>, sqlx::Error> {
         let task = sqlx::query("SELECT id, role, status FROM tasks WHERE id = ?")
             .bind(task_id)
@@ -536,6 +564,50 @@ impl TraceStore {
         Ok(id)
     }
 
+    /// Привязать запрос к сообщению вопроса в чате: ответом считается
+    /// «ответ на это сообщение» (`parent_id`), продолжение выполняет агент
+    /// `agent_name`.
+    pub async fn link_human_request_chat(
+        &self,
+        id: &str,
+        chat_id: i64,
+        question_message_id: i64,
+        agent_name: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE human_requests SET chat_id = ?, question_message_id = ?, agent_name = ? WHERE id = ?",
+        )
+        .bind(chat_id)
+        .bind(question_message_id)
+        .bind(agent_name)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Pending-запрос, привязанный к сообщению-вопросу: по нему чат находит,
+    /// что ответное сообщение — ответ агенту, а не новое задание.
+    pub async fn pending_for_question_message(
+        &self,
+        question_message_id: i64,
+    ) -> Result<Option<HumanRequest>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, task_id, question, agent_name, chat_id FROM human_requests \
+             WHERE question_message_id = ? AND status = 'pending' AND chat_id IS NOT NULL",
+        )
+        .bind(question_message_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| HumanRequest {
+            id: r.get("id"),
+            task_id: r.get("task_id"),
+            question: r.get("question"),
+            agent_name: r.get("agent_name"),
+            chat_id: r.get::<Option<i64>, _>("chat_id").unwrap_or(0),
+        }))
+    }
+
     pub async fn answer_human_request(&self, id: &str, answer: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("UPDATE human_requests SET answer = ?, status = 'answered', answered_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'")
             .bind(answer)
@@ -543,27 +615,6 @@ impl TraceStore {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
-    }
-
-    pub async fn get_pending_human_requests(
-        &self,
-    ) -> Result<Vec<(String, String, String)>, sqlx::Error> {
-        // Возвращает (id, task_id, question)
-        let rows = sqlx::query("SELECT id, task_id, question FROM human_requests WHERE status = 'pending' ORDER BY created_at")
-            .fetch_all(&self.pool)
-            .await?;
-
-        let result: Vec<(String, String, String)> = rows
-            .into_iter()
-            .map(|row| {
-                let id: String = row.get("id");
-                let task_id: String = row.get("task_id");
-                let question: String = row.get("question");
-                (id, task_id, question)
-            })
-            .collect();
-
-        Ok(result)
     }
 
     // === Методы для управления проектами ===
@@ -1575,6 +1626,34 @@ async fn migrate_llm_connection_columns(pool: &SqlitePool) -> Result<(), sqlx::E
     }
     if !cols.iter().any(|c| c == "is_default") {
         sqlx::query("ALTER TABLE llm_connections ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Миграция старых БД: у human_requests появились привязка к чату —
+/// сообщение вопроса (`chat_id`, `question_message_id`) и имя агента,
+/// задавшего вопрос (ответ ищется по «ответу на сообщение вопроса»).
+async fn migrate_human_request_chat_columns(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let cols: Vec<String> = sqlx::query("PRAGMA table_info(human_requests)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    if !cols.iter().any(|c| c == "chat_id") {
+        sqlx::query("ALTER TABLE human_requests ADD COLUMN chat_id INTEGER")
+            .execute(pool)
+            .await?;
+    }
+    if !cols.iter().any(|c| c == "question_message_id") {
+        sqlx::query("ALTER TABLE human_requests ADD COLUMN question_message_id INTEGER")
+            .execute(pool)
+            .await?;
+    }
+    if !cols.iter().any(|c| c == "agent_name") {
+        sqlx::query("ALTER TABLE human_requests ADD COLUMN agent_name TEXT NOT NULL DEFAULT ''")
             .execute(pool)
             .await?;
     }
@@ -2656,6 +2735,103 @@ mod tests {
         assert_eq!(store.capability_history(skill).await.unwrap().len(), 3);
         // Повторное удаление — false.
         assert!(!store.delete_capability(skill, 1, "alice").await.unwrap());
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn human_request_links_to_question_message_and_resolves() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        store.create_task("t1", "dev").await.unwrap();
+        let id = store
+            .create_human_request("t1", "Какой порт?")
+            .await
+            .unwrap();
+        // Пока вопрос не опубликован в чат — по сообщению ничего не находится.
+        assert!(store
+            .pending_for_question_message(42)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .link_human_request_chat(&id, 7, 42, "dev")
+            .await
+            .unwrap());
+        let req = store
+            .pending_for_question_message(42)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.id, id);
+        assert_eq!(req.chat_id, 7);
+        assert_eq!(req.agent_name, "dev");
+        store.wait_human_task("t1").await.unwrap();
+        assert_eq!(
+            store.get_trace("t1").await.unwrap().unwrap().status,
+            "waiting_human"
+        );
+        assert!(store.answer_human_request(&id, "8080").await.unwrap());
+        // Закрытый запрос больше не находится как pending.
+        assert!(store
+            .pending_for_question_message(42)
+            .await
+            .unwrap()
+            .is_none());
+        // Повторный ответ ничего не меняет.
+        assert!(!store.answer_human_request(&id, "ещё").await.unwrap());
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn migrates_human_request_chat_columns() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use std::str::FromStr;
+        let (path, file) = temp_db_path();
+        let options = SqliteConnectOptions::from_str(&path)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE human_requests (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                question TEXT NOT NULL,
+                answer TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                answered_at DATETIME
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO human_requests (id, task_id, question) VALUES ('hr1', 't9', 'Порт?')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = TraceStore::new(&path).await.unwrap();
+        assert!(store
+            .link_human_request_chat("hr1", 3, 11, "dev")
+            .await
+            .unwrap());
+        let req = store
+            .pending_for_question_message(11)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.task_id, "t9");
+        assert_eq!(req.chat_id, 3);
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);

@@ -6,6 +6,12 @@
 //! и по сообщению привязанного пользователя запускает цикл агента, отвечая
 //! от его имени.
 //!
+//! Human-in-the-loop: `[ASK_HUMAN]` публикуется в чат текстом вопроса, задача
+//! ждёт (`waiting_human`); ответ — сообщение с `parent_id` на сообщение-вопрос
+//! от любого участника, он закрывает запрос и запускает продолжение. Ход
+//! работы с инструментами публикуется в чат: команда в теле, вывод в скрытой
+//! части.
+//!
 //! Параллелизм: события диспатчатся асинхронно (spawn), запуск агента
 //! ограничивается семафором общего параллелизма; один и тот же агент на одной
 //! станции — строго последовательно (FIFO-мьютекс на пару «станция+агент»),
@@ -25,8 +31,8 @@ use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Semaphore;
 
-use crate::agent::Agent;
-use crate::centrifuge::{parse_sse_event, user_channel, CentrifugeClient};
+use crate::agent::{Agent, AgentOutcome};
+use crate::centrifuge::{chat_channel, parse_sse_event, user_channel, CentrifugeClient};
 use crate::chat::ChatStore;
 use crate::cluster::Cluster;
 use crate::config::{Config, RoleConfig};
@@ -42,6 +48,9 @@ const RECONNECT_SECS: u64 = 2;
 const IDLE_WAIT_SECS: u64 = 10;
 /// Максимум одновременно работающих агентов (LLM+exec) в процессе.
 const MAX_CONCURRENT_AGENT_RUNS: usize = 4;
+/// Как часто живая подписка прерывается на переподключение, чтобы перечитать
+/// каналы (новая сессия/привязка подхватывается без рестарта), сек.
+const CHANNELS_REFRESH_SECS: u64 = 30;
 
 /// Триггерит ли сообщение с таким источником запуск агента: только набранное
 /// человеком. Ответы агентов пишутся с origin 'agent' — иначе реплика от имя
@@ -152,16 +161,25 @@ impl AgentRuntime {
         }
     }
 
-    /// Каналы для подписки: по одному на каждого пользователя, к которому
-    /// привязан хотя бы один агент.
+    /// Каналы для подписки: каналы пользователей с привязанными агентами плюс
+    /// каналы чатов открытых сессий. Вторые нужны, чтобы увидеть human-ответ:
+    /// ответить на вопрос агента может любой участник, а не только связанный, —
+    /// его реплика приходит в канал чата, а не в чей-то личный.
     pub async fn listen_channels(&self) -> Result<Vec<String>, sqlx::Error> {
-        Ok(self
+        let mut channels: Vec<String> = self
             .trace_store
             .listen_user_ids()
             .await?
             .into_iter()
             .map(user_channel)
-            .collect())
+            .collect();
+        for chat_id in self.chat_store.open_session_chat_ids().await? {
+            let channel = chat_channel(chat_id);
+            if !channels.contains(&channel) {
+                channels.push(channel);
+            }
+        }
+        Ok(channels)
     }
 
     /// Главный цикл процесса: подписка на Centrifugo, разбор событий,
@@ -185,6 +203,9 @@ impl AgentRuntime {
     /// Одна подписка: SSE-стрим Centrifugo с серверными подписками из токена.
     /// События только диспатчатся — запуски агентов идут в отдельных задачах,
     /// медленный агент не блокирует чтение стрима и другие каналы.
+    /// Раз в `CHANNELS_REFRESH_SECS` стрим прерывается на переподключение, чтобы
+    /// перечитать каналы: новые/закрытые сессии и привязки подхватываются без
+    /// рестарта процесса (на живом соединении серверные подписки не меняются).
     async fn session(
         &self,
         channels: &[String],
@@ -193,18 +214,28 @@ impl AgentRuntime {
         let response = self.centrifuge.sse_stream(&token).await?;
         let mut stream = response.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            buffer.extend_from_slice(&chunk?);
-            // Кадры SSE разделены пустой строкой; комментарий-пин — не событие.
-            while let Some(pos) = find_frame_end(&buffer) {
-                let frame = String::from_utf8_lossy(&buffer[..pos]).to_string();
-                buffer.drain(..pos + 2);
-                if let Some((_channel, data)) = parse_sse_event(&frame) {
-                    self.on_event(&data).await;
+        let mut refresh = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(CHANNELS_REFRESH_SECS),
+            std::time::Duration::from_secs(CHANNELS_REFRESH_SECS),
+        );
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = refresh.tick() => return Ok(()), // плановое переподключение
+                chunk = stream.next() => {
+                    let Some(chunk) = chunk else { return Ok(()) };
+                    buffer.extend_from_slice(&chunk?);
+                    // Кадры SSE разделены пустой строкой; комментарий-пин — не событие.
+                    while let Some(pos) = find_frame_end(&buffer) {
+                        let frame = String::from_utf8_lossy(&buffer[..pos]).to_string();
+                        buffer.drain(..pos + 2);
+                        if let Some((_channel, data)) = parse_sse_event(&frame) {
+                            self.on_event(&data).await;
+                        }
+                    }
                 }
             }
         }
-        Ok(())
     }
 
     async fn on_event(&self, data: &Value) {
@@ -247,6 +278,8 @@ impl AgentRuntime {
 
     /// Разметка сообщения: триггерит ли, чей проект, какой агент привязан к
     /// автору, на какой станции исполнять. None — сообщение не для агентов.
+    /// «Ответ на сообщение-вопрос» — отдельный путь: закрывает pending-запрос
+    /// и продолжает того же агента, автор ответа — связанный с агентом пользователь.
     async fn route(&self, message_id: i64) -> Option<Job> {
         let msg = match self.chat_store.get_message(message_id).await {
             Ok(Some(msg)) => msg,
@@ -265,17 +298,62 @@ impl AgentRuntime {
         let Ok(Some(set)) = self.trace_store.get_project_agent_set(project_id).await else {
             return None;
         };
-        let agent = self.trace_store.agent_listening_to(&set, msg.author_id)?;
         let ws_id = self
             .chat_store
             .root_workstation_id(msg.chat_id)
             .await
             .unwrap_or(None);
+        if let Some(parent) = msg.parent_id {
+            if let Some(job) = self.route_answer(&set, &msg, parent, ws_id).await {
+                return Some(job);
+            }
+        }
+        let agent = self.trace_store.agent_listening_to(&set, msg.author_id)?;
         Some(Job {
             chat_id: msg.chat_id,
             author_id: msg.author_id,
             agent_name: agent.name.clone(),
             set,
+            ws_id,
+            trigger_body: msg.body.clone(),
+        })
+    }
+
+    /// Сообщение — ответ на вопрос агента (parent указывает на сообщение-вопрос
+    /// pending-запроса этого же чата)? Запрос закрывается, продолжается агент,
+    /// задавший вопрос; отвечать может любой участник.
+    async fn route_answer(
+        &self,
+        set: &AgentSet,
+        msg: &crate::chat::Message,
+        parent: i64,
+        ws_id: Option<i64>,
+    ) -> Option<Job> {
+        let Ok(Some(req)) = self.trace_store.pending_for_question_message(parent).await else {
+            return None;
+        };
+        if req.chat_id != msg.chat_id {
+            return None;
+        }
+        let Ok(true) = self
+            .trace_store
+            .answer_human_request(&req.id, &msg.body)
+            .await
+        else {
+            return None; // гонка: запрос уже закрыт другим ответом
+        };
+        let _ = self
+            .trace_store
+            .complete_task(&req.task_id, "answered")
+            .await;
+        let agent = set.agents.iter().find(|a| a.name == req.agent_name)?;
+        Some(Job {
+            chat_id: msg.chat_id,
+            // Ответ агента — от его имени (связанного пользователя), реплику
+            // мог написать любой участник.
+            author_id: agent.listen_user_id.unwrap_or(msg.author_id),
+            agent_name: agent.name.clone(),
+            set: set.clone(),
             ws_id,
             trigger_body: msg.body.clone(),
         })
@@ -311,35 +389,112 @@ impl AgentRuntime {
             shared_lock,
         );
 
+        let _ = self
+            .chat_store
+            .ensure_participant(job.chat_id, job.author_id)
+            .await;
+
+        // Ход работы: каждую выполненную команду публикуем в чат — тело команды
+        // в сообщении, вывод в скрытой части (обрезанный; полный — в трассе).
+        // origin='agent' — шаги не ретриггерят цикл. Постер живёт, пока работает
+        // прогон: канал закроется вместе с отправителем по выходе из run().
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+        let chat_store = self.chat_store.clone();
+        let centrifuge = self.centrifuge.clone();
+        let (chat_id, author_id) = (job.chat_id, job.author_id);
+        let poster = tokio::spawn(async move {
+            while let Some((cmd, output)) = rx.recv().await {
+                if let Ok(Some(step)) = chat_store
+                    .send_message_with_origin(
+                        chat_id,
+                        author_id,
+                        &cmd,
+                        &truncate_output(&output),
+                        None,
+                        None,
+                        "agent",
+                    )
+                    .await
+                {
+                    centrifuge
+                        .publish_message(chat_id, step.id, author_id)
+                        .await;
+                }
+            }
+        });
+
         let task_id = uuid::Uuid::new_v4().to_string();
-        let result = match runner.run(&task_id, &task).await {
-            Ok(result) => result,
+        let text = match runner.run(&task_id, &task, Some(tx)).await {
+            Ok(AgentOutcome::Question {
+                request_id,
+                question,
+            }) => {
+                let _ = poster.await;
+                // В чат — сам текст вопроса; ответ — «ответ на это сообщение».
+                let Ok(Some(q)) = self
+                    .chat_store
+                    .send_message_with_origin(
+                        job.chat_id,
+                        job.author_id,
+                        &question,
+                        "",
+                        None,
+                        None,
+                        "agent",
+                    )
+                    .await
+                else {
+                    return false;
+                };
+                let _ = self
+                    .trace_store
+                    .link_human_request_chat(&request_id, job.chat_id, q.id, &job.agent_name)
+                    .await;
+                self.centrifuge
+                    .publish_message(job.chat_id, q.id, job.author_id)
+                    .await;
+                return true;
+            }
+            Ok(AgentOutcome::Answer(text)) => text,
             Err(e) => {
                 tracing::error!("runtime: агент {name} упал: {e}", name = job.agent_name);
                 format!("Ошибка: {e}")
             }
         };
+        // Шаги уже в чате — финальный ответ идёт после них.
+        let _ = poster.await;
 
-        let _ = self
-            .chat_store
-            .ensure_participant(job.chat_id, job.author_id)
-            .await;
         let Ok(Some(reply)) = self
             .chat_store
-            .send_message_with_origin(job.chat_id, job.author_id, &result, "", None, None, "agent")
+            .send_message_with_origin(job.chat_id, job.author_id, &text, "", None, None, "agent")
             .await
         else {
             return false;
         };
         let _ = self
             .chat_store
-            .add_artifact(reply.id, "result", Some("Ответ агента"), &result)
+            .add_artifact(reply.id, "result", Some("Ответ агента"), &text)
             .await;
         self.centrifuge
             .publish_message(job.chat_id, reply.id, job.author_id)
             .await;
         true
     }
+}
+
+/// Скрытая часть сообщения-шага: длинный вывод команды обрезается с
+/// сохранением начала и конца — человеку достаточно обзора, полная трасса в БД.
+fn truncate_output(output: &str) -> String {
+    const MAX_CHARS: usize = 3000;
+    const HEAD: usize = 2000;
+    const TAIL: usize = 1000;
+    let count = output.chars().count();
+    if count <= MAX_CHARS {
+        return output.to_string();
+    }
+    let head: String = output.chars().take(HEAD).collect();
+    let tail: String = output.chars().skip(count - TAIL).collect();
+    format!("{head}\n…(вывод обрезан, полное — в трассе задачи)…\n{tail}")
 }
 
 /// Точка входа режима `aga agent`: конфиг, БД, подписка. SSO/JWKS не нужны —
@@ -409,17 +564,23 @@ mod tests {
         }
     }
 
-    /// Мок LLM: отвечает фиксированным текстом без команд (цикл завершается
-    /// сразу, воркстейшн не трогается).
-    async fn mock_llm(answer: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+    /// Мок LLM с последовательностью ответов: каждый запрос получает следующий
+    /// (после исчерпания — последний).
+    async fn mock_llm_seq(answers: Vec<&'static str>) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let idx = Arc::new(AtomicUsize::new(0));
         let app = axum::Router::new().route(
             "/v1/chat/completions",
-            axum::routing::post(move || async move {
-                axum::Json(serde_json::json!({
-                    "choices": [{"message": {"role": "assistant", "content": answer}}]
-                }))
+            axum::routing::post(move || {
+                let answers = answers.clone();
+                let idx = Arc::clone(&idx);
+                async move {
+                    let i = idx.fetch_add(1, Ordering::SeqCst).min(answers.len() - 1);
+                    axum::Json(serde_json::json!({
+                        "choices": [{"message": {"role": "assistant", "content": answers[i]}}]
+                    }))
+                }
             }),
         );
         let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -453,8 +614,23 @@ mod tests {
         std::path::PathBuf,
         tokio::task::JoinHandle<()>,
     ) {
+        fixture_seq(vec![answer]).await
+    }
+
+    /// То же, но LLM отвечает по последовательности (многошаговые прогоны).
+    async fn fixture_seq(
+        answers: Vec<&'static str>,
+    ) -> (
+        AgentRuntime,
+        i64,
+        i64,
+        TraceStore,
+        ChatStore,
+        std::path::PathBuf,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (trace, chat, file) = temp_stores().await;
-        let (api_url, llm_server) = mock_llm(answer).await;
+        let (api_url, llm_server) = mock_llm_seq(answers).await;
         let conn = trace
             .create_llm_connection(&crate::trace::LlmConnectionSpec {
                 name: "mock".into(),
@@ -663,6 +839,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_human_posts_question_text_to_chat_and_waits() {
+        let (runtime, alice, chat_id, trace, chat, file, llm) =
+            fixture_seq(vec!["[ASK_HUMAN] Какой порт открыть?[/ASK_HUMAN]"]).await;
+        let msg = chat
+            .send_message(chat_id, alice, "Подними API", "", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runtime.handle_message(msg.id).await);
+        let messages = chat.list_messages(chat_id).await.unwrap();
+        let q = messages.last().unwrap();
+        // В чат уходит сам вопрос, а не служебная строка с Request ID.
+        assert_eq!(q.body, "Какой порт открыть?");
+        assert_eq!(q.origin, "agent");
+        assert!(!q.body.contains("Request ID"));
+        // Запрос привязан к сообщению вопроса; задача ждёт ответа, а не «running».
+        let req = trace
+            .pending_for_question_message(q.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.agent_name, "dev");
+        assert_eq!(req.chat_id, chat_id);
+        let t = trace.get_trace(&req.task_id).await.unwrap().unwrap();
+        assert_eq!(t.status, "waiting_human");
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn answer_to_question_resumes_agent_from_any_participant() {
+        let (runtime, alice, chat_id, trace, chat, file, llm) = fixture_seq(vec![
+            "[ASK_HUMAN] Какой порт открыть?[/ASK_HUMAN]",
+            "Порт 8080",
+        ])
+        .await;
+        let msg = chat
+            .send_message(chat_id, alice, "Подними API", "", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runtime.handle_message(msg.id).await);
+        let q = chat.list_messages(chat_id).await.unwrap().pop().unwrap();
+        let req = trace
+            .pending_for_question_message(q.id)
+            .await
+            .unwrap()
+            .unwrap();
+        // Отвечает несвязанный участник — «ответом на сообщение-вопрос».
+        let ivan = chat
+            .insert_user("ivan", "human", false, None, None)
+            .await
+            .unwrap();
+        let answer = chat
+            .send_message(chat_id, ivan, "8080", "", Some(q.id), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runtime.handle_message(answer.id).await);
+        // Вопрос закрыт, ответ сохранён.
+        assert!(trace
+            .pending_for_question_message(q.id)
+            .await
+            .unwrap()
+            .is_none());
+        let t = trace.get_trace(&req.task_id).await.unwrap().unwrap();
+        assert_eq!(t.status, "answered");
+        // Продолжение: финальный ответ агента — от имени связанного пользователя.
+        let messages = chat.list_messages(chat_id).await.unwrap();
+        let last = messages.last().unwrap();
+        assert_eq!(last.body, "Порт 8080");
+        assert_eq!(last.origin, "agent");
+        assert_eq!(last.author_id, alice);
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn thread_started_from_question_is_not_an_answer() {
+        let (runtime, alice, chat_id, trace, chat, file, llm) =
+            fixture_seq(vec!["[ASK_HUMAN] Порт?[/ASK_HUMAN]"]).await;
+        let msg = chat
+            .send_message(chat_id, alice, "Задача", "", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(runtime.handle_message(msg.id).await);
+        let q = chat.list_messages(chat_id).await.unwrap().pop().unwrap();
+        let ivan = chat
+            .insert_user("ivan", "human", false, None, None)
+            .await
+            .unwrap();
+        // Нить от вопроса: её первое сообщение несёт parent_id на вопрос, но
+        // живёт в другом чате — ответом это не считается.
+        let (_thread, first) = chat
+            .start_thread(
+                chat_id,
+                q.id,
+                "Обсудим порты",
+                "а какие варианты?",
+                "",
+                ivan,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!runtime.handle_message(first.id).await);
+        assert!(trace
+            .pending_for_question_message(q.id)
+            .await
+            .unwrap()
+            .is_some());
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    #[test]
+    fn long_command_output_is_truncated_short_is_kept() {
+        assert_eq!(truncate_output("короткий вывод"), "короткий вывод");
+        let long = "x".repeat(5000);
+        let t = truncate_output(&long);
+        assert!(t.chars().count() < long.chars().count());
+        assert!(t.contains("вывод обрезан"));
+        assert!(t.starts_with('x') && t.ends_with('x'));
+    }
+
+    #[tokio::test]
     async fn listen_channels_cover_each_bound_user_once() {
         let (trace, chat, file) = temp_stores().await;
         let u1 = chat
@@ -694,6 +997,17 @@ mod tests {
         );
         let channels = runtime.listen_channels().await.unwrap();
         assert_eq!(channels, vec![user_channel(u1), user_channel(u2)]);
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn listen_channels_include_open_session_chats() {
+        // Сессия (открытая) добавляет канал чата в подписку — иначе ответ
+        // несвязанного участника до агента не дойдёт.
+        let (runtime, alice, chat_id, _trace, _chat, file, _llm) = fixture("Готово").await;
+        let channels = runtime.listen_channels().await.unwrap();
+        assert!(channels.contains(&user_channel(alice)));
+        assert!(channels.contains(&chat_channel(chat_id)));
         cleanup(&file).await;
     }
 

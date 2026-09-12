@@ -773,19 +773,46 @@ impl ChatStore {
         self.get_message(msg_id).await
     }
 
-    /// Хвост диалога для контекста агента: тела последних 10 сообщений чата,
-    /// по порядку. Скрытая часть (`hidden`) не входит — в LLM уходит только
-    /// видимый текст.
+    /// Хвост диалога для контекста агента: последние 30 сообщений чата, по
+    /// порядку, каждая строка с автором (`имя: тело`) — агент должен отличать
+    /// свои вопросы и шаги работы от ответов людей. Скрытая часть (`hidden`)
+    /// не входит — в LLM уходит только видимый текст.
     pub async fn context_tail(&self, chat_id: i64) -> Option<String> {
-        let messages = self.list_messages(chat_id).await.ok()?;
-        let tail: Vec<String> = messages
+        let rows = sqlx::query(
+            "SELECT m.body, COALESCE(u.name, 'unknown') AS author \
+             FROM messages m LEFT JOIN chat_users u ON u.id = m.author_id \
+             WHERE m.chat_id = ? ORDER BY m.created_at, m.id",
+        )
+        .bind(chat_id)
+        .fetch_all(&self.pool)
+        .await
+        .ok()?;
+        let tail: Vec<String> = rows
             .iter()
             .rev()
-            .take(10)
+            .take(30)
             .rev()
-            .map(|m| m.body.clone())
+            .map(|r| {
+                format!(
+                    "{}: {}",
+                    r.get::<String, _>("author"),
+                    r.get::<String, _>("body")
+                )
+            })
             .collect();
         Some(tail.join("\n"))
+    }
+
+    /// Чат-иды активных (незакрытых) сессий: корневые чаты, где возможен
+    /// human-ответ агенту. Агент-рантайм подписывается на их каналы — отвечать
+    /// может любой участник, в том числе не привязанный ни к одному агенту
+    /// (его личный канал в подписку рантайма не входит).
+    pub async fn open_session_chat_ids(&self) -> Result<Vec<i64>, sqlx::Error> {
+        let rows =
+            sqlx::query("SELECT chat_id FROM sessions WHERE closed_at IS NULL ORDER BY chat_id")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.iter().map(|r| r.get("chat_id")).collect())
     }
 
     pub async fn get_message(&self, id: i64) -> Result<Option<Message>, sqlx::Error> {
@@ -2239,6 +2266,46 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn context_tail_labels_authors_and_keeps_last_thirty() {
+        let path =
+            std::env::temp_dir().join(format!("aga_chat_ctx_test_{}.db", uuid::Uuid::new_v4()));
+        let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let store = ChatStore::new(path.to_str().unwrap()).await.unwrap();
+        let alice = store
+            .insert_user("alice", "human", false, None, None)
+            .await
+            .unwrap();
+        let bob = store
+            .insert_user("bob", "human", false, None, None)
+            .await
+            .unwrap();
+        let chat = store.create_chat(None, Some("s"), alice).await.unwrap();
+
+        // 40 сообщений: старые (m0..m9) должны выпасть из хвоста в 30.
+        for i in 0..40 {
+            let author = if i % 2 == 0 { alice } else { bob };
+            store
+                .send_message(chat.id, author, &format!("m{i}"), "", None, None)
+                .await
+                .unwrap();
+        }
+        let tail = store.context_tail(chat.id).await.unwrap();
+
+        // Каждый автор подписан (`имя: тело`) — агент отличает свою реплику от чужой.
+        assert!(tail.contains("alice: m38"));
+        assert!(tail.contains("bob: m39"));
+        // Бюджет 30: последние 30 (m10..m39) есть, m0 выпала из хвоста.
+        assert!(tail.contains("bob: m11"));
+        assert!(!tail.contains("alice: m0"));
+        assert_eq!(tail.lines().count(), 30);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);

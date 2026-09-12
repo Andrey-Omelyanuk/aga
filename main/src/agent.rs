@@ -125,6 +125,17 @@ pub struct Agent {
     shared_lock: Option<Arc<Mutex<()>>>,
 }
 
+/// Итог прогона агента: финальный ответ или вопрос человеку (задача ставится
+/// на `waiting_human`, ответ приходит в чат «ответом на сообщение-вопрос»).
+#[derive(Debug, Clone)]
+pub enum AgentOutcome {
+    Answer(String),
+    Question {
+        request_id: String,
+        question: String,
+    },
+}
+
 impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn with_executor(
@@ -150,11 +161,15 @@ impl Agent {
         }
     }
 
+    /// Прогон цикла. `steps` — канал наблюдателя: после каждой выполненной
+    /// команды уходит `(команда, вывод)`, чтобы рантайм публиковал ход работы
+    /// в чат. Агент про чат ничего не знает.
     pub async fn run(
         &self,
         task_id: &str,
         task: &str,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        steps: Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>,
+    ) -> Result<AgentOutcome, Box<dyn std::error::Error + Send + Sync>> {
         self.trace_store
             .create_task(
                 task_id,
@@ -208,8 +223,12 @@ impl Agent {
                             Some(&request_id),
                         )
                         .await?;
+                    self.trace_store.wait_human_task(task_id).await?;
 
-                    return Ok(format!("[WAITING_FOR_HUMAN] Request ID: {}", request_id));
+                    return Ok(AgentOutcome::Question {
+                        request_id,
+                        question: question_text,
+                    });
                 }
             }
 
@@ -263,6 +282,9 @@ impl Agent {
                 self.trace_store
                     .add_entry(task_id, step, "command_output", &output, None)
                     .await?;
+                if let Some(tx) = &steps {
+                    let _ = tx.send((cmd.clone(), output.clone()));
+                }
                 history.push(format!("$ {}\n{}", cmd, output));
             }
         }
@@ -279,7 +301,7 @@ impl Agent {
             result = "Task completed. Check trace for details.".to_string();
         }
 
-        Ok(result)
+        Ok(AgentOutcome::Answer(result))
     }
 
     async fn execute_command(
@@ -338,6 +360,7 @@ mod tests {
     use super::*;
     use crate::config::LlmConfig;
     use crate::trace::TraceStore;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn test_agent(tools: &[&str]) -> (Agent, std::path::PathBuf) {
         let file = std::env::temp_dir().join(format!("aga_agent_test_{}.db", uuid::Uuid::new_v4()));
@@ -351,6 +374,52 @@ mod tests {
                     model: None,
                     temperature: 0.7,
                     api_url: None,
+                    api_key: None,
+                },
+            },
+            LlmClient::new(),
+            store,
+            Executor::Sh,
+            None,
+            None,
+        );
+        (agent, file)
+    }
+
+    /// Мок LLM с последовательностью ответов (после исчерпания — последний).
+    async fn mock_llm_seq(answers: Vec<&'static str>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let idx = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                let answers = answers.clone();
+                let idx = Arc::clone(&idx);
+                async move {
+                    let i = idx.fetch_add(1, Ordering::SeqCst).min(answers.len() - 1);
+                    axum::Json(serde_json::json!({
+                        "choices": [{"message": {"role": "assistant", "content": answers[i]}}]
+                    }))
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}/v1"), handle)
+    }
+
+    async fn test_agent_llm(api_url: String) -> (Agent, std::path::PathBuf) {
+        let file = std::env::temp_dir().join(format!("aga_agent_test_{}.db", uuid::Uuid::new_v4()));
+        let store = TraceStore::new(&file.to_string_lossy()).await.unwrap();
+        let agent = Agent::with_executor(
+            RoleConfig {
+                prompt: "промпт".to_string(),
+                tools: vec!["echo".to_string()],
+                max_iterations: 4,
+                llm: LlmConfig {
+                    model: Some("m".into()),
+                    temperature: 0.7,
+                    api_url: Some(api_url),
                     api_key: None,
                 },
             },
@@ -410,5 +479,50 @@ mod tests {
         assert!(!tool_is_shared("touch"));
         assert!(!tool_is_shared("cat"));
         assert!(!tool_is_shared("ls"));
+    }
+
+    #[tokio::test]
+    async fn executed_steps_stream_to_observer() {
+        let (url, llm) = mock_llm_seq(vec!["```bash\necho hi\n```", "Готово"]).await;
+        let (agent, file) = test_agent_llm(url).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = agent.run("t-steps", "задача", Some(tx)).await.unwrap();
+        match outcome {
+            AgentOutcome::Answer(text) => assert_eq!(text, "Готово"),
+            other => panic!("ожидался ответ, получен {other:?}"),
+        }
+        let (cmd, output) = rx.recv().await.expect("шаг не опубликован");
+        assert_eq!(cmd, "echo hi");
+        assert_eq!(output, "hi\n");
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn ask_human_returns_question_and_parks_task() {
+        let (url, llm) = mock_llm_seq(vec!["[ASK_HUMAN] Куда катимся?[/ASK_HUMAN]"]).await;
+        let (agent, file) = test_agent_llm(url).await;
+        let outcome = agent.run("t-question", "задача", None).await.unwrap();
+        let request_id = match outcome {
+            AgentOutcome::Question {
+                request_id,
+                question,
+            } => {
+                assert_eq!(question, "Куда катимся?");
+                request_id
+            }
+            other => panic!("ожидался вопрос, получен {other:?}"),
+        };
+        assert!(!request_id.is_empty());
+        // Задача не остаётся «running» — она переведена в ожидание ответа.
+        let trace = agent
+            .trace_store
+            .get_trace("t-question")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(trace.status, "waiting_human");
+        llm.abort();
+        cleanup(&file).await;
     }
 }
