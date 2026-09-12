@@ -139,13 +139,22 @@ services:
     image: centrifugo/centrifugo:v6
     container_name: aga-centrifugo
     environment:
-      - CENTRIFUGO_TOKEN_HMAC_SECRET_KEY=aga-hmac-secret
-      - CENTRIFUGO_API_KEY=aga-api-key
+      # Centrifugo v6: имена env — по путям конфига (client.token_hmac_secret_key,
+      # http.api_key, client.allowed_origins, uni_sse.enabled), uni-SSE по
+      # умолчанию живёт на /connection/uni_sse — префикс задан тем же
+      # /connection/sse, как обращается агент-рантайм (centrifuge.rs).
+      - CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY=aga-hmac-secret
+      - CENTRIFUGO_HTTP_API_KEY=aga-api-key
       # SPA живёт на dev.localhost (прокси) — это и есть Origin websocket-соединения.
-      - CENTRIFUGO_ALLOWED_ORIGINS=http://dev.localhost
+      - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=http://dev.localhost
       # Unidirectional SSE (/connection/sse): им пользуется агент-рантайм
-      # (`aga agent`) для серверных подписок на каналы user:<id> (runtime.rs).
-      - CENTRIFUGO_UNI_SSE=true
+      # (`aga agent`) для серверных подписок на каналы user:<id> и чатов сессий
+      # (runtime.rs).
+      - CENTRIFUGO_UNI_SSE_ENABLED=true
+      - CENTRIFUGO_UNI_SSE_HANDLER_PREFIX=/connection/sse
+      # v6: каналы с `:` — именованные пространства, их надо объявить
+      # (chat:<id> и user:<id> публикуют ядро и рантайм, общий `common` — без него).
+      - CENTRIFUGO_CHANNEL_NAMESPACES=[{"name":"chat"},{"name":"user"}]
       - CENTRIFUGO_LOG_LEVEL=info
     restart: "no"
 
