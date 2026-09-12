@@ -25,17 +25,29 @@ spec:
           image: centrifugo/centrifugo:v6
           imagePullPolicy: IfNotPresent
           env:
-            - name: CENTRIFUGO_TOKEN_HMAC_SECRET_KEY
+            # Centrifugo v6 (актуальные сборки): имена env — по путям конфига
+            # (client.token_hmac_secret_key, http.api_key, client.allowed_origins,
+            # uni_sse.enabled); uni-SSE по умолчанию на /connection/uni_sse —
+            # префикс задан /connection/sse, как обращается агент-рантайм
+            # (main/src/centrifuge.rs).
+            - name: CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY
               value: aga-hmac-secret
-            - name: CENTRIFUGO_API_KEY
+            - name: CENTRIFUGO_HTTP_API_KEY
               value: aga-api-key
             # SPA живёт на dev.localhost (ingress) — это Origin websocket-соединения.
-            - name: CENTRIFUGO_ALLOWED_ORIGINS
+            - name: CENTRIFUGO_CLIENT_ALLOWED_ORIGINS
               value: http://dev.localhost
             # Unidirectional SSE (/connection/sse): транспорт агент-рантайма
-            # (`aga agent`, runtime.rs) — серверные подписки на user:<id>.
-            - name: CENTRIFUGO_UNI_SSE
+            # (`aga agent`, runtime.rs) — серверные подписки на user:<id>
+            # и каналы чатов сессий.
+            - name: CENTRIFUGO_UNI_SSE_ENABLED
               value: "true"
+            - name: CENTRIFUGO_UNI_SSE_HANDLER_PREFIX
+              value: /connection/sse
+            # v6: каналы с `:` — именованные пространства, объявить обязательно
+            # (chat:<id> и user:<id>; общий канал `common` — без namespace).
+            - name: CENTRIFUGO_CHANNEL_NAMESPACES
+              value: '[{"name":"chat"},{"name":"user"}]'
             - name: CENTRIFUGO_LOG_LEVEL
               value: info
           ports:

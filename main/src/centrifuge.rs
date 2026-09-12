@@ -189,8 +189,18 @@ impl CentrifugeClient {
             .await
         {
             Ok(resp) => {
-                if let Err(e) = resp.error_for_status() {
+                if let Err(e) = resp.error_for_status_ref() {
                     tracing::warn!("centrifugo publish failed: {e}");
+                    return;
+                }
+                // Centrifugo отвечает 200 и даже по HTTP, и ошибки носит в теле
+                // (`{"error":{"code":..,"message":..}}`) — без разбора они невидимы.
+                match resp.json::<serde_json::Value>().await {
+                    Ok(v) if !v.get("error").map_or(true, |e| e.is_null()) => {
+                        tracing::warn!("centrifugo publish rejected: {v}");
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("centrifugo publish: bad response: {e}"),
                 }
             }
             Err(e) => tracing::warn!("centrifugo publish failed: {e}"),

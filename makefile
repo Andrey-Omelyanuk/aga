@@ -48,7 +48,7 @@ help:
 	@echo "dev-ps      - Show dev stand containers"
 	@echo "dev-reset   - Recreate dev stand from scratch (fresh DB)"
 	@echo "dev-verify  - Check dev stand: core API + both workstations ready"
-	@echo "dev-e2e     - E2E on dev stand: free ws, switch to mobx-model-ui, agent answers"
+	@echo "dev-e2e     - E2E on dev stand: agent answers; ASK_HUMAN question/answer via mock LLM"
 	@echo "dev-seed    - Restore test dataset into dev stand DB (aga seed in core)"
 	@echo "k8s-seed    - Restore test dataset into cluster DB (aga seed via kubectl exec)"
 	@echo "k8s-up      - Start local cluster (minikube)"
@@ -180,13 +180,13 @@ dev-seed:
 	docker exec aga-core /app/aga seed
 
 # E2E всего рабочего цикла агента на dev-стенде (см. infra/dev-e2e.sh):
-# свободный воркстейшн, switch на mobx-model-ui, сессия, @Agent.ui отвечает.
+# свободный воркстейшн, switch на mobx-model-ui, сессия, агент отвечает; затем
+# ASK_HUMAN на mock-LLM (вопрос в чат, ответ по parent_id возобновляет агента).
 # --force-recreate core ws-1 ws-2 подхватывает свежие образы ядра и
 # воркстейшнов (пользователь aga, права /work, ключ в /home/aga/.ssh), сид
-# сбрасывает БД в детерминированное состояние.
+# сбрасывает БД в детерминированное состояние (делает сам скрипт).
 dev-e2e: dev-roles
 	$(DEV_COMPOSE_CMD) up -d --build --force-recreate core ws-1 ws-2
-	docker exec aga-core /app/aga seed
 	bash infra/dev-e2e.sh
 
 # Восстановить тестовый набор в БД кластера (PVC). Образ ядра должен быть
