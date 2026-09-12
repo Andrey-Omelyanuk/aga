@@ -1,8 +1,34 @@
+use std::sync::Arc;
+
 use crate::config::RoleConfig;
 use crate::llm::LlmClient;
 use crate::trace::TraceStore;
 use regex::Regex;
 use tokio::process::Command;
+use tokio::sync::Mutex;
+
+/// Инструменты, тронущие общее состояние воркстейшна: один `.git` на проект,
+/// общие дерево сборки и лок-файлы пакетных менеджеров, docker-содержимое.
+/// Команды с таким base-tool исполняются под мьютексом станции — другие агенты
+/// той же станции ждут. Прочие инструменты (правки в своей территории, чтение)
+/// параллельны.
+const SHARED_TOOLS: &[&str] = &[
+    "git",
+    "make",
+    "cargo",
+    "npm",
+    "npx",
+    "yarn",
+    "pnpm",
+    "docker",
+    "docker-compose",
+    "compose",
+];
+
+/// Шаринг-инструмент или изолированный (по первому слову команды).
+pub fn tool_is_shared(base_tool: &str) -> bool {
+    SHARED_TOOLS.contains(&base_tool)
+}
 
 /// Способ исполнения команд.
 #[derive(Debug, Clone, Default)]
@@ -94,15 +120,20 @@ pub struct Agent {
     executor: Executor,
     /// Территория агента в воркстейшне: None — вне воркстейшна (границы нет).
     scope: Option<crate::scope::Territory>,
+    /// Мьютекс станции для shared-инструментов (git/сборки): держится только на
+    /// время команды с shared base-tool. None — станция не задана (локальный sh).
+    shared_lock: Option<Arc<Mutex<()>>>,
 }
 
 impl Agent {
+    #[allow(clippy::too_many_arguments)]
     pub fn with_executor(
         role_config: RoleConfig,
         llm_client: LlmClient,
         trace_store: TraceStore,
         executor: Executor,
         scope: Option<crate::scope::Territory>,
+        shared_lock: Option<Arc<Mutex<()>>>,
     ) -> Self {
         let command_regex = Regex::new(r"```(?:bash|sh)?\n(.*?)\n```").unwrap();
         let ask_human_regex = Regex::new(r"\[ASK_HUMAN\](.*?)\[/ASK_HUMAN\]").unwrap();
@@ -115,6 +146,7 @@ impl Agent {
             ask_human_regex,
             executor,
             scope,
+            shared_lock,
         }
     }
 
@@ -217,8 +249,17 @@ impl Agent {
                     .add_entry(task_id, step, "command", &cmd, None)
                     .await?;
 
+                // Shared-инструмент работает под мьютексом станции: на время
+                // команды другие агенты этой станции не трогают .git/сборки.
+                let base_tool = cmd.split_whitespace().next().unwrap_or("");
+                let _shared_guard = match (&self.shared_lock, tool_is_shared(base_tool)) {
+                    (Some(lock), true) => Some(lock.lock().await),
+                    _ => None,
+                };
+
                 // Выполняем команду выбранным executor'ом
                 let output = self.execute_command(&cmd).await?;
+                drop(_shared_guard);
                 self.trace_store
                     .add_entry(task_id, step, "command_output", &output, None)
                     .await?;
@@ -317,6 +358,7 @@ mod tests {
             store,
             Executor::Sh,
             None,
+            None,
         );
         (agent, file)
     }
@@ -354,5 +396,19 @@ mod tests {
         assert!(!agent.is_command_allowed("rm -rf src"));
         assert!(!agent.is_command_allowed("cargo test"));
         cleanup(&file).await;
+    }
+
+    #[test]
+    fn shared_tools_are_serialized_isolated_are_not() {
+        // Общее состояние станции: .git, сборки, пакетики, docker.
+        assert!(tool_is_shared("git"));
+        assert!(tool_is_shared("make"));
+        assert!(tool_is_shared("npm"));
+        assert!(tool_is_shared("docker"));
+        // Правки в своей территории и чтение — параллельны.
+        assert!(!tool_is_shared("sed"));
+        assert!(!tool_is_shared("touch"));
+        assert!(!tool_is_shared("cat"));
+        assert!(!tool_is_shared("ls"));
     }
 }
