@@ -1,13 +1,13 @@
-import { observer } from 'mobx-react-lite';
-import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardTitle } from '@/components/ui/card';
-import { EmptyState } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
+import { EmptyState } from '@/components/ui/tabs';
+import type { Llm } from '@/models/project';
 import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
-import type { Llm } from '@/models/project';
+import { observer } from 'mobx-react-lite';
+import { useState } from 'react';
 
 export interface LlmListProps {
   connections: Llm[];
@@ -118,7 +118,7 @@ export const LlmList = observer((props: LlmListProps) => {
         <Input
           placeholder="Модель"
           value={draft.model_name}
-          onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+          onChange={(e) => setDraft((d) => ({ ...d, model_name: e.target.value }))}
           className="max-w-40"
         />
         <Button variant="secondary" onClick={create}>
@@ -167,7 +167,7 @@ export const LlmList = observer((props: LlmListProps) => {
                 />
                 <Input
                   value={edit.model_name}
-                  onChange={(e) => setEdit((d) => ({ ...d, model: e.target.value }))}
+                  onChange={(e) => setEdit((d) => ({ ...d, model_name: e.target.value }))}
                   className="max-w-40"
                 />
                 <Button onClick={() => void save(c.id)}>Сохранить</Button>
