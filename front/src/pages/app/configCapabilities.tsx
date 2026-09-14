@@ -6,18 +6,16 @@ import {
   CapabilityEditor,
   type CapabilityKind,
 } from '@/components/project/CapabilityEditor';
-import { Command, Shortcut, Skill } from '@/models/project';
+import { Shortcut, Skill } from '@/models/project';
 import type { CatalogItem } from '@/models/project';
 import { useQuery } from '@/utils/mobx';
 import http from '@/services/http';
 
-/** Страницы каталога под Config: вид записи (skills/commands/shortcuts) — из
- * пути (/config/skills, /config/commands, /config/shortcuts), как в
- * capabilityHistory. */
+/** Страницы каталога под Config: вид записи (skills/shortcuts) — из
+ * пути (/config/skills, /config/shortcuts), как в capabilityHistory. */
 const ConfigCapabilitiesPage = observer(() => {
   const kind = useLocation().pathname.split('/')[2] as CapabilityKind;
   const [skills] = useQuery(Skill, { autoupdate: true });
-  const [commands] = useQuery(Command, { autoupdate: true });
   const [shortcuts] = useQuery(Shortcut, { autoupdate: true });
   const [deleted, setDeleted] = useState<CatalogItem[]>([]);
 
@@ -37,13 +35,11 @@ const ConfigCapabilitiesPage = observer(() => {
 
   const reload = () => {
     skills.shadowLoad();
-    commands.shadowLoad();
     shortcuts.shadowLoad();
     void reloadDeleted();
   };
 
-  const query =
-    kind === 'shortcuts' ? shortcuts : kind === 'commands' ? commands : skills;
+  const query = kind === 'shortcuts' ? shortcuts : skills;
 
   return (
     <Page queries={[query]}>

@@ -5,7 +5,6 @@ interface DiagramLabels {
   agentSet: string;
   territory: string;
   skills: string;
-  commands: string;
   tools: string;
   llm: string;
   defaultLlm: string;
@@ -16,7 +15,6 @@ const LABELS: Record<HelpLang, DiagramLabels> = {
     agentSet: 'Набор агентов',
     territory: 'Территория',
     skills: 'Скиллы',
-    commands: 'Команды',
     tools: 'Инструменты',
     llm: 'LLM',
     defaultLlm: 'дефолтная',
@@ -25,7 +23,6 @@ const LABELS: Record<HelpLang, DiagramLabels> = {
     agentSet: 'Agent Set',
     territory: 'Territory',
     skills: 'Skills',
-    commands: 'Commands',
     tools: 'Tools',
     llm: 'LLM',
     defaultLlm: 'default',
@@ -36,7 +33,6 @@ interface TreeNode {
   name: string;
   territory: string;
   skills: string[];
-  commands: string[];
   tools: string[];
   /** Имя подключения к LLM или 'default' — дефолтная LLM со страницы «LLM». */
   llm: string;
@@ -49,7 +45,6 @@ const TREE: TreeNode = {
   name: 'src/',
   territory: 'src/',
   skills: ['review'],
-  commands: ['deploy'],
   tools: ['git', 'make'],
   llm: 'ollama-local',
   children: [
@@ -57,7 +52,6 @@ const TREE: TreeNode = {
       name: 'src/backend',
       territory: 'src/backend',
       skills: ['lint'],
-      commands: ['build'],
       tools: ['cargo', 'make'],
       llm: 'default',
     },
@@ -65,7 +59,6 @@ const TREE: TreeNode = {
       name: 'src/frontend',
       territory: 'src/frontend',
       skills: ['design'],
-      commands: [],
       tools: ['npm'],
       llm: 'ollama-local',
     },
@@ -83,10 +76,6 @@ function AgentBox({ node, labels }: { node: TreeNode; labels: DiagramLabels }) {
         <div>
           <span className="text-slate-400">{labels.skills}:</span>{' '}
           {node.skills.join(', ') || '—'}
-        </div>
-        <div>
-          <span className="text-slate-400">{labels.commands}:</span>{' '}
-          {node.commands.join(', ') || '—'}
         </div>
         <div>
           <span className="text-slate-400">{labels.tools}:</span> {node.tools.join(', ')}

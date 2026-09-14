@@ -18,10 +18,10 @@ const CONTENT: Record<
     agentSetIntro:
       'Набор агентов — команда агентов для проекта: агенты образуют дерево по ' +
       'иерархии папок проекта, у каждой папки — свой агент, у подпапок — его ' +
-      'наследники. У каждого агента своя территория, правила, данные скиллы и ' +
-      'команды (по имени из каталога), инструменты и выбранное подключение к LLM.',
+      'наследники. У каждого агента своя территория, правила, данные скиллы ' +
+      '(по имени из каталога), инструменты и выбранное подключение к LLM.',
     configTitle: 'Из чего состоит конфиг',
-    configIntro: 'Раздел Config веб-клиента состоит из шести частей:',
+    configIntro: 'Раздел Config веб-клиента состоит из пяти частей:',
     sections: [
       {
         name: 'Env',
@@ -34,10 +34,6 @@ const CONTENT: Record<
       {
         name: 'Skills',
         text: 'каталог скиллов: у записи одно текущее содержимое, правки пишутся в историю',
-      },
-      {
-        name: 'Commands',
-        text: 'каталог команд: то же, что скиллы, для исполняемых команд',
       },
       {
         name: 'Agent Set',
@@ -55,10 +51,10 @@ const CONTENT: Record<
       'An Agent Set is a team of agents for a project: agents form a tree that ' +
       'follows the project folder hierarchy, each folder has its own agent and ' +
       'subfolders are its successors. Every agent has its own territory, rules, ' +
-      'given skills and commands (by name from the catalog), tools and a chosen ' +
+      'given skills (by name from the catalog), tools and a chosen ' +
       'LLM connection.',
     configTitle: 'What the config consists of',
-    configIntro: 'The Config section of the web client has six parts:',
+    configIntro: 'The Config section of the web client has five parts:',
     sections: [
       {
         name: 'Env',
@@ -71,10 +67,6 @@ const CONTENT: Record<
       {
         name: 'Skills',
         text: 'the skills catalog: a record has one current content, edits are written to history',
-      },
-      {
-        name: 'Commands',
-        text: 'the commands catalog: same as skills, for executable commands',
       },
       {
         name: 'Agent Set',

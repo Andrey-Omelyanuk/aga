@@ -13,7 +13,6 @@ const agents: Agent[] = [
     llm_id: 1,
     parent_id: null,
     skills: [{ name: 'review' }],
-    commands: [],
     territory: { folder: 'src', excludes: ['src/backend'] },
   },
   {
@@ -25,7 +24,6 @@ const agents: Agent[] = [
     llm_id: null,
     parent_id: 10,
     skills: [],
-    commands: [{ name: 'deploy' }],
     territory: { folder: 'src/backend', excludes: [] },
   },
 ];
@@ -37,10 +35,6 @@ const skills: CatalogItem[] = [
     content: 'Проверять диф и тесты',
     deleted: false,
   },
-];
-
-const commands: CatalogItem[] = [
-  { id: 1, name: 'deploy', content: 'Выкатывать', deleted: false },
 ];
 
 const connections: Llm[] = [
@@ -67,7 +61,6 @@ const meta = {
     name: 'ops',
     agents,
     skills,
-    commands,
     connections,
     users,
     onSaved: () => {},

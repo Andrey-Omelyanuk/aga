@@ -36,13 +36,11 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
           <Route path="config/env" element={<ConfigEnvPage />} />
           <Route path="config/users" element={<ConfigUsersPage />} />
           <Route path="config/skills" element={<ConfigCapabilitiesPage />} />
-          <Route path="config/commands" element={<ConfigCapabilitiesPage />} />
           <Route path="config/shortcuts" element={<ConfigCapabilitiesPage />} />
           <Route path="config/agent-sets" element={<AgentSetsPage />} />
           <Route path="config/llms" element={<ConfigLlmPage />} />
           <Route path="config/help" element={<ConfigHelpPage />} />
           <Route path="skills/:id/history" element={<CapabilityHistoryPage />} />
-          <Route path="commands/:id/history" element={<CapabilityHistoryPage />} />
           <Route path="shortcuts/:id/history" element={<CapabilityHistoryPage />} />
           <Route path="workstations" element={<WorkstationsPage />} />
           <Route path="sessions" element={<SessionsPage />} />

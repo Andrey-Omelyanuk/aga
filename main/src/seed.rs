@@ -41,7 +41,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let _ = anonymous;
 
-    // --- Каталог способностей: скиллы и команды с одним текущим содержимым.
+    // --- Каталог способностей: скиллы и сокращения с одним текущим содержимым.
     // Создание пишет запись истории (актор — alice, участник из фикстуры).
     let review = trace
         .create_capability(
@@ -62,39 +62,12 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             "alice",
         )
         .await?;
-    trace
-        .create_capability(
-            CapabilityKind::Command,
-            "run-tests",
-            "Запуск юнит-тестов и линтера пакета.",
-            alice,
-            "alice",
-        )
-        .await?;
-    trace
-        .create_capability(
-            CapabilityKind::Command,
-            "deploy",
-            "Деплой сервиса в staging-окружение.",
-            alice,
-            "alice",
-        )
-        .await?;
-    // Способности набора ui-kit (UI-библиотека mobx-model-ui).
+    // Скиллы набора ui-kit (UI-библиотека mobx-model-ui).
     trace
         .create_capability(
             CapabilityKind::Skill,
             "ui-review",
             "Ревью UI-компонентов: доступность, состояния, реакции на observable.",
-            alice,
-            "alice",
-        )
-        .await?;
-    trace
-        .create_capability(
-            CapabilityKind::Command,
-            "run-ui-tests",
-            "vitest по пакетам библиотеки, сборка Storybook.",
             alice,
             "alice",
         )
@@ -156,10 +129,6 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             name: "git-workflow".into(),
                         },
                     ],
-                    commands: vec![AgentCapability {
-                        name: "run-tests".into(),
-                    }],
-
                     listen_user_id: Some(alice),
                 },
                 AgentSpec {
@@ -170,10 +139,6 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     llm_id: None,
                     parent: Some("backend".into()),
                     skills: Vec::new(),
-                    commands: vec![AgentCapability {
-                        name: "deploy".into(),
-                    }],
-
                     listen_user_id: None,
                 },
             ],
@@ -203,10 +168,6 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                             name: "git-workflow".into(),
                         },
                     ],
-                    commands: vec![AgentCapability {
-                        name: "run-ui-tests".into(),
-                    }],
-
                     listen_user_id: Some(alice),
                 },
                 AgentSpec {
@@ -217,8 +178,6 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     llm_id: None,
                     parent: Some("ui".into()),
                     skills: Vec::new(),
-                    commands: Vec::new(),
-
                     listen_user_id: None,
                 },
             ],

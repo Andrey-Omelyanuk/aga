@@ -1,7 +1,7 @@
 import { Model, model, field, id, NUMBER, STRING } from 'mobx-model-ui';
 import { api } from '@/services/http-adapter';
 
-/** Запись истории изменения скилла/команды: кто, когда и что сделал.
+/** Запись истории изменения скилла/сокращения: кто, когда и что сделал.
  * `content` — содержимое записи после действия: по соседним записям
  * страница истории строит дифф. */
 export interface CapabilityHistoryEntry {
@@ -14,7 +14,7 @@ export interface CapabilityHistoryEntry {
   content?: string;
 }
 
-/** Каталог способностей: скилл или команда с единственным текущим содержимым. */
+/** Каталог способностей: скилл с единственным текущим содержимым. */
 abstract class Capability extends Model {
   abstract id: number;
   abstract name: string;
@@ -31,17 +31,8 @@ export class Skill extends Capability {
   @field() deleted = false;
 }
 
-@api('commands')
-@model
-export class Command extends Capability {
-  @id(NUMBER()) id!: number;
-  @field(STRING()) name!: string;
-  @field(STRING()) content!: string;
-  @field() deleted = false;
-}
-
 /** Глобальное сокращение: слово `/имя` в сообщении добавляет `content` в
- *  скрытую часть. Живёт в том же каталоге, что скиллы и команды (kind
+ *  скрытую часть. Живёт в том же каталоге, что скиллы (kind
  *  'shortcut'), с той же историей; агентам не даётся. */
 @api('shortcuts')
 @model

@@ -159,7 +159,7 @@ pub fn create_router(state: AppState) -> Router {
                 .patch(update_llm_connection),
         )
         .route("/settings/llm-default", post(set_llm_default))
-        // === Каталог способностей (скиллы и команды) ===
+        // === Каталог способностей (скиллы и сокращения) ===
         // У записи одно текущее содержимое и история изменений (кто, когда и
         // что сделал). ?deleted=1 — список «Удалённые» (история переживает
         // удаление). Фиксации версий нет: агент всегда берёт последнее.
@@ -169,18 +169,10 @@ pub fn create_router(state: AppState) -> Router {
             get(get_skill).patch(update_skill).delete(delete_skill),
         )
         .route("/skills/:id/history", get(capability_history))
-        .route("/commands", get(list_commands).post(create_command))
-        .route(
-            "/commands/:id",
-            get(get_command)
-                .patch(update_command)
-                .delete(delete_command),
-        )
-        .route("/commands/:id/history", get(capability_history))
         // === Сокращения (shortcuts) ===
         // Глобальный перечень: при отправке сообщения слово `/имя` добавляет
         // привязанный текст в скрытую часть сообщения. Живёт в том же каталоге,
-        // что скиллы и команды (kind='shortcut'), с той же историей изменений;
+        // что скиллы и сокращения (kind='shortcut'), с той же историей изменений;
         // агентам не даётся. Имя — без пробелов, уникально.
         .route("/shortcuts", get(list_shortcuts).post(create_shortcut))
         .route(
@@ -406,7 +398,7 @@ async fn delete_agent_set(
 }
 
 /// Полностью заменить состав набора (имя, агенты с их территорией,
-/// инструментами и данными скиллами/командами). Возвращает обновлённый набор.
+/// инструментами и данными скиллами). Возвращает обновлённый набор.
 async fn update_agent_set(
     Path(id): Path<i64>,
     State(state): State<AppState>,
@@ -609,34 +601,6 @@ async fn create_skill(
     .await
 }
 
-async fn list_commands(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    axum::extract::Query(filter): axum::extract::Query<DeletedFilter>,
-) -> Result<Json<Vec<crate::trace::CapabilityItem>>, StatusCode> {
-    list_capabilities(
-        crate::trace::CapabilityKind::Command,
-        &state,
-        &headers,
-        filter.deleted,
-    )
-    .await
-}
-
-async fn create_command(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<CreateCapabilityRequest>,
-) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
-    create_capability(
-        crate::trace::CapabilityKind::Command,
-        &state,
-        &headers,
-        payload,
-    )
-    .await
-}
-
 async fn create_capability(
     kind: crate::trace::CapabilityKind,
     state: &AppState,
@@ -687,22 +651,6 @@ async fn get_skill(
         .map(Json)
 }
 
-async fn get_command(
-    Path(id): Path<i64>,
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
-    current_user(&state, &headers).await?;
-    state
-        .trace_store
-        .get_capability(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .filter(|c| c.kind == crate::trace::CapabilityKind::Command)
-        .ok_or(StatusCode::NOT_FOUND)
-        .map(Json)
-}
-
 /// Правка записи: имя и/или содержимое; каждое изменение пишет запись истории.
 async fn update_skill(
     Path(id): Path<i64>,
@@ -712,22 +660,6 @@ async fn update_skill(
 ) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
     update_capability(
         crate::trace::CapabilityKind::Skill,
-        id,
-        &state,
-        &headers,
-        payload,
-    )
-    .await
-}
-
-async fn update_command(
-    Path(id): Path<i64>,
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<UpdateCapabilityRequest>,
-) -> Result<Json<crate::trace::CapabilityItem>, StatusCode> {
-    update_capability(
-        crate::trace::CapabilityKind::Command,
         id,
         &state,
         &headers,
@@ -805,14 +737,6 @@ async fn delete_skill(
     delete_capability(crate::trace::CapabilityKind::Skill, id, &state, &headers).await
 }
 
-async fn delete_command(
-    Path(id): Path<i64>,
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<StatusCode, StatusCode> {
-    delete_capability(crate::trace::CapabilityKind::Command, id, &state, &headers).await
-}
-
 async fn delete_capability(
     kind: crate::trace::CapabilityKind,
     id: i64,
@@ -866,8 +790,8 @@ async fn capability_history(
 }
 
 // === Сокращения (shortcuts) ===
-// Живут в общем каталоге (kind='shortcut') с той же историей, что скиллы и
-// команды. Отличие — имя не содержит пробелов: вызывается оно словом `/имя`,
+// Живут в общем каталоге (kind='shortcut') с той же историей, что скиллы.
+// Отличие — имя не содержит пробелов: вызывается оно словом `/имя`,
 // которое браузер не разобьёт на части.
 
 /// Имя сокращения: непустое и без пробелов.
@@ -3040,8 +2964,7 @@ mod tests {
             "max_iterations": 3,
             "llm_id": null,
             "parent": null,
-            "skills": [],
-            "commands": []
+            "skills": []
         })
     }
 
@@ -3056,7 +2979,6 @@ mod tests {
             "llm_id": null,
             "parent": null,
             "skills": [],
-            "commands": [],
             "listen_user_id": listen_user_id
         })
     }
@@ -3330,8 +3252,6 @@ mod tests {
                     llm_id: None,
                     parent: None,
                     skills: vec![],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
@@ -3372,8 +3292,6 @@ mod tests {
                     llm_id: None,
                     parent: None,
                     skills: vec![],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
@@ -3391,8 +3309,6 @@ mod tests {
                     llm_id: None,
                     parent: None,
                     skills: vec![],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
@@ -3426,10 +3342,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_set_detail_includes_territory_skills_commands_and_tools() {
+    async fn agent_set_detail_includes_territory_skills_and_tools() {
         let (state, file) = test_state(true).await;
         let headers = auth_headers("alice", &["participant"]);
-        // Каталог: скилл и команда с единственным содержимым.
+        // Каталог: скилл с единственным содержимым.
         let (status, body) = post_json(
             "/skills",
             &headers,
@@ -3444,18 +3360,7 @@ mod tests {
         let skill_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
             .as_i64()
             .unwrap();
-        let (status, _) = post_json(
-            "/commands",
-            &headers,
-            state.clone(),
-            serde_json::json!({
-                "name": "deploy",
-                "content": "Выкатывать"
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        // Набор с деревом и данными агенту способностями (по имени, без версии).
+        // Набор с деревом и данными агенту скиллами (по имени, без версии).
         let (status, body) = post_json(
             "/agent-sets",
             &headers,
@@ -3469,8 +3374,7 @@ mod tests {
                     "max_iterations": 3,
                     "llm_id": null,
                     "parent": null,
-                    "skills": [{"name": "review"}],
-                    "commands": [{"name": "deploy"}]
+                    "skills": [{"name": "review"}]
                 }]
             }),
         )
@@ -3481,8 +3385,8 @@ mod tests {
             .unwrap();
         let (status, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
-        // Состав набора: агенты, территория каждого, данные скиллы и команды
-        // (по имени, без версии), инструменты — всё в детали набора.
+        // Состав набора: агенты, территория каждого, данные скиллы (по имени,
+        // без версии), инструменты — всё в детали набора.
         assert!(body.contains("territory"));
         assert!(body.contains("folder"));
         assert!(body.contains("src"));
@@ -3490,7 +3394,7 @@ mod tests {
         assert!(body.contains("git"));
         assert!(body.contains("skills"));
         assert!(body.contains("review"));
-        assert!(body.contains("commands"));
+        assert!(!body.contains("commands"));
         assert!(!body.contains("pinned_version"));
         // Своей модели и температуры у агента больше нет — только подключение.
         assert!(!body.contains("\"model\""));
@@ -3601,32 +3505,6 @@ mod tests {
         let (status, body) = get("/skills?deleted=1", &headers, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("review2"));
-        // Команды — тот же каталог, те же правки.
-        let (status, body) = post_json(
-            "/commands",
-            &headers,
-            state.clone(),
-            serde_json::json!({
-                "name": "deploy",
-                "content": "Выкатывать"
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let cmd_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
-            .as_i64()
-            .unwrap();
-        let (status, _) = patch_json(
-            &format!("/commands/{cmd_id}"),
-            &headers,
-            state.clone(),
-            serde_json::json!({ "name": "deploy2" }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _) =
-            delete_json(&format!("/commands/{cmd_id}"), &headers, state.clone()).await;
-        assert_eq!(status, StatusCode::OK);
         cleanup(&file).await;
     }
 

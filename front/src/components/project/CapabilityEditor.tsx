@@ -12,7 +12,7 @@ import { Markdown } from '@/components/core/Markdown';
 import { cn } from '@/lib/utils';
 import type { CatalogItem } from '@/models/project';
 
-export type CapabilityKind = 'skills' | 'commands' | 'shortcuts';
+export type CapabilityKind = 'skills' | 'shortcuts';
 
 /** Подписи зависят от вида: сокращения — не «способности». */
 function kindText(kind: CapabilityKind) {
@@ -30,7 +30,7 @@ function kindText(kind: CapabilityKind) {
     newLabel: shortcut ? 'Новое сокращение' : 'Новая способность',
     contentPlaceholder: shortcut
       ? 'Текст сокращения (уйдёт в скрытую часть сообщения по /имя)'
-      : 'Содержимое скилла/команды (markdown; агент берёт его всегда)',
+      : 'Содержимое скилла (markdown; агент берёт его всегда)',
   };
 }
 

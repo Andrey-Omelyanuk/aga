@@ -14,7 +14,6 @@ export interface AgentSetEditorProps {
   name: string;
   agents: Agent[];
   skills: CatalogItem[];
-  commands: CatalogItem[];
   /** Подключения к LLM: у агента набора выбирается одно из них. */
   connections: Llm[];
   /** Пользователи чата: агент привязывается к одному — слушает его сообщения
@@ -32,23 +31,21 @@ const emptyAgent = (name: string): Agent => ({
   parent_id: null,
   parent: null,
   skills: [],
-  commands: [],
   territory: { folder: name, excludes: [] },
   listen_user_id: null,
 });
 
 /** Редактор состава набора: агенты, их территория (по дереву), данные скиллы
- * и команды по имени (без версии), инструменты, выбранное подключение к LLM.
+ * по имени (без версии), инструменты, выбранное подключение к LLM.
  * Сохраняется целиком (PATCH). */
 export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
-  const { setId, skills, commands, connections, users, onSaved } = props;
+  const { setId, skills, connections, users, onSaved } = props;
   const [name, setName] = useState(props.name);
   const [agents, setAgents] = useState<Agent[]>(() =>
     props.agents.map((a) => ({
       ...a,
       tools: [...a.tools],
       skills: a.skills.map((s) => ({ ...s })),
-      commands: a.commands.map((c) => ({ ...c })),
       territory: { ...a.territory },
       // Родитель хранится по имени (API принимает `parent`); из id выводим имя.
       parent: a.parent_id != null
@@ -86,21 +83,16 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
     setAgents((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // Включение/выключение способности каталога на агенте; `kind` — skills/commands.
-  const toggleCapability = (
-    agentIndex: number,
-    kind: 'skills' | 'commands',
-    item: CatalogItem,
-    enabled: boolean,
-  ) => {
+  // Включение/выключение скилла каталога на агенте.
+  const toggleSkill = (agentIndex: number, item: CatalogItem, enabled: boolean) => {
     setAgents((prev) =>
       prev.map((a, i) => {
         if (i !== agentIndex) return a;
-        const existing = a[kind].filter((c) => c.name !== item.name);
+        const existing = a.skills.filter((c) => c.name !== item.name);
         const next: AgentCapability[] = enabled
           ? [...existing, { name: item.name }]
           : existing;
-        return { ...a, [kind]: next };
+        return { ...a, skills: next };
       }),
     );
   };
@@ -116,7 +108,6 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
         llm_id: a.llm_id ?? null,
         parent: a.parent ?? null,
         skills: a.skills,
-        commands: a.commands,
         listen_user_id: a.listen_user_id ?? null,
       }));
       await http.patch(`/agent-sets/${setId}`, { name, agents: payloadAgents });
@@ -129,11 +120,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
     }
   };
 
-  const capabilityBlock = (
-    kind: 'skills' | 'commands',
-    items: CatalogItem[],
-    label: string,
-  ) => {
+  const skillBlock = (items: CatalogItem[], label: string) => {
     if (items.length === 0) {
       return <div className="text-xs text-slate-400">Каталог «{label}» пуст</div>;
     }
@@ -143,13 +130,13 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
         {agents.map((agent, ai) => (
           <div key={`${label}-${ai}`} className="space-y-1">
             {items.map((item) => {
-              const given = agent[kind].find((c) => c.name === item.name);
+              const given = agent.skills.find((c) => c.name === item.name);
               return (
                 <label key={item.name} className="flex items-center gap-2 text-xs">
                   <input
                     type="checkbox"
                     checked={Boolean(given)}
-                    onChange={(e) => toggleCapability(ai, kind, item, e.target.checked)}
+                    onChange={(e) => toggleSkill(ai, item, e.target.checked)}
                   />
                   <span className="w-32 truncate">{item.name}</span>
                 </label>
@@ -296,8 +283,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
               )}
             </div>
             <div className="mt-2 grid grid-cols-2 gap-4">
-              {capabilityBlock('skills', skills, 'Скиллы')}
-              {capabilityBlock('commands', commands, 'Команды')}
+              {skillBlock(skills, 'Скиллы')}
             </div>
           </Card>
         );

@@ -10,9 +10,6 @@ interface ErLabels {
   skill: string;
   skillAttrs: string[];
   skillsBy: string;
-  command: string;
-  commandAttrs: string[];
-  commandsBy: string;
   llm: string;
   llmAttrs: string[];
   llmChoice: string;
@@ -34,9 +31,6 @@ const LABELS: Record<HelpLang, ErLabels> = {
     skill: 'Skill',
     skillAttrs: ['название', 'содержимое'],
     skillsBy: 'выдаётся по имени из каталога',
-    command: 'Command',
-    commandAttrs: ['название', 'содержимое'],
-    commandsBy: 'выдаётся по имени из каталога',
     llm: 'LLM',
     llmAttrs: ['название', 'url, ключ, модель', 'одно — дефолтная'],
     llmChoice: 'выбор подключения; без выбора — дефолтная',
@@ -56,9 +50,6 @@ const LABELS: Record<HelpLang, ErLabels> = {
     skill: 'Skill',
     skillAttrs: ['name', 'content'],
     skillsBy: 'given by name from the catalog',
-    command: 'Command',
-    commandAttrs: ['name', 'content'],
-    commandsBy: 'given by name from the catalog',
     llm: 'LLM',
     llmAttrs: ['name', 'url, key, model', 'one is default'],
     llmChoice: 'picks a connection; without one — default LLM',
@@ -119,10 +110,6 @@ export const ErDiagram = ({ lang }: { lang: HelpLang }) => {
             <RelationColumn
               label={t.skillsBy}
               box={<EntityBox name={t.skill} attrs={t.skillAttrs} />}
-            />
-            <RelationColumn
-              label={t.commandsBy}
-              box={<EntityBox name={t.command} attrs={t.commandAttrs} />}
             />
             <RelationColumn
               label={t.llmChoice}

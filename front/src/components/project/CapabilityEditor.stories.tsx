@@ -44,19 +44,6 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Skills: Story = {};
-export const Commands: Story = {
-  args: {
-    kind: 'commands',
-    items: [
-      {
-        id: 4,
-        name: 'run-tests',
-        content: 'Запуск юнит-тестов и линтера.',
-        deleted: false,
-      },
-    ],
-  },
-};
 
 export const Shortcuts: Story = {
   args: {

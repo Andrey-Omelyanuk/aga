@@ -59,8 +59,8 @@ pub fn message_should_trigger(origin: &str) -> bool {
     origin == "user"
 }
 
-/// Собрать конфиг агента из набора: промпт = правила + данные агенту скиллы и
-/// команды (единственное содержимое каталога), инструменты — отдельный список
+/// Собрать конфиг агента из набора: промпт = правила + данные агенту скиллы
+/// (единственное содержимое каталога), инструменты — отдельный список
 /// без версий; территория — папка узла в дереве набора; LLM — выбранное
 /// подключение (url и ключ), без подключения — дефолтная LLM.
 pub async fn resolve_agent(
@@ -596,7 +596,6 @@ mod tests {
             llm_id: None,
             parent: None,
             skills: vec![],
-            commands: vec![],
             listen_user_id,
         }
     }
@@ -1032,7 +1031,7 @@ mod tests {
     // конфиг резолвится для привязанного агента. ===
 
     #[tokio::test]
-    async fn bound_agent_resolves_own_rules_commands_and_llm() {
+    async fn bound_agent_resolves_own_rules_and_llm() {
         let (store, _chat, file) = temp_stores().await;
         let conn_a = store
             .create_llm_connection(&crate::trace::LlmConnectionSpec {
@@ -1064,7 +1063,6 @@ mod tests {
                         llm_id: Some(conn_a),
                         parent: None,
                         skills: vec![],
-                        commands: vec![],
                         listen_user_id: None,
                     },
                     AgentSpec {
@@ -1075,7 +1073,6 @@ mod tests {
                         llm_id: Some(conn_b),
                         parent: None,
                         skills: vec![],
-                        commands: vec![],
                         listen_user_id: None,
                     },
                 ],
@@ -1147,7 +1144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bound_agent_applies_territory_skills_commands_and_tools() {
+    async fn bound_agent_applies_territory_skills_and_tools() {
         let (store, _chat, file) = temp_stores().await;
         let skill = store
             .create_capability(CapabilityKind::Skill, "review", "Формат диффов", 1, "alice")
@@ -1155,16 +1152,6 @@ mod tests {
             .unwrap();
         store
             .update_capability_content(skill, "Прогон тестов и правки", 1, "alice")
-            .await
-            .unwrap();
-        store
-            .create_capability(
-                CapabilityKind::Command,
-                "deploy",
-                "Выкатывать на стенд",
-                1,
-                "alice",
-            )
             .await
             .unwrap();
 
@@ -1182,9 +1169,6 @@ mod tests {
                         skills: vec![AgentCapability {
                             name: "review".to_string(),
                         }],
-                        commands: vec![AgentCapability {
-                            name: "deploy".to_string(),
-                        }],
                         listen_user_id: None,
                     },
                     AgentSpec {
@@ -1196,9 +1180,6 @@ mod tests {
                         parent: Some("src".to_string()),
                         skills: vec![AgentCapability {
                             name: "review".to_string(),
-                        }],
-                        commands: vec![AgentCapability {
-                            name: "deploy".to_string(),
                         }],
                         listen_user_id: None,
                     },
@@ -1214,7 +1195,6 @@ mod tests {
             .unwrap();
         assert!(config.prompt.contains("Бэкенд"));
         assert!(config.prompt.contains("Прогон тестов и правки"));
-        assert!(config.prompt.contains("Выкатывать на стенд"));
         assert!(config.prompt.contains("review"));
         assert!(!config.prompt.contains("Формат диффов"));
         assert_eq!(config.tools, vec!["git".to_string(), "make".to_string()]);
@@ -1301,7 +1281,6 @@ mod tests {
                 llm_id: None,
                 parent: None,
                 skills: vec![],
-                commands: vec![],
                 listen_user_id: users.get(*user_name).copied(),
             });
         }

@@ -87,7 +87,7 @@ describe('ConfigHelpPage', () => {
     act(() => root.unmount());
   });
 
-  it('shows the agent set composition as a diagram: agents by folder tree, territory, skills/commands by name, tools, LLM connection', async () => {
+  it('shows the agent set composition as a diagram: agents by folder tree, territory, skills by name, tools, LLM connection', async () => {
     const { container, root } = await renderHelp();
     const diagram = container.querySelector('[data-testid="agent-set-diagram"]');
     expect(diagram).not.toBeNull();
@@ -98,11 +98,10 @@ describe('ConfigHelpPage', () => {
     expect(text).toContain('src/frontend');
     // У каждого агента территория.
     expect(text).toContain('Территория');
-    // Данные скиллы и команды — по имени.
+    // Данные скиллы — по имени.
     expect(text).toContain('review');
-    expect(text).toContain('deploy');
     expect(text).toContain('lint');
-    expect(text).toContain('build');
+    expect(text).toContain('design');
     // Инструменты.
     expect(text).toContain('git');
     expect(text).toContain('make');
@@ -114,10 +113,10 @@ describe('ConfigHelpPage', () => {
     act(() => root.unmount());
   });
 
-  it('describes the whole config: Env, Users, Skills, Commands, Agent Set, LLM', async () => {
+  it('describes the whole config: Env, Users, Skills, Agent Set, LLM', async () => {
     const { container, root } = await renderHelp();
     const text = container.textContent ?? '';
-    for (const name of ['Env', 'Users', 'Skills', 'Commands', 'Agent Set', 'LLM']) {
+    for (const name of ['Env', 'Users', 'Skills', 'Agent Set', 'LLM']) {
       expect(text).toContain(name);
     }
     expect(text).toContain('Из чего состоит конфиг');

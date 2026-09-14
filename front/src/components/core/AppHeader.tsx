@@ -28,7 +28,6 @@ const CONFIG_MENU: Array<{ tab: string; label: string; to: string }> = [
   { tab: 'env', label: 'Env', to: '/config/env' },
   { tab: 'users', label: 'Users', to: '/config/users' },
   { tab: 'skills', label: 'Skills', to: '/config/skills' },
-  { tab: 'commands', label: 'Commands', to: '/config/commands' },
   { tab: 'shortcuts', label: 'Shortcuts', to: '/config/shortcuts' },
   { tab: 'agent-sets', label: 'Agent Set', to: '/config/agent-sets' },
   { tab: 'llms', label: 'LLM', to: '/config/llms' },

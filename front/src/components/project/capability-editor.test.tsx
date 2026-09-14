@@ -10,7 +10,7 @@ import type { CatalogItem } from '@/models/project';
 function renderEditor(
   items: CatalogItem[],
   deleted: CatalogItem[],
-  kind: 'skills' | 'commands' | 'shortcuts' = 'skills',
+  kind: 'skills' | 'shortcuts' = 'skills',
 ) {
   const container = document.createElement('div');
   document.body.appendChild(container);

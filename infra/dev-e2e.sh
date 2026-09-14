@@ -194,7 +194,7 @@ MOCK_LLM=$(curl -sf -X POST -H "Authorization: Bearer $BOB" -H 'content-type: ap
 jq -n --argjson llm "$MOCK_LLM" --argjson alice "$ALICE_ID" '{
   name: "e2e-ask-human",
   agents: [{ name: "echo", description: "e2e-агент на mock-LLM", tools: [],
-             max_iterations: 2, llm_id: $llm, parent: null, skills: [], commands: [],
+             max_iterations: 2, llm_id: $llm, parent: null, skills: [],
              listen_user_id: $alice }],
 }' > /tmp/aga-e2e-set.json
 ASK_SET=$(curl -sf -X POST -H "Authorization: Bearer $BOB" -H 'content-type: application/json' \

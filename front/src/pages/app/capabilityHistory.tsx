@@ -9,7 +9,7 @@ import http from '@/services/http';
 import { formatTime } from '@/utils/dates';
 import type { CapabilityHistoryEntry } from '@/models/project';
 
-type RouteKind = 'skills' | 'commands' | 'shortcuts';
+type RouteKind = 'skills' | 'shortcuts';
 
 const ACTION_LABEL: Record<CapabilityHistoryEntry['action'], string> = {
   create: 'создал',
@@ -20,7 +20,6 @@ const ACTION_LABEL: Record<CapabilityHistoryEntry['action'], string> = {
 
 const KIND_LABEL: Record<RouteKind, string> = {
   skills: 'Skills',
-  commands: 'Commands',
   shortcuts: 'Shortcuts',
 };
 
@@ -35,7 +34,7 @@ function EntryDiff({ history, index }: { history: CapabilityHistoryEntry[]; inde
 
 const CapabilityHistoryPage = observer(() => {
   const { id } = useParams<{ id: string }>();
-  // Вид способности — из пути (/skills/:id/history, /commands/:id/history).
+  // Вид записи — из пути (/skills/:id/history, /shortcuts/:id/history).
   const kind = useLocation().pathname.split('/')[1] as RouteKind;
   const [history, setHistory] = useState<CapabilityHistoryEntry[] | null>(null);
   const [error, setError] = useState(false);

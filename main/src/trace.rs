@@ -44,7 +44,7 @@ pub struct Project {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Способность из каталога (скилл или команда), данная агенту набора: ссылка
+/// Скилл из каталога, данный агенту набора: ссылка
 /// по имени на запись целиком. Версий нет — агент всегда берёт её последнее
 /// содержимое.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ pub struct AgentCapability {
     pub name: String,
 }
 
-/// Агент из AgentSet-а. Способности — скиллы и команды из общего каталога
+/// Агент из AgentSet-а. Способности — скиллы из общего каталога
 /// (имя записи; агент всегда использует последнее содержимое); инструменты —
 /// отдельный список исполняемого в консоли воркстейшна, без версий. LLM —
 /// выбранное подключение (llm_id); своей модели и температуры у агента нет.
@@ -69,8 +69,6 @@ pub struct AgentDef {
     pub parent_id: Option<i64>,
     /// Данные агенту скиллы (имя из каталога).
     pub skills: Vec<AgentCapability>,
-    /// Данные агенту команды (имя из каталога).
-    pub commands: Vec<AgentCapability>,
     /// Территория по узлу в дереве набора: папка узла минус папки наследников.
     pub territory: crate::scope::Territory,
     /// Привязка к пользователю чата: агент слушает его сообщения и отвечает от
@@ -98,7 +96,6 @@ pub struct AgentSpec {
     pub llm_id: Option<i64>,
     pub parent: Option<String>,
     pub skills: Vec<AgentCapability>,
-    pub commands: Vec<AgentCapability>,
     /// Привязка к пользователю чата (слушать и отвечать от его имени).
     #[serde(default)]
     pub listen_user_id: Option<i64>,
@@ -127,14 +124,13 @@ pub struct LlmConnectionSpec {
     pub model_name: String,
 }
 
-/// Вид способности каталога: скилл, команда или сокращение. Скиллы и команды
-/// даются агентам; сокращения агентам не даются — это текст, который вставляется
+/// Вид записи каталога: скилл или сокращение. Скиллы даются агентам;
+/// сокращения агентам не даются — это текст, который вставляется
 /// в скрытую часть сообщения по слову `/имя`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CapabilityKind {
     Skill,
-    Command,
     Shortcut,
 }
 
@@ -142,7 +138,6 @@ impl CapabilityKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             CapabilityKind::Skill => "skill",
-            CapabilityKind::Command => "command",
             CapabilityKind::Shortcut => "shortcut",
         }
     }
@@ -287,7 +282,7 @@ impl TraceStore {
         // список исполняемого в консоли воркстейшна, версий у них нет.
         migrate_agents_tools_column(&pool).await?;
 
-        // === Каталог способностей (скиллы и команды) ===
+        // === Каталог способностей (скиллы и сокращения) ===
         // Общий на всю систему: агенты набора ссылаются на записи по имени.
         // У записи одно текущее содержимое (content); версий нет — агент всегда
         // использует последнее содержимое. Удаление — мягкое (deleted=1), чтобы
@@ -434,6 +429,11 @@ impl TraceStore {
         // Миграция старых БД: human-запрос живёт в чате — привязка к сообщению
         // вопроса (ответ — «ответ на это сообщение») и имени агента.
         migrate_human_request_chat_columns(&pool).await?;
+        // Миграция старых БД: каталог команд (`kind='command'`) удалён —
+        // записи вычищаются, история и привязки к агентам уходят каскадом.
+        // После создания agents — иначе каскад по agent_capabilities падает
+        // на несуществующей таблице (FK агента ссылается на agents).
+        migrate_remove_command_capabilities(&pool).await?;
 
         sqlx::query(
             r#"
@@ -734,7 +734,7 @@ impl TraceStore {
 
     /// Создать набор агентов. Агенты кладутся сразу: parent — имя родителя в
     /// дереве (агент папки, наследником которого становится этот агент);
-    /// skills/commands — имена записей каталога (привязываются, если есть).
+    /// skills — имена записей каталога (привязываются, если есть).
     pub async fn create_agent_set(
         &self,
         name: &str,
@@ -752,7 +752,7 @@ impl TraceStore {
     }
 
     /// Полностью заменить состав набора: имя и агенты с их инструментами,
-    /// скиллами/командами и деревом. Возвращает false, если набора нет.
+    /// скиллами и деревом. Возвращает false, если набора нет.
     pub async fn update_agent_set(
         &self,
         set_id: i64,
@@ -808,9 +808,6 @@ impl TraceStore {
 
             for cap in &spec.skills {
                 Self::link_capability(&mut *tx, agent_id, CapabilityKind::Skill, cap).await?;
-            }
-            for cap in &spec.commands {
-                Self::link_capability(&mut *tx, agent_id, CapabilityKind::Command, cap).await?;
             }
         }
         Ok(())
@@ -871,16 +868,12 @@ impl TraceStore {
             .fetch_all(&self.pool)
             .await?;
             let mut skills = Vec::new();
-            let mut commands = Vec::new();
             for cap in caps {
                 let kind: String = cap.get("kind");
-                let capability = AgentCapability {
-                    name: cap.get("name"),
-                };
                 if kind == "skill" {
-                    skills.push(capability);
-                } else {
-                    commands.push(capability);
+                    skills.push(AgentCapability {
+                        name: cap.get("name"),
+                    });
                 }
             }
             agents.push(AgentDef {
@@ -892,7 +885,6 @@ impl TraceStore {
                 llm_id: r.get("llm_id"),
                 parent_id: r.get("parent_id"),
                 skills,
-                commands,
                 territory: Default::default(),
                 listen_user_id: r.get("listen_user_id"),
             });
@@ -1133,7 +1125,7 @@ impl TraceStore {
         Ok(rows.iter().map(|r| r.get("listen_user_id")).collect())
     }
 
-    // === Каталог способностей (скиллы и команды) ===
+    // === Каталог способностей (скиллы и сокращения) ===
 
     /// Список записей каталога одного вида: активные и (если `include_deleted`)
     /// удалённые («Удалённые»), по порядку id.
@@ -1394,8 +1386,8 @@ impl TraceStore {
         Ok(row.map(|r| r.get("content")))
     }
 
-    /// Промпт агента: его правила плюс данные ему скиллы и команды, раскрытые
-    /// в их единственном текущем содержимом.
+    /// Промпт агента: его правила плюс данные ему скиллы, раскрытые в их
+    /// единственном текущем содержимом.
     pub async fn agent_prompt(&self, agent: &AgentDef) -> Result<String, sqlx::Error> {
         let mut parts = vec![agent.description.clone()];
         for sk in &agent.skills {
@@ -1404,14 +1396,6 @@ impl TraceStore {
                 .await?
             {
                 parts.push(format!("Скилл «{}»: {}", sk.name, content));
-            }
-        }
-        for cmd in &agent.commands {
-            if let Some(content) = self
-                .resolve_capability(CapabilityKind::Command, &cmd.name)
-                .await?
-            {
-                parts.push(format!("Команда «{}»: {}", cmd.name, content));
             }
         }
         Ok(parts.join("\n\n"))
@@ -1453,9 +1437,8 @@ fn capability_from_row(r: &sqlx::sqlite::SqliteRow) -> CapabilityItem {
     CapabilityItem {
         id: r.get("id"),
         kind: match kind.as_str() {
-            "skill" => CapabilityKind::Skill,
             "shortcut" => CapabilityKind::Shortcut,
-            _ => CapabilityKind::Command,
+            _ => CapabilityKind::Skill,
         },
         name: r.get("name"),
         content: r.get("content"),
@@ -1533,6 +1516,16 @@ async fn migrate_capabilities_columns(pool: &SqlitePool) -> Result<(), sqlx::Err
             .execute(pool)
             .await?;
     }
+    Ok(())
+}
+
+/// Удалить записи каталога команд (`kind='command'`): вид команды удалён,
+/// старые записи и их история/привязки к агентам не нужны. Каскад по FK
+/// чистит `capability_history` и `agent_capabilities`. Идемпотентно.
+async fn migrate_remove_command_capabilities(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM capabilities WHERE kind = 'command'")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1780,6 +1773,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migrate_removes_legacy_command_capabilities() {
+        let (path, file) = temp_db_path();
+        let store = TraceStore::new(&path).await.unwrap();
+        // «Команды» старых БД: запись каталога kind='command' с историей и
+        // привязкой к агенту. Создаём напрямую (вида в коде больше нет).
+        let skill = store
+            .create_capability(CapabilityKind::Skill, "review", "v1", 1, "alice")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO capabilities (kind, name, content) VALUES ('command', 'deploy', 'c1')",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let cmd_id: i64 = sqlx::query_scalar("SELECT id FROM capabilities WHERE kind = 'command'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO capability_history (capability_id, action, actor_id, actor_name, content)
+             VALUES (?, 'create', 1, 'alice', 'c1')",
+        )
+        .bind(cmd_id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let set_id = store
+            .create_agent_set(
+                "ops",
+                &[AgentSpec {
+                    name: "dev".to_string(),
+                    description: "".to_string(),
+                    tools: vec![],
+                    max_iterations: 3,
+                    llm_id: None,
+                    parent: None,
+                    skills: vec![cap("review")],
+                    listen_user_id: None,
+                }],
+            )
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO agent_capabilities (agent_id, capability_id) VALUES (?, ?)")
+            .bind(set_id)
+            .bind(cmd_id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        drop(store);
+
+        // Повторное открытие БД прогоняет миграцию: команды и всё связанное
+        // (история, привязки) удаляются, скиллы и сокращения целы.
+        let store = TraceStore::new(&path).await.unwrap();
+        let cmd_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM capabilities WHERE kind = 'command'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(cmd_count, 0);
+        let history_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM capability_history WHERE capability_id = ?")
+                .bind(cmd_id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(history_count, 0);
+        let link_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_capabilities WHERE capability_id = ?")
+                .bind(cmd_id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(link_count, 0);
+        let skill_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM capabilities WHERE kind = 'skill'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(skill_count, 1);
+        assert_eq!(
+            store.get_capability(skill).await.unwrap().unwrap().name,
+            "review"
+        );
+        let _ = std::fs::remove_file(format!("{}-wal", file.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
     async fn migrates_capability_history_content_column() {
         use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
         use std::str::FromStr;
@@ -1871,7 +1954,6 @@ mod tests {
             llm_id: None,
             parent: parent.map(|s| s.to_string()),
             skills: vec![],
-            commands: vec![],
             listen_user_id: None,
         }
     }
@@ -1908,7 +1990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn each_agent_keeps_own_rules_commands_and_llm() {
+    async fn each_agent_keeps_own_rules_and_llm() {
         let (path, file) = temp_db_path();
         let store = TraceStore::new(&path).await.unwrap();
         let conn = store
@@ -1928,8 +2010,6 @@ mod tests {
             llm_id: Some(conn),
             parent: None,
             skills: vec![],
-            commands: vec![],
-
             listen_user_id: None,
         };
         let s2 = AgentSpec {
@@ -1940,8 +2020,6 @@ mod tests {
             llm_id: None,
             parent: None,
             skills: vec![],
-            commands: vec![],
-
             listen_user_id: None,
         };
         let set_id = store.create_agent_set("ops", &[s1, s2]).await.unwrap();
@@ -1984,8 +2062,6 @@ mod tests {
                     llm_id: Some(conn),
                     parent: None,
                     skills: vec![],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
@@ -2047,8 +2123,6 @@ mod tests {
                     llm_id: Some(conn),
                     parent: None,
                     skills: vec![],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
@@ -2096,11 +2170,9 @@ mod tests {
                     description: "Правила".to_string(),
                     tools: vec![],
                     max_iterations: 3,
-                    llm_id: None,
+                    llm_id: Some(conn),
                     parent: None,
                     skills: vec![],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
@@ -2152,8 +2224,6 @@ mod tests {
                     llm_id: Some(own),
                     parent: None,
                     skills: vec![],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
@@ -2421,10 +2491,6 @@ mod tests {
             .create_capability(CapabilityKind::Skill, "review", "v1", 1, "alice")
             .await
             .unwrap();
-        let cmd = store
-            .create_capability(CapabilityKind::Command, "deploy", "c1", 1, "alice")
-            .await
-            .unwrap();
         let set_id = store
             .create_agent_set(
                 "ops",
@@ -2436,8 +2502,6 @@ mod tests {
                     llm_id: None,
                     parent: None,
                     skills: vec![cap("review")],
-                    commands: vec![cap("deploy")],
-
                     listen_user_id: None,
                 }],
             )
@@ -2449,22 +2513,17 @@ mod tests {
         assert_eq!(dev.tools, vec!["git".to_string(), "make".to_string()]);
         assert_eq!(dev.skills.len(), 1);
         assert_eq!(dev.skills[0].name, "review");
-        assert_eq!(dev.commands[0].name, "deploy");
         // У записи каталога одно текущее содержимое — версий и фиксации нет.
         let skill_item = store.get_capability(skill).await.unwrap().unwrap();
         assert_eq!(skill_item.content, "v1");
         assert!(!skill_item.deleted);
-        assert_eq!(
-            store.get_capability(cmd).await.unwrap().unwrap().content,
-            "c1"
-        );
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
     }
 
     #[tokio::test]
-    async fn agent_uses_only_assigned_skills_and_commands() {
+    async fn agent_uses_only_assigned_skills() {
         let (path, file) = temp_db_path();
         let store = TraceStore::new(&path).await.unwrap();
         store
@@ -2487,26 +2546,6 @@ mod tests {
             )
             .await
             .unwrap();
-        store
-            .create_capability(
-                CapabilityKind::Command,
-                "deploy",
-                "Команда deploy",
-                1,
-                "alice",
-            )
-            .await
-            .unwrap();
-        store
-            .create_capability(
-                CapabilityKind::Command,
-                "rollback",
-                "Команда rollback",
-                1,
-                "alice",
-            )
-            .await
-            .unwrap();
         let set_id = store
             .create_agent_set(
                 "ops",
@@ -2518,8 +2557,6 @@ mod tests {
                     llm_id: None,
                     parent: None,
                     skills: vec![cap("review")],
-                    commands: vec![cap("deploy")],
-
                     listen_user_id: None,
                 }],
             )
@@ -2528,13 +2565,10 @@ mod tests {
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
         let dev = set.agents.iter().find(|a| a.name == "dev").unwrap();
         assert_eq!(dev.skills, vec![cap("review")]);
-        assert_eq!(dev.commands, vec![cap("deploy")]);
         let prompt = store.agent_prompt(dev).await.unwrap();
-        // В промпте только данные агенту способности.
+        // В промпте только данные агенту скиллы.
         assert!(prompt.contains("Описание review"));
-        assert!(prompt.contains("Команда deploy"));
         assert!(!prompt.contains("polish"));
-        assert!(!prompt.contains("rollback"));
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
         let _ = std::fs::remove_file(&file);
@@ -2559,8 +2593,6 @@ mod tests {
                     llm_id: None,
                     parent: None,
                     skills: vec![cap("review")],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
@@ -2656,11 +2688,6 @@ mod tests {
             .capability_name_taken(CapabilityKind::Skill, "taken", skill)
             .await
             .unwrap());
-        // Имя свободно в другом виде (команды не мешают скиллам).
-        assert!(!store
-            .capability_name_taken(CapabilityKind::Command, "taken", 0)
-            .await
-            .unwrap());
         // Мягко удалённая запись имя занимает.
         let taken_id = store
             .create_capability(CapabilityKind::Skill, "gone", "x", 1, "alice")
@@ -2695,8 +2722,6 @@ mod tests {
                     llm_id: None,
                     parent: None,
                     skills: vec![cap("review")],
-                    commands: vec![],
-
                     listen_user_id: None,
                 }],
             )
