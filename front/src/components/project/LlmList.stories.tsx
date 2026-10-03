@@ -10,6 +10,7 @@ const connections: Llm[] = [
     api_key: 'secret-key',
     model_name: 'qwen3:0.6b',
     is_default: true,
+    native_tools: true,
   },
   {
     id: 2,
@@ -18,6 +19,7 @@ const connections: Llm[] = [
     api_key: null,
     model_name: 'qwen2.5:7b',
     is_default: false,
+    native_tools: false,
   },
 ] as Llm[];
 

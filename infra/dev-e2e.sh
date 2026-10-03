@@ -9,7 +9,7 @@
 # слушает её канал и отвечает от её имени через маленькую LLM dev-стенда.
 # Качество ответа не проверяем — хватает непустого ответа с артефактом.
 #
-# Вторая секция — human-in-the-loop ([ASK_HUMAN]) с детерминированной
+# Вторая секция — human-in-the-loop (ask_human) с детерминированной
 # mock-LLM (контейнер node, не ollama): вопрос агента появляется в чате текстом
 # (не «Request ID»), ответ — сообщение несвязанного участника (bob) с parent_id
 # на сообщение-вопрос; он закрывает запрос и возобновляет агента (mock отвечает
@@ -122,15 +122,14 @@ done
 [ -n "$CODE_OK" ]
 echo "mobx-model-ui code cloned (README.md present)"
 
-echo "==> ask the agent what the project is (agent ui listens to alice)"
-QRES=$(curl -sf -X POST -H "Authorization: Bearer $ALICE" -H 'content-type: application/json' \
+echo "==> bob asks @alice what the project is (agent ui serves alice)"
+ALICE_ID=$(curl -sf -H "Authorization: Bearer $ALICE" "$CORE/users/me" | jq -r '.id')
+[ -n "$ALICE_ID" ] && [ "$ALICE_ID" != "null" ]
+QRES=$(curl -sf -X POST -H "Authorization: Bearer $BOB" -H 'content-type: application/json' \
   "$CORE/chats/$CHAT_ID/messages" \
-  -d '{"body":"что за проект?"}')
+  -d '{"body":"@alice что за проект?"}')
 QID=$(echo "$QRES" | jq -r '.message.id')
 [ -n "$QID" ] && [ "$QID" != "null" ]
-
-ALICE_ID=$(echo "$QRES" | jq -r '.message.author_id')
-[ -n "$ALICE_ID" ]
 
 echo "==> wait for a non-empty agent reply as alice (origin=agent) with an artifact"
 REPLY_OK=""
@@ -156,7 +155,7 @@ echo "agent replied as alice (message $MID, origin=agent), artifact attached"
 echo "reply: $BODY"
 
 # === ASK_HUMAN: вопрос в чат, ответ по parent_id от несвязанного участника ===
-# Детерминированная mock-LLM вместо ollama: первый запрос к LLM — [ASK_HUMAN],
+# Детерминированная mock-LLM вместо ollama: первый запрос к LLM — вызов ask_human,
 # последующие — финальный ответ. Так проверяется вся цепочка human-in-the-loop:
 # вопрос публикуется текстом (не «Request ID»), задача ждёт, ответ с parent_id
 # закрывает запрос и возобновляет агента — даже от участника без привязки (bob).
@@ -172,11 +171,14 @@ http.createServer((req, res) => {
   req.resume();
   req.on('end', () => {
     calls += 1;
-    const content = calls === 1
-      ? '[ASK_HUMAN] Разрешить деплой на прод?[/ASK_HUMAN]'
-      : 'Деплой выполнен (e2e).';
+    // Первый ответ — нативный вызов ask_human (режим подключения по умолчанию).
+    const message = calls === 1
+      ? { role: 'assistant', content: null, tool_calls: [{ id: 'q1', type: 'function',
+          function: { name: 'ask_human',
+            arguments: JSON.stringify({ question: 'Разрешить деплой на прод?' }) } }] }
+      : { role: 'assistant', content: 'Деплой выполнен (e2e).' };
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }] }));
+    res.end(JSON.stringify({ choices: [{ message }] }));
   });
 }).listen(8000);
 EOF
@@ -203,13 +205,12 @@ ASK_SET=$(curl -sf -X POST -H "Authorization: Bearer $BOB" -H 'content-type: app
 curl -sf -X POST -H "Authorization: Bearer $BOB" -H 'content-type: application/json' \
   "$CORE/projects/$PROJECT_ID/agent-set" -d "{\"agent_set_id\": $ASK_SET}" >/dev/null
 
-# Рестарт рантайма: перечитать подписку на канал свежей сессии (ответ bob придёт
-# по каналу чата, а не по его личному — bob ни к одному агенту не привязан).
+# Рестарт рантайма: перечитать набор и привязки после смены набора проекта.
 docker restart aga-agent >/dev/null 2>&1 || true
 
 echo "==> agent question appears in chat as text (not a Request ID)"
-TID=$(curl -sf -X POST -H "Authorization: Bearer $ALICE" -H 'content-type: application/json' \
-  "$CORE/chats/$CHAT_ID/messages" -d '{"body":"e2e: выкати прод"}' | jq -r '.message.id')
+TID=$(curl -sf -X POST -H "Authorization: Bearer $BOB" -H 'content-type: application/json' \
+  "$CORE/chats/$CHAT_ID/messages" -d '{"body":"@alice e2e: выкати прод"}' | jq -r '.message.id')
 QID=""
 for _ in $(seq 1 150); do
   Q=$(curl -sf -H "Authorization: Bearer $ALICE" "$CORE/chats/$CHAT_ID/messages" \

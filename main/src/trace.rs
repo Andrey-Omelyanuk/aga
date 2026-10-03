@@ -75,6 +75,8 @@ pub struct AgentDef {
     /// его имени. Нет — агент ни на что не реагирует (настройка на странице
     /// агента; использует `runtime.rs`).
     pub listen_user_id: Option<i64>,
+    /// MCP-серверы каталога, данные агенту (имена).
+    pub mcp: Vec<String>,
 }
 
 /// Набор агентов с их деревом. Прикрепляется к одному или нескольким проектам.
@@ -99,6 +101,9 @@ pub struct AgentSpec {
     /// Привязка к пользователю чата (слушать и отвечать от его имени).
     #[serde(default)]
     pub listen_user_id: Option<i64>,
+    /// MCP-серверы каталога по имени; неизвестные имена пропускаются.
+    #[serde(default)]
+    pub mcp: Vec<String>,
 }
 
 /// Подключение к LLM: название, url API, ключ доступа и модель. Агент набора
@@ -113,6 +118,9 @@ pub struct LlmConnection {
     pub api_key: Option<String>,
     pub model_name: String,
     pub is_default: bool,
+    /// Нативный function calling (`tools` в API). false — запасной текстовый
+    /// режим: команды в блоках ```bash, вопрос — маркер `[ASK_HUMAN]`.
+    pub native_tools: bool,
 }
 
 /// Спек подключения при создании/обновлении: название, url API, ключ, модель.
@@ -122,6 +130,55 @@ pub struct LlmConnectionSpec {
     pub api_url: String,
     pub api_key: Option<String>,
     pub model_name: String,
+    #[serde(default = "default_native_tools")]
+    pub native_tools: bool,
+}
+
+pub(crate) fn default_native_tools() -> bool {
+    true
+}
+
+/// MCP-сервер из каталога: агенты набора получают его инструменты по имени
+/// (`agent_mcp_servers`). Транспорт `http` — Streamable HTTP по `url` (ключ —
+/// `Authorization: Bearer`); `stdio` — процесс `command`, запускаемый в
+/// воркстейшне агента (cwd — папка агента).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub id: i64,
+    pub name: String,
+    pub transport: String,
+    pub url: String,
+    pub command: String,
+    pub api_key: Option<String>,
+}
+
+/// Спек MCP-сервера при создании/обновлении.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerSpec {
+    pub name: String,
+    pub transport: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+impl McpServerSpec {
+    /// Ошибка заполнения: имя непустое, транспорт `http` (нужен url) или
+    /// `stdio` (нужна команда).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("имя MCP-сервера пустое".into());
+        }
+        match self.transport.as_str() {
+            "http" if self.url.trim().is_empty() => Err("у http-сервера нет url".into()),
+            "stdio" if self.command.trim().is_empty() => Err("у stdio-сервера нет команды".into()),
+            "http" | "stdio" => Ok(()),
+            other => Err(format!("неизвестный транспорт `{other}` (http или stdio)")),
+        }
+    }
 }
 
 /// Вид записи каталога: скилл или сокращение. Скиллы даются агентам;
@@ -383,7 +440,8 @@ impl TraceStore {
                 api_url TEXT NOT NULL,
                 api_key TEXT,
                 model TEXT NOT NULL DEFAULT '',
-                is_default INTEGER NOT NULL DEFAULT 0
+                is_default INTEGER NOT NULL DEFAULT 0,
+                native_tools INTEGER NOT NULL DEFAULT 1
             )
             "#,
         )
@@ -415,6 +473,36 @@ impl TraceStore {
                 FOREIGN KEY (set_id) REFERENCES agent_sets(id) ON DELETE CASCADE,
                 FOREIGN KEY (parent_id) REFERENCES agents(id) ON DELETE CASCADE,
                 FOREIGN KEY (llm_id) REFERENCES llm_connections(id) ON DELETE SET NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        // Каталог MCP-серверов и их привязка к агентам (как скиллы: по id,
+        // переименование не рвёт ссылку, удаление отвязывает каскадом).
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                transport TEXT NOT NULL DEFAULT 'http',
+                url TEXT NOT NULL DEFAULT '',
+                command TEXT NOT NULL DEFAULT '',
+                api_key TEXT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS agent_mcp_servers (
+                agent_id INTEGER NOT NULL,
+                server_id INTEGER NOT NULL,
+                PRIMARY KEY (agent_id, server_id),
+                FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+                FOREIGN KEY (server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
             )
             "#,
         )
@@ -809,6 +897,16 @@ impl TraceStore {
             for cap in &spec.skills {
                 Self::link_capability(&mut *tx, agent_id, CapabilityKind::Skill, cap).await?;
             }
+            for name in &spec.mcp {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO agent_mcp_servers (agent_id, server_id)
+                     SELECT ?, id FROM mcp_servers WHERE name = ?",
+                )
+                .bind(agent_id)
+                .bind(name)
+                .execute(&mut **tx)
+                .await?;
+            }
         }
         Ok(())
     }
@@ -876,6 +974,16 @@ impl TraceStore {
                     });
                 }
             }
+            let mcp = sqlx::query(
+                "SELECT m.name FROM agent_mcp_servers am JOIN mcp_servers m ON m.id = am.server_id
+                 WHERE am.agent_id = ? ORDER BY m.name",
+            )
+            .bind(agent_id)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
             agents.push(AgentDef {
                 id: agent_id,
                 name: r.get("name"),
@@ -887,6 +995,7 @@ impl TraceStore {
                 skills,
                 territory: Default::default(),
                 listen_user_id: r.get("listen_user_id"),
+                mcp,
             });
         }
         let mut set = AgentSet {
@@ -929,6 +1038,108 @@ impl TraceStore {
         Ok(result.rows_affected() > 0)
     }
 
+    // === Каталог MCP-серверов ===
+
+    fn mcp_row(r: &sqlx::sqlite::SqliteRow) -> McpServer {
+        McpServer {
+            id: r.get("id"),
+            name: r.get("name"),
+            transport: r.get("transport"),
+            url: r.get("url"),
+            command: r.get("command"),
+            api_key: r.get("api_key"),
+        }
+    }
+
+    pub async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, name, transport, url, command, api_key FROM mcp_servers ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(Self::mcp_row).collect())
+    }
+
+    pub async fn get_mcp_server(&self, id: i64) -> Result<Option<McpServer>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, name, transport, url, command, api_key FROM mcp_servers WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.as_ref().map(Self::mcp_row))
+    }
+
+    /// MCP-серверы по именам (порядок имён; неизвестные пропускаются).
+    pub async fn mcp_servers_by_names(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<McpServer>, sqlx::Error> {
+        let all = self.list_mcp_servers().await?;
+        Ok(names
+            .iter()
+            .filter_map(|n| all.iter().find(|s| &s.name == n).cloned())
+            .collect())
+    }
+
+    /// Занято ли имя другим MCP-сервером.
+    pub async fn mcp_server_name_taken(
+        &self,
+        name: &str,
+        exclude_id: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query("SELECT COUNT(*) AS c FROM mcp_servers WHERE name = ? AND id != ?")
+            .bind(name)
+            .bind(exclude_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("c") > 0)
+    }
+
+    pub async fn create_mcp_server(&self, spec: &McpServerSpec) -> Result<i64, sqlx::Error> {
+        let result = sqlx::query(
+            "INSERT INTO mcp_servers (name, transport, url, command, api_key) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(spec.name.trim())
+        .bind(&spec.transport)
+        .bind(spec.url.trim())
+        .bind(spec.command.trim())
+        .bind(&spec.api_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Изменить MCP-сервер. false — сервера нет. Агенты ссылаются по id —
+    /// переименование привязки не рвёт.
+    pub async fn update_mcp_server(
+        &self,
+        id: i64,
+        spec: &McpServerSpec,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE mcp_servers SET name = ?, transport = ?, url = ?, command = ?, api_key = ? WHERE id = ?",
+        )
+        .bind(spec.name.trim())
+        .bind(&spec.transport)
+        .bind(spec.url.trim())
+        .bind(spec.command.trim())
+        .bind(&spec.api_key)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Удалить MCP-сервер: привязки агентов уходят каскадом.
+    pub async fn delete_mcp_server(&self, id: i64) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM mcp_servers WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // === Методы для управления подключениями к LLM ===
 
     fn llm_row(&self, r: &sqlx::sqlite::SqliteRow) -> LlmConnection {
@@ -939,6 +1150,7 @@ impl TraceStore {
             api_key: r.get("api_key"),
             model_name: r.get("model"),
             is_default: r.get::<i64, _>("is_default") != 0,
+            native_tools: r.get::<i64, _>("native_tools") != 0,
         }
     }
 
@@ -948,12 +1160,13 @@ impl TraceStore {
         spec: &LlmConnectionSpec,
     ) -> Result<i64, sqlx::Error> {
         let result = sqlx::query(
-            "INSERT INTO llm_connections (name, api_url, api_key, model) VALUES (?, ?, ?, ?)",
+            "INSERT INTO llm_connections (name, api_url, api_key, model, native_tools) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&spec.name)
         .bind(&spec.api_url)
         .bind(&spec.api_key)
         .bind(&spec.model_name)
+        .bind(spec.native_tools)
         .execute(&self.pool)
         .await?;
         Ok(result.last_insert_rowid())
@@ -967,12 +1180,13 @@ impl TraceStore {
         spec: &LlmConnectionSpec,
     ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
-            "UPDATE llm_connections SET name = ?, api_url = ?, api_key = ?, model = ? WHERE id = ?",
+            "UPDATE llm_connections SET name = ?, api_url = ?, api_key = ?, model = ?, native_tools = ? WHERE id = ?",
         )
         .bind(&spec.name)
         .bind(&spec.api_url)
         .bind(&spec.api_key)
         .bind(&spec.model_name)
+        .bind(spec.native_tools)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -993,7 +1207,7 @@ impl TraceStore {
 
     pub async fn get_llm_connection(&self, id: i64) -> Result<Option<LlmConnection>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, name, api_url, api_key, model, is_default
+            "SELECT id, name, api_url, api_key, model, is_default, native_tools
              FROM llm_connections WHERE id = ?",
         )
         .bind(id)
@@ -1004,7 +1218,7 @@ impl TraceStore {
 
     pub async fn list_llm_connections(&self) -> Result<Vec<LlmConnection>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, name, api_url, api_key, model, is_default
+            "SELECT id, name, api_url, api_key, model, is_default, native_tools
              FROM llm_connections ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -1039,7 +1253,7 @@ impl TraceStore {
     /// Дефолтная LLM (одна). None — дефолт не выбран.
     pub async fn default_llm_connection(&self) -> Result<Option<LlmConnection>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, name, api_url, api_key, model, is_default
+            "SELECT id, name, api_url, api_key, model, is_default, native_tools
              FROM llm_connections WHERE is_default = 1",
         )
         .fetch_optional(&self.pool)
@@ -1058,6 +1272,7 @@ impl TraceStore {
             temperature: 0.7,
             api_url: None,
             api_key: None,
+            native_tools: true,
         };
         // Своё подключение важнее дефолта; ссылка на удалённое — как отсутствие.
         let conn = match agent.llm_id {
@@ -1069,6 +1284,7 @@ impl TraceStore {
             llm.model = Some(conn.model_name);
             llm.api_url = Some(conn.api_url);
             llm.api_key = conn.api_key;
+            llm.native_tools = conn.native_tools;
         }
         Ok(llm)
     }
@@ -1413,12 +1629,14 @@ impl TraceStore {
             "tasks",
             "project_agent_set",
             "agent_capabilities",
+            "agent_mcp_servers",
             "capability_history",
             "agents",
             "agent_sets",
             "capabilities",
             "projects",
             "llm_connections",
+            "mcp_servers",
         ] {
             sqlx::query(&format!("DELETE FROM {table}"))
                 .execute(&self.pool)
@@ -1602,8 +1820,8 @@ async fn migrate_agents_listen_user_column(pool: &SqlitePool) -> Result<(), sqlx
     Ok(())
 }
 
-/// Миграция старых БД: у подключения к LLM появились модель (`model`) и флаг
-/// дефолта (`is_default`). Модель больше не из env — она живёт в подключении;
+/// Миграция старых БД: у подключения к LLM появились модель (`model`), флаг
+/// дефолта (`is_default`) и режим инструментов (`native_tools`, по умолчанию 1). Модель больше не из env — она живёт в подключении;
 /// старые строки получают пустую модель (их правит пользователь на странице).
 async fn migrate_llm_connection_columns(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let cols: Vec<String> = sqlx::query("PRAGMA table_info(llm_connections)")
@@ -1621,6 +1839,13 @@ async fn migrate_llm_connection_columns(pool: &SqlitePool) -> Result<(), sqlx::E
         sqlx::query("ALTER TABLE llm_connections ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await?;
+    }
+    if !cols.iter().any(|c| c == "native_tools") {
+        sqlx::query(
+            "ALTER TABLE llm_connections ADD COLUMN native_tools INTEGER NOT NULL DEFAULT 1",
+        )
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
@@ -1812,6 +2037,7 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -1955,6 +2181,7 @@ mod tests {
             parent: parent.map(|s| s.to_string()),
             skills: vec![],
             listen_user_id: None,
+            mcp: vec![],
         }
     }
 
@@ -1999,6 +2226,7 @@ mod tests {
                 api_url: "http://llm/v1".to_string(),
                 api_key: Some("key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2011,6 +2239,7 @@ mod tests {
             parent: None,
             skills: vec![],
             listen_user_id: None,
+            mcp: vec![],
         };
         let s2 = AgentSpec {
             name: "deploy".to_string(),
@@ -2021,6 +2250,7 @@ mod tests {
             parent: None,
             skills: vec![],
             listen_user_id: None,
+            mcp: vec![],
         };
         let set_id = store.create_agent_set("ops", &[s1, s2]).await.unwrap();
         let set = store.get_agent_set(set_id).await.unwrap().unwrap();
@@ -2048,6 +2278,7 @@ mod tests {
                 api_url: "http://old/v1".to_string(),
                 api_key: Some("old-key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2063,6 +2294,7 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -2082,6 +2314,7 @@ mod tests {
                     api_url: "http://new/v1".to_string(),
                     api_key: Some("new-key".to_string()),
                     model_name: "qwen3:1b".to_string(),
+                    native_tools: true,
                 },
             )
             .await
@@ -2108,6 +2341,7 @@ mod tests {
                 api_url: "http://conn/v1".to_string(),
                 api_key: Some("key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2124,6 +2358,7 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -2158,6 +2393,7 @@ mod tests {
                 api_url: "http://default/v1".to_string(),
                 api_key: Some("default-key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2174,6 +2410,7 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -2200,6 +2437,7 @@ mod tests {
                 api_url: "http://default/v1".to_string(),
                 api_key: None,
                 model_name: "default-model".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2210,6 +2448,7 @@ mod tests {
                 api_url: "http://own/v1".to_string(),
                 api_key: Some("own-key".to_string()),
                 model_name: "own-model".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2225,6 +2464,7 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -2251,6 +2491,7 @@ mod tests {
                 api_url: "http://a/v1".to_string(),
                 api_key: None,
                 model_name: "a-model".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2260,6 +2501,7 @@ mod tests {
                 api_url: "http://b/v1".to_string(),
                 api_key: None,
                 model_name: "b-model".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2287,6 +2529,7 @@ mod tests {
                 api_url: "http://llm/v1".to_string(),
                 api_key: Some("key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
+                native_tools: true,
             })
             .await
             .unwrap();
@@ -2503,6 +2746,7 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -2558,6 +2802,7 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -2594,6 +2839,7 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -2723,6 +2969,7 @@ mod tests {
                     parent: None,
                     skills: vec![cap("review")],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await

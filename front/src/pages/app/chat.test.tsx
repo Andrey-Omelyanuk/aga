@@ -8,6 +8,7 @@ import pub_sub from '@/services/pub-sub';
 import http from '@/services/http';
 import { loadChatDetail } from '@/models/chat';
 import { Shortcut } from '@/models/project';
+import { User } from '@/models/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -15,6 +16,8 @@ let messageHandler: ((data: any) => void) | null = null;
 
 // Сокращения для подсказки: тесты подставляют фикстуры до рендера.
 let shortcutItems: any[] = [];
+// Пользователи системы (не только участники чата) для подсказки «@».
+let userItems: any[] = [];
 
 vi.mock('@/services/pub-sub', () => ({
   default: {
@@ -50,6 +53,9 @@ vi.mock('@/utils/mobx', () => ({
   useQuery: (model: any) => {
     if (model === Shortcut) {
       return [{ items: shortcutItems, load: vi.fn() }, Promise.resolve(true)];
+    }
+    if (model === User) {
+      return [{ items: userItems, load: vi.fn() }, Promise.resolve(true)];
     }
     return [{ items: [], load: vi.fn() }, Promise.resolve(true)];
   },
@@ -722,6 +728,25 @@ describe('ChatPage', () => {
     const names = [...container.querySelectorAll('li')].map((li) => li.textContent).join(' ');
     expect(names).toContain('@bob');
     expect(names).not.toContain('@alice');
+    act(() => root.unmount());
+  });
+
+  it('по «@» после участников чата предлагаются остальные пользователи, кроме агентов', async () => {
+    vi.mocked(loadChatDetail).mockResolvedValue(participantsChat());
+    userItems = [
+      { id: 900, name: 'reviewer', kind: 'human' },
+      { id: 901, name: 'robot', kind: 'agent' },
+    ];
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(container), '@');
+    const names = [...container.querySelectorAll('li')].map((li) => li.textContent ?? '');
+    const at = (n: string) => names.findIndex((t) => t.includes(n));
+    // Участники — первыми, остальные пользователи — после; агентов нет.
+    expect(at('@alice')).toBeGreaterThanOrEqual(0);
+    expect(at('@reviewer')).toBeGreaterThan(at('@bob'));
+    expect(at('@robot')).toBe(-1);
+    userItems = [];
     act(() => root.unmount());
   });
 

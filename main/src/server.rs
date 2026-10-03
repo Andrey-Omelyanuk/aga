@@ -87,6 +87,9 @@ pub struct LlmConnectionRequest {
     pub api_url: String,
     pub api_key: Option<String>,
     pub model_name: String,
+    /// Нативный function calling; не задан — true (текстовый режим — запасной).
+    #[serde(default = "crate::trace::default_native_tools")]
+    pub native_tools: bool,
 }
 
 /// Выбор дефолтной LLM на странице «LLM»: id подключения или null (снять выбор).
@@ -159,6 +162,20 @@ pub fn create_router(state: AppState) -> Router {
                 .patch(update_llm_connection),
         )
         .route("/settings/llm-default", post(set_llm_default))
+        // === Каталог MCP-серверов ===
+        // http (Streamable HTTP по url) или stdio (команда в воркстейшне
+        // агента). Агент набора получает инструменты серверов по имени.
+        .route(
+            "/mcp-servers",
+            get(list_mcp_servers).post(create_mcp_server),
+        )
+        .route(
+            "/mcp-servers/:id",
+            get(get_mcp_server)
+                .patch(update_mcp_server)
+                .delete(delete_mcp_server),
+        )
+        .route("/mcp-servers/:id/tools", get(mcp_server_tools))
         // === Каталог способностей (скиллы и сокращения) ===
         // У записи одно текущее содержимое и история изменений (кто, когда и
         // что сделал). ?deleted=1 — список «Удалённые» (история переживает
@@ -423,6 +440,151 @@ async fn update_agent_set(
     }
 }
 
+// === API каталога MCP-серверов ===
+
+async fn list_mcp_servers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::trace::McpServer>>, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .list_mcp_servers()
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn get_mcp_server(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::trace::McpServer>, StatusCode> {
+    current_user(&state, &headers).await?;
+    state
+        .trace_store
+        .get_mcp_server(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
+        .map(Json)
+}
+
+/// Проверка спека: заполнение (400) и уникальность имени (409).
+async fn check_mcp_spec(
+    state: &AppState,
+    spec: &crate::trace::McpServerSpec,
+    exclude_id: i64,
+) -> Result<(), StatusCode> {
+    spec.validate().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if state
+        .trace_store
+        .mcp_server_name_taken(spec.name.trim(), exclude_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(())
+}
+
+async fn create_mcp_server(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(spec): Json<crate::trace::McpServerSpec>,
+) -> Result<Json<crate::trace::McpServer>, StatusCode> {
+    current_user(&state, &headers).await?;
+    check_mcp_spec(&state, &spec, 0).await?;
+    let id = state
+        .trace_store
+        .create_mcp_server(&spec)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .trace_store
+        .get_mcp_server(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+        .map(Json)
+}
+
+async fn update_mcp_server(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(spec): Json<crate::trace::McpServerSpec>,
+) -> Result<Json<crate::trace::McpServer>, StatusCode> {
+    current_user(&state, &headers).await?;
+    check_mcp_spec(&state, &spec, id).await?;
+    match state.trace_store.update_mcp_server(id, &spec).await {
+        Ok(true) => state
+            .trace_store
+            .get_mcp_server(id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)
+            .map(Json),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn delete_mcp_server(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    current_user(&state, &headers).await?;
+    match state.trace_store.delete_mcp_server(id).await {
+        Ok(true) => Ok(StatusCode::OK),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Проверка http-сервера: подключиться и вернуть его инструменты. Сбой
+/// подключения — 502 с текстом ошибки. stdio-сервер запускается только в
+/// воркстейшне агента — отсюда не проверяется (400).
+async fn mcp_server_tools(
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::mcp::McpTool>>, (StatusCode, String)> {
+    current_user(&state, &headers)
+        .await
+        .map_err(|code| (code, String::new()))?;
+    let server = state
+        .trace_store
+        .get_mcp_server(id)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, String::new()))?
+        .ok_or((StatusCode::NOT_FOUND, String::new()))?;
+    if server.transport != "http" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "stdio-сервер запускается в воркстейшне агента и отсюда не проверяется".into(),
+        ));
+    }
+    // У http-сервера процесса нет — запуск не понадобится.
+    let launch = |c: &str| {
+        crate::agent::exec_command(
+            &crate::agent::Executor::Sh,
+            c,
+            true,
+            crate::agent::RunAs::Station,
+        )
+    };
+    let mut client = crate::mcp::McpClient::connect(&server, launch)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    client
+        .list_tools()
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))
+}
+
 // === API для управления подключениями к LLM ===
 
 async fn list_llm_connections(
@@ -449,6 +611,7 @@ async fn create_llm_connection(
         api_url: payload.api_url,
         api_key: payload.api_key,
         model_name: payload.model_name,
+        native_tools: payload.native_tools,
     };
     match state.trace_store.create_llm_connection(&spec).await {
         Ok(id) => state
@@ -504,6 +667,7 @@ async fn update_llm_connection(
         api_url: payload.api_url,
         api_key: payload.api_key,
         model_name: payload.model_name,
+        native_tools: payload.native_tools,
     };
     match state.trace_store.update_llm_connection(id, &spec).await {
         Ok(true) => state
@@ -3037,6 +3201,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_servers_catalog_and_agent_links_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (status, body) = post_json(
+            "/mcp-servers",
+            &headers,
+            state.clone(),
+            serde_json::json!({"name": "gh", "transport": "http", "url": "http://mcp/gh", "api_key": "k"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        // Имя уникально; транспорт и его обязательное поле проверяются.
+        for (spec, code) in [
+            (
+                serde_json::json!({"name": "gh", "transport": "http", "url": "http://x"}),
+                StatusCode::CONFLICT,
+            ),
+            (
+                serde_json::json!({"name": "fs", "transport": "stdio"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"name": "fs", "transport": "ws", "url": "x"}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, _) = post_json("/mcp-servers", &headers, state.clone(), spec).await;
+            assert_eq!(status, code);
+        }
+        let mut agent = agent_json("dev");
+        agent["mcp"] = serde_json::json!(["gh", "missing"]);
+        let (status, body) = post_json(
+            "/agent-sets",
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [agent] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let set_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let agent_mcp = |body: &str| {
+            serde_json::from_str::<serde_json::Value>(body).unwrap()["agents"][0]["mcp"].clone()
+        };
+        let (_, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
+        // Неизвестное имя пропущено.
+        assert_eq!(agent_mcp(&body), serde_json::json!(["gh"]));
+        // Переименование сервера не рвёт привязку агента.
+        let (status, _) = patch_json(
+            &format!("/mcp-servers/{id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({"name": "github", "transport": "http", "url": "http://mcp/gh"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
+        assert_eq!(agent_mcp(&body), serde_json::json!(["github"]));
+        // Удаление сервера отвязывает его от агентов.
+        let (status, _) = delete_json(&format!("/mcp-servers/{id}"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body) = get(&format!("/agent-sets/{set_id}"), &headers, state.clone()).await;
+        assert_eq!(agent_mcp(&body), serde_json::json!([]));
+        let (_, body) = get("/mcp-servers", &headers, state.clone()).await;
+        assert_eq!(body, "[]");
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn mcp_http_server_tools_checked_via_api() {
+        let (state, file) = test_state(true).await;
+        let headers = auth_headers("alice", &["participant"]);
+        let (url, server, _) = crate::mcp::tests::http_server().await;
+        let (_, body) = post_json(
+            "/mcp-servers",
+            &headers,
+            state.clone(),
+            serde_json::json!({"name": "h", "transport": "http", "url": url}),
+        )
+        .await;
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, body) =
+            get(&format!("/mcp-servers/{id}/tools"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"echo\""), "{body}");
+        // stdio-сервер отсюда не проверяется.
+        let (_, body) = post_json(
+            "/mcp-servers",
+            &headers,
+            state.clone(),
+            serde_json::json!({"name": "fs", "transport": "stdio", "command": "mcp-fs"}),
+        )
+        .await;
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, _) = get(&format!("/mcp-servers/{id}/tools"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Недоступный http-сервер — 502 с текстом ошибки.
+        let (_, body) = post_json(
+            "/mcp-servers",
+            &headers,
+            state.clone(),
+            serde_json::json!({"name": "down", "transport": "http", "url": "http://127.0.0.1:1/mcp"}),
+        )
+        .await;
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, body) =
+            get(&format!("/mcp-servers/{id}/tools"), &headers, state.clone()).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.contains("HTTP"), "{body}");
+        server.abort();
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
     async fn created_llm_connection_listed_via_api() {
         let (state, file) = test_state(true).await;
         let headers = auth_headers("alice", &["participant"]);
@@ -3253,6 +3541,7 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -3293,6 +3582,7 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -3310,6 +3600,7 @@ mod tests {
                     parent: None,
                     skills: vec![],
                     listen_user_id: None,
+                    mcp: vec![],
                 }],
             )
             .await
@@ -4202,9 +4493,21 @@ mod tests {
         let chat_id = create_chat(&alice, &state).await;
         send_chat_message(chat_id, "/secret вопрос", &alice, &state).await;
         // В контекст агентов идёт только тело: скрытой заметки там нет.
-        let context = state.chat_store.context_tail(chat_id).await.unwrap();
-        assert!(context.contains("/secret вопрос"));
-        assert!(!context.contains("СЕКРЕТНАЯ ЗАМЕТКА"));
+        let trigger = state
+            .chat_store
+            .list_messages(chat_id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        // Глазами другого участника (агента): чужое сообщение — только видимый текст.
+        let context =
+            crate::context::build_context(&state.chat_store, chat_id, 0, trigger.id, true)
+                .await
+                .unwrap();
+        let text: String = context.iter().map(|m| m.content.clone()).collect();
+        assert!(text.contains("/secret вопрос"));
+        assert!(!text.contains("СЕКРЕТНАЯ ЗАМЕТКА"));
         cleanup(&file).await;
     }
 

@@ -5,7 +5,8 @@ import { api } from '@/services/http-adapter';
  *  «model» зарезервировано базовым классом mobx-модели). Агент набора ссылается
  *  на подключение (llm_id); одно подключение — дефолтное (is_default): к нему
  *  ходят агенты без своего подключения. Ключ отдаётся как есть, без маскировки.
- *  Дефолтной LLM из env нет. */
+ *  Дефолтной LLM из env нет. native_tools — режим инструментов агента:
+ *  нативный function calling (true) или запасной текстовый — блоки ```bash. */
 @api('llms')
 @model
 export class Llm extends Model {
@@ -15,4 +16,5 @@ export class Llm extends Model {
   @field(STRING()) api_key?: string | null;
   @field(STRING()) model_name!: string;
   @field(BOOLEAN()) is_default!: boolean;
+  @field(BOOLEAN()) native_tools!: boolean;
 }

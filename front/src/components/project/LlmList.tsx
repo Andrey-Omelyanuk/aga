@@ -19,17 +19,41 @@ interface LlmDraft {
   api_url: string;
   api_key: string;
   model_name: string;
+  native_tools: boolean;
 }
 
-const emptyDraft = (): LlmDraft => ({ name: '', api_url: '', api_key: '', model_name: '' });
+const emptyDraft = (): LlmDraft => ({
+  name: '',
+  api_url: '',
+  api_key: '',
+  model_name: '',
+  native_tools: true,
+});
 const fromLlm = (c: Llm): LlmDraft => ({
   name: c.name,
   api_url: c.api_url,
   api_key: c.api_key ?? '',
   model_name: c.model_name,
+  native_tools: c.native_tools,
 });
 
-/** Подключения к LLM: создание, правка (имя/url/ключ/модель), удаление и
+/** Флажок режима инструментов: нативный function calling или запасной
+ *  текстовый (модель пишет команды блоками ```bash). */
+const NativeToolsToggle = (props: { checked: boolean; onChange: (v: boolean) => void }) => (
+  <label
+    className="flex items-center gap-2 text-sm"
+    title="Выключено — запасной текстовый режим для моделей без function calling"
+  >
+    <input
+      type="checkbox"
+      checked={props.checked}
+      onChange={(e) => props.onChange(e.target.checked)}
+    />
+    Tool calling
+  </label>
+);
+
+/** Подключения к LLM: создание, правка (имя/url/ключ/модель/режим), удаление и
  *  выбор дефолтной LLM (одно из подключений; к нему ходят агенты без своего).
  *  Ключ показывается как есть, маскировки нет. */
 export const LlmList = observer((props: LlmListProps) => {
@@ -48,6 +72,7 @@ export const LlmList = observer((props: LlmListProps) => {
         api_url: draft.api_url.trim(),
         api_key: draft.api_key.trim() || null,
         model_name: draft.model_name.trim(),
+        native_tools: draft.native_tools,
       });
       toaster.show({ message: 'Подключение создано', intent: 'success' });
       setDraft(emptyDraft());
@@ -65,6 +90,7 @@ export const LlmList = observer((props: LlmListProps) => {
         api_url: edit.api_url.trim(),
         api_key: edit.api_key.trim() || null,
         model_name: edit.model_name.trim(),
+        native_tools: edit.native_tools,
       });
       toaster.show({ message: 'Подключение сохранено', intent: 'success' });
       setEditingId(null);
@@ -121,6 +147,10 @@ export const LlmList = observer((props: LlmListProps) => {
           onChange={(e) => setDraft((d) => ({ ...d, model_name: e.target.value }))}
           className="max-w-40"
         />
+        <NativeToolsToggle
+          checked={draft.native_tools}
+          onChange={(v) => setDraft((d) => ({ ...d, native_tools: v }))}
+        />
         <Button variant="secondary" onClick={create}>
           Создать подключение
         </Button>
@@ -170,6 +200,10 @@ export const LlmList = observer((props: LlmListProps) => {
                   onChange={(e) => setEdit((d) => ({ ...d, model_name: e.target.value }))}
                   className="max-w-40"
                 />
+                <NativeToolsToggle
+                  checked={edit.native_tools}
+                  onChange={(v) => setEdit((d) => ({ ...d, native_tools: v }))}
+                />
                 <Button onClick={() => void save(c.id)}>Сохранить</Button>
                 <Button variant="ghost" onClick={() => setEditingId(null)}>
                   Отмена
@@ -190,6 +224,9 @@ export const LlmList = observer((props: LlmListProps) => {
                   <div className="text-xs text-slate-500">Ключ: {c.api_key}</div>
                 )}
                 <div className="text-xs text-slate-500">Модель: {c.model_name}</div>
+                <div className="text-xs text-slate-500">
+                  Инструменты: {c.native_tools ? 'tool calling' : 'текстовый режим (```bash)'}
+                </div>
                 <div className="mt-2 flex gap-2">
                   <Button
                     variant="outline"

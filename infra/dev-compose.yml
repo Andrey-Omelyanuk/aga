@@ -43,6 +43,8 @@ services:
       - AGA_WS_BACKEND=docker
       # Образ воркстейшна: тот же, что собирает compose (server ниже).
       - AGA_K8S_IMAGE=aga-workstation:dev
+      - AGA_MAX_THREAD_DEPTH=${AGA_MAX_THREAD_DEPTH:-10}
+      - AGA_MAX_THREAD_MESSAGES=${AGA_MAX_THREAD_MESSAGES:-100}
       # SSH-ключ aga (git+ssh для воркстейшнов): приватный задаёт админ в .env;
       # ядро прокидывает его в контейнеры ws (inject_ssh_key) при подъёме.
       - AGA_SSH_PRIVATE_KEY=${AGA_SSH_PRIVATE_KEY:-}
@@ -54,7 +56,8 @@ services:
     restart: "no"
 
   # Агент-рантайм — отдельный процесс того же образа (`aga agent`): подписан на
-  # Centrifugo (SSE), реагирует на сообщения привязанных пользователей (runtime.rs).
+  # общий канал Centrifugo (SSE), отвечает за пользователей, к которым привязаны
+  # агенты, когда их спрашивают (@имя, нить, ответ на вопрос; runtime.rs).
   # HTTP не раздаёт — чат обслуживает core. Общая БД (тот же aga-data, SQLite WAL),
   # команды агентов идут в контейнеры ws через docker.sock (AGA_WS_BACKEND=docker).
   # Centrifugo обязателен: без него рантайм не поднимается (нет источника событий).
@@ -73,6 +76,8 @@ services:
       - AGA_DB_PATH=/var/lib/aga/trace.db
       - AGA_WS_BACKEND=docker
       - AGA_K8S_IMAGE=aga-workstation:dev
+      - AGA_MAX_THREAD_DEPTH=${AGA_MAX_THREAD_DEPTH:-10}
+      - AGA_MAX_THREAD_MESSAGES=${AGA_MAX_THREAD_MESSAGES:-100}
       - AGA_SSH_PRIVATE_KEY=${AGA_SSH_PRIVATE_KEY:-}
     depends_on:
       - core
@@ -148,8 +153,7 @@ services:
       # SPA живёт на dev.localhost (прокси) — это и есть Origin websocket-соединения.
       - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=http://dev.localhost
       # Unidirectional SSE (/connection/sse): им пользуется агент-рантайм
-      # (`aga agent`) для серверных подписок на каналы user:<id> и чатов сессий
-      # (runtime.rs).
+      # (`aga agent`) для серверной подписки на общий канал (runtime.rs).
       - CENTRIFUGO_UNI_SSE_ENABLED=true
       - CENTRIFUGO_UNI_SSE_HANDLER_PREFIX=/connection/sse
       # v6: каналы с `:` — именованные пространства, их надо объявить

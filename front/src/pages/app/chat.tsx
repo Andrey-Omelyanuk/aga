@@ -8,6 +8,7 @@ import { ChatList } from '@/components/chat/ChatList';
 import { MessageList } from '@/components/chat/MessageList';
 import { Chat, loadChatDetail } from '@/models/chat';
 import { AgentSet, Shortcut } from '@/models/project';
+import { User } from '@/models/core';
 import { useQuery } from '@/utils/mobx';
 import pub_sub from '@/services/pub-sub';
 import { cn } from '@/lib/utils';
@@ -44,6 +45,7 @@ const ChatPage = observer(() => {
   const [chats] = useQuery(Chat, { autoupdate: true });
   const [agentSets] = useQuery(AgentSet, { autoupdate: true });
   const [shortcuts] = useQuery(Shortcut, { autoupdate: true });
+  const [users] = useQuery(User, { autoupdate: true });
   const seen = new Set<string>();
   const agents: string[] = [];
   for (const set of agentSets.items) {
@@ -121,7 +123,9 @@ const ChatPage = observer(() => {
   };
 
   // Автодополнение при вводе: «/» — сокращения (перечень с Config → Shortcuts),
-  // «@» — люди-участники открытого чата (агентов в список не берём). Список
+  // «@» — люди: сначала участники открытого чата, затем остальные пользователи
+  // (упоминание `@имя` зовёт того, кого спрашивают, — в том числе агента,
+  // который обслуживает пользователя; агентов-участников в список не берём). Список
   // фильтруется по мере набора, Tab/Enter дополняет до «/имя » / «@имя »
   // (пробел вставляется сам). Escape прячет список, не трогая текст.
   const wordStart = lastWordStart(draft);
@@ -139,14 +143,19 @@ const ChatPage = observer(() => {
         .map((s) => ({ id: s.id, name: s.name, hint: s.content }));
     }
     if (trigger === '@') {
-      return (currentChat?.participants ?? [])
-        .filter((p) => p.kind !== 'agent')
-        .filter((p) => p.name.toLowerCase().startsWith(q))
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map((p) => ({ id: p.id, name: p.name }));
+      const people = (list: Array<{ id: number; name: string; kind?: string }>) =>
+        list
+          .filter((p) => p.kind !== 'agent')
+          .filter((p) => p.name.toLowerCase().startsWith(q))
+          .sort((a, b) => a.name.localeCompare(b.name));
+      const participants = people(currentChat?.participants ?? []);
+      const others = people(users.items).filter(
+        (u) => !participants.some((p) => p.id === u.id),
+      );
+      return [...participants, ...others].map((p) => ({ id: p.id, name: p.name }));
     }
     return [];
-  }, [queryPart, trigger, shortcuts.items, currentChat?.participants]);
+  }, [queryPart, trigger, shortcuts.items, users.items, currentChat?.participants]);
 
   const [dismissed, setDismissed] = useState(false);
   const [highlight, setHighlight] = useState(0);

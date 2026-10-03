@@ -13,6 +13,9 @@ interface ErLabels {
   llm: string;
   llmAttrs: string[];
   llmChoice: string;
+  mcp: string;
+  mcpAttrs: string[];
+  mcpBy: string;
   users: string;
   usersNote: string;
   env: string;
@@ -34,6 +37,9 @@ const LABELS: Record<HelpLang, ErLabels> = {
     llm: 'LLM',
     llmAttrs: ['название', 'url, ключ, модель', 'одно — дефолтная'],
     llmChoice: 'выбор подключения; без выбора — дефолтная',
+    mcp: 'MCP',
+    mcpAttrs: ['название', 'http (url) или stdio (команда)'],
+    mcpBy: 'инструменты серверов по имени',
     users: 'Users',
     usersNote: 'участники из SSO (Keycloak)',
     env: 'Env',
@@ -53,6 +59,9 @@ const LABELS: Record<HelpLang, ErLabels> = {
     llm: 'LLM',
     llmAttrs: ['name', 'url, key, model', 'one is default'],
     llmChoice: 'picks a connection; without one — default LLM',
+    mcp: 'MCP',
+    mcpAttrs: ['name', 'http (url) or stdio (command)'],
+    mcpBy: 'server tools by name',
     users: 'Users',
     usersNote: 'members from SSO (Keycloak)',
     env: 'Env',
@@ -114,6 +123,10 @@ export const ErDiagram = ({ lang }: { lang: HelpLang }) => {
             <RelationColumn
               label={t.llmChoice}
               box={<EntityBox name={t.llm} attrs={t.llmAttrs} />}
+            />
+            <RelationColumn
+              label={t.mcpBy}
+              box={<EntityBox name={t.mcp} attrs={t.mcpAttrs} />}
             />
           </div>
         </div>

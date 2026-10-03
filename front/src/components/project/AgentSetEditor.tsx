@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
-import type { Agent, AgentCapability, CatalogItem, Llm } from '@/models/project';
+import type { Agent, AgentCapability, CatalogItem, Llm, McpServer } from '@/models/project';
 import type { User } from '@/models/core';
 export interface AgentSetEditorProps {
   setId: number;
@@ -19,6 +19,8 @@ export interface AgentSetEditorProps {
   /** Пользователи чата: агент привязывается к одному — слушает его сообщения
    * и отвечает от его имени (режим `aga agent`). */
   users: User[];
+  /** Каталог MCP-серверов: агенту отмечаются нужные (по имени). */
+  mcpServers?: McpServer[];
   onSaved: () => void;
 }
 
@@ -33,19 +35,22 @@ const emptyAgent = (name: string): Agent => ({
   skills: [],
   territory: { folder: name, excludes: [] },
   listen_user_id: null,
+  mcp: [],
 });
 
 /** Редактор состава набора: агенты, их территория (по дереву), данные скиллы
- * по имени (без версии), инструменты, выбранное подключение к LLM.
+ * по имени (без версии), инструменты, MCP-серверы, выбранное подключение к LLM.
  * Сохраняется целиком (PATCH). */
 export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
   const { setId, skills, connections, users, onSaved } = props;
+  const mcpServers = props.mcpServers ?? [];
   const [name, setName] = useState(props.name);
   const [agents, setAgents] = useState<Agent[]>(() =>
     props.agents.map((a) => ({
       ...a,
       tools: [...a.tools],
       skills: a.skills.map((s) => ({ ...s })),
+      mcp: [...(a.mcp ?? [])],
       territory: { ...a.territory },
       // Родитель хранится по имени (API принимает `parent`); из id выводим имя.
       parent: a.parent_id != null
@@ -97,6 +102,17 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
     );
   };
 
+  // Включение/выключение MCP-сервера каталога на агенте.
+  const toggleMcp = (agentIndex: number, name: string, enabled: boolean) => {
+    setAgents((prev) =>
+      prev.map((a, i) => {
+        if (i !== agentIndex) return a;
+        const existing = (a.mcp ?? []).filter((n) => n !== name);
+        return { ...a, mcp: enabled ? [...existing, name] : existing };
+      }),
+    );
+  };
+
   const save = async () => {
     setSaving(true);
     try {
@@ -109,6 +125,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
         parent: a.parent ?? null,
         skills: a.skills,
         listen_user_id: a.listen_user_id ?? null,
+        mcp: a.mcp ?? [],
       }));
       await http.patch(`/agent-sets/${setId}`, { name, agents: payloadAgents });
       toaster.show({ message: 'Набор сохранён', intent: 'success' });
@@ -120,29 +137,51 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
     }
   };
 
-  const skillBlock = (items: CatalogItem[], label: string) => {
+  // Скиллы каталога у одного агента: отмеченные — данные ему.
+  const skillBlock = (ai: number, items: CatalogItem[], label: string) => {
     if (items.length === 0) {
       return <div className="text-xs text-slate-400">Каталог «{label}» пуст</div>;
     }
     return (
       <div className="space-y-1">
         <div className="text-xs font-medium text-slate-500">{label}</div>
-        {agents.map((agent, ai) => (
-          <div key={`${label}-${ai}`} className="space-y-1">
-            {items.map((item) => {
-              const given = agent.skills.find((c) => c.name === item.name);
-              return (
-                <label key={item.name} className="flex items-center gap-2 text-xs">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(given)}
-                    onChange={(e) => toggleSkill(ai, item, e.target.checked)}
-                  />
-                  <span className="w-32 truncate">{item.name}</span>
-                </label>
-              );
-            })}
-          </div>
+        {items.map((item) => {
+          const given = agents[ai].skills.find((c) => c.name === item.name);
+          return (
+            <label key={item.name} className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={Boolean(given)}
+                onChange={(e) => toggleSkill(ai, item, e.target.checked)}
+              />
+              <span className="w-32 truncate">{item.name}</span>
+            </label>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // MCP-серверы каталога у одного агента.
+  const mcpBlock = (ai: number) => {
+    if (mcpServers.length === 0) {
+      return <div className="text-xs text-slate-400">Каталог MCP-серверов пуст</div>;
+    }
+    const given = agents[ai].mcp ?? [];
+    return (
+      <div className="space-y-1">
+        <div className="text-xs font-medium text-slate-500">MCP-серверы</div>
+        {mcpServers.map((server) => (
+          <label key={server.id} className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              aria-label={`MCP ${server.name}`}
+              checked={given.includes(server.name)}
+              onChange={(e) => toggleMcp(ai, server.name, e.target.checked)}
+            />
+            <span className="w-32 truncate">{server.name}</span>
+            <span className="text-slate-400">{server.transport}</span>
+          </label>
         ))}
       </div>
     );
@@ -283,7 +322,8 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
               )}
             </div>
             <div className="mt-2 grid grid-cols-2 gap-4">
-              {skillBlock(skills, 'Скиллы')}
+              {skillBlock(i, skills, 'Скиллы')}
+              {mcpBlock(i)}
             </div>
           </Card>
         );

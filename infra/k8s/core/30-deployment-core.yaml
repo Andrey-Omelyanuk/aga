@@ -73,6 +73,16 @@ spec:
                 configMapKeyRef:
                   name: aga-env
                   key: RUST_LOG
+            - name: AGA_MAX_THREAD_DEPTH
+              valueFrom:
+                configMapKeyRef:
+                  name: aga-env
+                  key: AGA_MAX_THREAD_DEPTH
+            - name: AGA_MAX_THREAD_MESSAGES
+              valueFrom:
+                configMapKeyRef:
+                  name: aga-env
+                  key: AGA_MAX_THREAD_MESSAGES
             - name: PORT
               valueFrom:
                 configMapKeyRef:

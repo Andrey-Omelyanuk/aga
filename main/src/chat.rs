@@ -2,8 +2,44 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
-/// Максимальная глубина дерева чатов (вложенность нитей).
-pub const MAX_CHAT_LEVEL: i32 = 30;
+/// Глубина дерева чатов (вложенность нитей) по умолчанию; env
+/// `AGA_MAX_THREAD_DEPTH`.
+pub const DEFAULT_MAX_CHAT_LEVEL: i32 = 10;
+/// Сообщений в одной нити по умолчанию (корневые чаты не ограничены); env
+/// `AGA_MAX_THREAD_MESSAGES`. Вместе с глубиной — предохранитель от
+/// бесконечных переписок участников в нитях.
+pub const DEFAULT_MAX_THREAD_MESSAGES: i64 = 100;
+
+/// Положительное число из env-значения, иначе — дефолт (нет, пусто, мусор, ≤0).
+fn limit_from(value: Option<&str>, default: i64) -> i64 {
+    value
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+/// Предел вложенности нитей (`AGA_MAX_THREAD_DEPTH`, читается один раз).
+pub fn max_chat_level() -> i32 {
+    static LEVEL: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *LEVEL.get_or_init(|| {
+        let v = std::env::var("AGA_MAX_THREAD_DEPTH").ok();
+        limit_from(v.as_deref(), DEFAULT_MAX_CHAT_LEVEL as i64).min(i32::MAX as i64) as i32
+    })
+}
+
+/// Предел сообщений в нити (`AGA_MAX_THREAD_MESSAGES`, читается один раз).
+pub fn max_thread_messages() -> i64 {
+    static MESSAGES: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *MESSAGES.get_or_init(|| {
+        let v = std::env::var("AGA_MAX_THREAD_MESSAGES").ok();
+        limit_from(v.as_deref(), DEFAULT_MAX_THREAD_MESSAGES)
+    })
+}
+
+/// Вид сообщения: обычный текст или шаг работы (вызов инструмента: тело —
+/// команда, скрытая часть — вывод, `tool_call` — вызов JSON-ом).
+pub const KIND_TEXT: &str = "text";
+pub const KIND_STEP: &str = "step";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatUser {
@@ -71,6 +107,10 @@ pub struct Message {
     /// интерпретирует — оно нейтральное; различает источники подписчик
     /// (`runtime.rs`), чтобы не реагировать на записи, сделанные не человеком.
     pub origin: String,
+    /// Вид сообщения: `text` или `step` (шаг работы с инструментом).
+    pub kind: String,
+    /// Вызов инструмента шага JSON-ом (`{"name", "arguments"}`); у текста — None.
+    pub tool_call: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +367,12 @@ impl ChatStore {
             .await?;
         store
             .ensure_column("messages", "origin", "origin TEXT NOT NULL DEFAULT 'user'")
+            .await?;
+        store
+            .ensure_column("messages", "kind", "kind TEXT NOT NULL DEFAULT 'text'")
+            .await?;
+        store
+            .ensure_column("messages", "tool_call", "tool_call TEXT")
             .await?;
 
         // Миграция старых БД: сессионные поля жили в chats, теперь — в
@@ -599,7 +645,7 @@ impl ChatStore {
                 if parent.state != "OPEN" {
                     return Err(sqlx::Error::RowNotFound);
                 }
-                if parent.level + 1 > MAX_CHAT_LEVEL {
+                if parent.level + 1 > max_chat_level() {
                     return Err(sqlx::Error::RowNotFound);
                 }
                 (parent.root_id, parent.level + 1)
@@ -735,9 +781,75 @@ impl ChatStore {
         last_message_id: Option<i64>,
         origin: &str,
     ) -> Result<Option<Message>, sqlx::Error> {
+        self.insert_message(
+            chat_id,
+            author_id,
+            body,
+            hidden,
+            parent_id,
+            last_message_id,
+            origin,
+            KIND_TEXT,
+            None,
+        )
+        .await
+    }
+
+    /// Шаг работы с инструментом: тело — команда, скрытая часть — вывод,
+    /// `tool_call` — вызов JSON-ом (по нему контекст агента восстанавливает
+    /// его прошлые вызовы).
+    pub async fn send_step(
+        &self,
+        chat_id: i64,
+        author_id: i64,
+        body: &str,
+        hidden: &str,
+        tool_call: &str,
+        origin: &str,
+    ) -> Result<Option<Message>, sqlx::Error> {
+        self.insert_message(
+            chat_id,
+            author_id,
+            body,
+            hidden,
+            None,
+            None,
+            origin,
+            KIND_STEP,
+            Some(tool_call),
+        )
+        .await
+    }
+
+    /// Нить заполнена (`max_thread_messages()`) — новые сообщения не принимаются.
+    /// Корневые чаты не ограничены.
+    async fn thread_full(&self, chat: &Chat) -> Result<bool, sqlx::Error> {
+        if chat.level == 0 {
+            return Ok(false);
+        }
+        let row = sqlx::query("SELECT COUNT(*) AS c FROM messages WHERE chat_id = ?")
+            .bind(chat.id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("c") >= max_thread_messages())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_message(
+        &self,
+        chat_id: i64,
+        author_id: i64,
+        body: &str,
+        hidden: &str,
+        parent_id: Option<i64>,
+        last_message_id: Option<i64>,
+        origin: &str,
+        kind: &str,
+        tool_call: Option<&str>,
+    ) -> Result<Option<Message>, sqlx::Error> {
         let chat = self.get_chat(chat_id).await?;
         let Some(chat) = chat else { return Ok(None) };
-        if chat.state != "OPEN" {
+        if chat.state != "OPEN" || self.thread_full(&chat).await? {
             return Ok(None);
         }
 
@@ -752,7 +864,7 @@ impl ChatStore {
         let current_last = last_msgs.first().copied().or(last_message_id);
 
         let result = sqlx::query(
-            "INSERT INTO messages (chat_id, parent_id, author_id, last_message_id, body, hidden, origin) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (chat_id, parent_id, author_id, last_message_id, body, hidden, origin, kind, tool_call) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(chat_id)
         .bind(parent_id)
@@ -761,6 +873,8 @@ impl ChatStore {
         .bind(body)
         .bind(hidden)
         .bind(origin)
+        .bind(kind)
+        .bind(tool_call)
         .execute(&self.pool)
         .await?;
         let msg_id = result.last_insert_rowid();
@@ -773,51 +887,9 @@ impl ChatStore {
         self.get_message(msg_id).await
     }
 
-    /// Хвост диалога для контекста агента: последние 30 сообщений чата, по
-    /// порядку, каждая строка с автором (`имя: тело`) — агент должен отличать
-    /// свои вопросы и шаги работы от ответов людей. Скрытая часть (`hidden`)
-    /// не входит — в LLM уходит только видимый текст.
-    pub async fn context_tail(&self, chat_id: i64) -> Option<String> {
-        let rows = sqlx::query(
-            "SELECT m.body, COALESCE(u.name, 'unknown') AS author \
-             FROM messages m LEFT JOIN chat_users u ON u.id = m.author_id \
-             WHERE m.chat_id = ? ORDER BY m.created_at, m.id",
-        )
-        .bind(chat_id)
-        .fetch_all(&self.pool)
-        .await
-        .ok()?;
-        let tail: Vec<String> = rows
-            .iter()
-            .rev()
-            .take(30)
-            .rev()
-            .map(|r| {
-                format!(
-                    "{}: {}",
-                    r.get::<String, _>("author"),
-                    r.get::<String, _>("body")
-                )
-            })
-            .collect();
-        Some(tail.join("\n"))
-    }
-
-    /// Чат-иды активных (незакрытых) сессий: корневые чаты, где возможен
-    /// human-ответ агенту. Агент-рантайм подписывается на их каналы — отвечать
-    /// может любой участник, в том числе не привязанный ни к одному агенту
-    /// (его личный канал в подписку рантайма не входит).
-    pub async fn open_session_chat_ids(&self) -> Result<Vec<i64>, sqlx::Error> {
-        let rows =
-            sqlx::query("SELECT chat_id FROM sessions WHERE closed_at IS NULL ORDER BY chat_id")
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.iter().map(|r| r.get("chat_id")).collect())
-    }
-
     pub async fn get_message(&self, id: i64) -> Result<Option<Message>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden, origin FROM messages WHERE id = ?",
+            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden, origin, kind, tool_call FROM messages WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -827,7 +899,7 @@ impl ChatStore {
 
     pub async fn list_messages(&self, chat_id: i64) -> Result<Vec<Message>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden, origin FROM messages WHERE chat_id = ? ORDER BY created_at, id",
+            "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden, origin, kind, tool_call FROM messages WHERE chat_id = ? ORDER BY created_at, id",
         )
         .bind(chat_id)
         .fetch_all(&self.pool)
@@ -853,7 +925,7 @@ impl ChatStore {
         let Some(parent) = parent else {
             return Ok(None);
         };
-        if parent.state != "OPEN" || parent.level + 1 > MAX_CHAT_LEVEL {
+        if parent.state != "OPEN" || parent.level + 1 > max_chat_level() {
             return Ok(None);
         }
         let origin = self.get_message(message_id).await?;
@@ -929,7 +1001,7 @@ impl ChatStore {
         let Some(parent) = parent else {
             return Ok(None);
         };
-        if parent.state != "OPEN" {
+        if parent.state != "OPEN" || self.thread_full(&parent).await? {
             return Ok(None);
         }
 
@@ -1365,7 +1437,7 @@ impl ChatStore {
                 .fetch_optional(&self.pool)
                 .await?;
             let Some(r) = row else { return Ok(None) };
-            if seen > MAX_CHAT_LEVEL {
+            if seen > max_chat_level() {
                 return Ok(None);
             }
             seen += 1;
@@ -1393,7 +1465,7 @@ impl ChatStore {
                 .fetch_optional(&self.pool)
                 .await?;
             let Some(r) = row else { return Ok(None) };
-            if seen > MAX_CHAT_LEVEL {
+            if seen > max_chat_level() {
                 return Ok(None);
             }
             seen += 1;
@@ -1491,6 +1563,8 @@ fn message_from_row(r: &sqlx::sqlite::SqliteRow) -> Message {
         body: r.get("body"),
         hidden: r.get("hidden"),
         origin: r.get("origin"),
+        kind: r.get("kind"),
+        tool_call: r.get("tool_call"),
     }
 }
 
@@ -1522,6 +1596,23 @@ pub fn parse_command(body: &str) -> Option<ChatCommand> {
 
 fn clean_at(name: &str) -> String {
     name.trim_start_matches('@').to_string()
+}
+
+/// Упомянутые в тексте участники: слова вида `@имя` (открывающие скобки и
+/// кавычки перед `@` и знаки препинания в конце слова не входят в имя). Каждое имя — один раз, в порядке появления.
+pub fn mentioned_names(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let word = word.trim_start_matches(|c: char| "(«\"'".contains(c));
+        let Some(name) = word.strip_prefix('@') else {
+            continue;
+        };
+        let name = name.trim_end_matches(|c: char| ".,:;!?)»\"'".contains(c));
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 /// Найти сокращения, вызванные в тексте: слова вида `/имя`. Возвращает имена
@@ -2246,8 +2337,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        // Допустимо до MAX_CHAT_LEVEL уровней вложенности.
-        for _ in 0..crate::chat::MAX_CHAT_LEVEL {
+        // Допустимо до max_chat_level() уровней вложенности.
+        for _ in 0..crate::chat::max_chat_level() {
             let (thread, _) = store
                 .start_thread(parent.id, origin.id, "т", "б", "", user)
                 .await
@@ -2272,9 +2363,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_tail_labels_authors_and_keeps_last_thirty() {
+    async fn thread_accepts_at_most_max_messages_root_chat_unlimited() {
         let path =
-            std::env::temp_dir().join(format!("aga_chat_ctx_test_{}.db", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("aga_chat_limit_test_{}.db", uuid::Uuid::new_v4()));
         let _ = crate::trace::TraceStore::new(path.to_str().unwrap())
             .await
             .unwrap();
@@ -2283,31 +2374,64 @@ mod tests {
             .insert_user("alice", "human", false, None, None)
             .await
             .unwrap();
-        let bob = store
-            .insert_user("bob", "human", false, None, None)
-            .await
-            .unwrap();
         let chat = store.create_chat(None, Some("s"), alice).await.unwrap();
-
-        // 40 сообщений: старые (m0..m9) должны выпасть из хвоста в 30.
-        for i in 0..40 {
-            let author = if i % 2 == 0 { alice } else { bob };
-            store
-                .send_message(chat.id, author, &format!("m{i}"), "", None, None)
+        let source = store
+            .send_message(chat.id, alice, "тема", "", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let (thread, _) = store
+            .start_thread(chat.id, source.id, "нить", "первое", "", alice)
+            .await
+            .unwrap()
+            .unwrap();
+        // Первое сообщение уже есть — дописываем до предела.
+        for i in 1..max_thread_messages() {
+            assert!(store
+                .send_message(thread.id, alice, &format!("m{i}"), "", None, None)
                 .await
+                .unwrap()
+                .is_some());
+        }
+        assert!(store
+            .send_message(thread.id, alice, "сверх предела", "", None, None)
+            .await
+            .unwrap()
+            .is_none());
+        // Шаги работы тоже считаются сообщениями нити.
+        assert!(store
+            .send_step(thread.id, alice, "ls", "", "{}", "agent")
+            .await
+            .unwrap()
+            .is_none());
+        // Корневой чат не ограничен.
+        for _ in 0..max_thread_messages() {
+            store
+                .send_message(chat.id, alice, "x", "", None, None)
+                .await
+                .unwrap()
                 .unwrap();
         }
-        let tail = store.context_tail(chat.id).await.unwrap();
-
-        // Каждый автор подписан (`имя: тело`) — агент отличает свою реплику от чужой.
-        assert!(tail.contains("alice: m38"));
-        assert!(tail.contains("bob: m39"));
-        // Бюджет 30: последние 30 (m10..m39) есть, m0 выпала из хвоста.
-        assert!(tail.contains("bob: m11"));
-        assert!(!tail.contains("alice: m0"));
-        assert_eq!(tail.lines().count(), 30);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn thread_limits_come_from_env_or_default() {
+        assert_eq!(limit_from(Some("25"), 10), 25);
+        assert_eq!(limit_from(Some(" 7 "), 10), 7);
+        for bad in [None, Some(""), Some("abc"), Some("0"), Some("-3")] {
+            assert_eq!(limit_from(bad, 10), 10, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn mentions_are_words_starting_with_at() {
+        assert_eq!(
+            mentioned_names("@alice, глянь; @bob! и @alice ещё раз (@carol) a@b @"),
+            vec!["alice", "bob", "carol"]
+        );
+        assert!(mentioned_names("без упоминаний").is_empty());
     }
 }

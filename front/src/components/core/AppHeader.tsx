@@ -31,6 +31,7 @@ const CONFIG_MENU: Array<{ tab: string; label: string; to: string }> = [
   { tab: 'shortcuts', label: 'Shortcuts', to: '/config/shortcuts' },
   { tab: 'agent-sets', label: 'Agent Set', to: '/config/agent-sets' },
   { tab: 'llms', label: 'LLM', to: '/config/llms' },
+  { tab: 'mcp', label: 'MCP', to: '/config/mcp' },
   { tab: 'help', label: 'Help', to: '/config/help' },
 ];
 

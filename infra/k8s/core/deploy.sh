@@ -42,6 +42,8 @@ $KUBECTL create configmap aga-env -n "$NS" \
   --from-literal=AGA_FRONT_URL="$AGA_K8S_FRONT_URL" \
   --from-literal=RUST_LOG="$RUST_LOG" \
   --from-literal=PORT="$PORT" \
+  --from-literal=AGA_MAX_THREAD_DEPTH="${AGA_MAX_THREAD_DEPTH:-10}" \
+  --from-literal=AGA_MAX_THREAD_MESSAGES="${AGA_MAX_THREAD_MESSAGES:-100}" \
   --dry-run=client -o yaml | $KUBECTL apply -f -
 
 # roles.yaml ядра: роли из main/config/roles.yaml, sso-блок — стендовый (включён,

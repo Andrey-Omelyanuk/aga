@@ -107,6 +107,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             api_url: "http://ollama:11434/v1".into(),
             api_key: None,
             model_name: "qwen3:0.6b".into(),
+            native_tools: true,
         })
         .await?;
     trace.set_default_llm(ollama).await?;
@@ -130,6 +131,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                         },
                     ],
                     listen_user_id: Some(alice),
+                    mcp: vec![],
                 },
                 AgentSpec {
                     name: "api".into(),
@@ -140,6 +142,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     parent: Some("backend".into()),
                     skills: Vec::new(),
                     listen_user_id: None,
+                    mcp: vec![],
                 },
             ],
         )
@@ -169,6 +172,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                         },
                     ],
                     listen_user_id: Some(alice),
+                    mcp: vec![],
                 },
                 AgentSpec {
                     name: "src/model".into(),
@@ -179,6 +183,7 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                     parent: Some("ui".into()),
                     skills: Vec::new(),
                     listen_user_id: None,
+                    mcp: vec![],
                 },
             ],
         )

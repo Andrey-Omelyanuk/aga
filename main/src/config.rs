@@ -64,6 +64,10 @@ pub struct RoleConfig {
     pub tools: Vec<String>,
     pub max_iterations: u32,
     pub llm: LlmConfig,
+    /// MCP-серверы агента (каталог `mcp_servers`); инструменты подключаются
+    /// на прогон, только в нативном режиме.
+    #[serde(default)]
+    pub mcp_servers: Vec<crate::trace::McpServer>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -78,6 +82,10 @@ pub struct LlmConfig {
     /// Ключ доступа подключения; отсутствует — запросы без ключа.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Нативный function calling (`tools` в API). false — запасной текстовый
+    /// режим: команды из блоков ```bash, вопрос — `[ASK_HUMAN]`.
+    #[serde(default = "crate::trace::default_native_tools")]
+    pub native_tools: bool,
 }
 
 impl Config {

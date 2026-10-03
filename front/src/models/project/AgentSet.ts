@@ -26,6 +26,8 @@ export interface Agent {
   /** Привязка к пользователю чата: агент слушает его сообщения и отвечает от
    * его имени (режим `aga agent`). Нет — агент ни на что не реагирует. */
   listen_user_id?: number | null;
+  /** MCP-серверы каталога (имена): агент получает их инструменты. */
+  mcp?: string[];
 }
 
 export interface CatalogVersion {

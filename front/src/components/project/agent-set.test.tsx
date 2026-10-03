@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { AgentSetEditor } from './AgentSetEditor';
-import type { Agent, CatalogItem, Llm } from '@/models/project';
+import type { Agent, CatalogItem, Llm, McpServer } from '@/models/project';
 import type { User } from '@/models/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -12,6 +12,7 @@ function renderEditor(
   skills: CatalogItem[],
   connections: Llm[] = [],
   users: User[] = [],
+  mcpServers: McpServer[] = [],
 ) {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -25,6 +26,7 @@ function renderEditor(
         skills={skills}
         connections={connections}
         users={users}
+        mcpServers={mcpServers}
         onSaved={() => {}}
       />,
     );
@@ -139,6 +141,40 @@ describe('AgentSetEditor', () => {
     // Люди — видны.
     expect(options.some((t) => t?.includes('alice'))).toBe(true);
 
+    act(() => root.unmount());
+  });
+
+  it('each agent gets its own skills and MCP servers', () => {
+    const base = {
+      description: '',
+      tools: [],
+      max_iterations: 3,
+      llm_id: null,
+      parent_id: null,
+    };
+    const agents: Agent[] = [
+      { ...base, id: 1, name: 'a', skills: [{ name: 'review' }], mcp: ['github'],
+        territory: { folder: 'a', excludes: [] } },
+      { ...base, id: 2, name: 'b', skills: [], mcp: [],
+        territory: { folder: 'b', excludes: [] } },
+    ];
+    const skills: CatalogItem[] = [{ id: 1, name: 'review', content: '', deleted: false }];
+    const servers = [
+      { id: 1, name: 'github', transport: 'http', url: 'http://x', command: '', api_key: null },
+      { id: 2, name: 'fs', transport: 'stdio', url: '', command: 'fs', api_key: null },
+    ] as McpServer[];
+    const { container, root } = renderEditor(agents, skills, [], [], servers);
+    // Чекбоксы скиллов и MCP — по одному набору на агента, со своими отметками.
+    const boxes = (label: string) =>
+      Array.from(container.querySelectorAll<HTMLInputElement>(`input[aria-label="${label}"]`));
+    expect(boxes('MCP github').map((b) => b.checked)).toEqual([true, false]);
+    expect(boxes('MCP fs').map((b) => b.checked)).toEqual([false, false]);
+    const skillBoxes = Array.from(container.querySelectorAll('label'))
+      .filter((l) => l.textContent === 'review')
+      .map((l) => (l.querySelector('input') as HTMLInputElement).checked);
+    expect(skillBoxes).toEqual([true, false]);
+    act(() => boxes('MCP fs')[1].click());
+    expect(boxes('MCP fs').map((b) => b.checked)).toEqual([false, true]);
     act(() => root.unmount());
   });
 });

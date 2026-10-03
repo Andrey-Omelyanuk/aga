@@ -26,6 +26,7 @@ describe('LlmList', () => {
         api_key: 'secret-key',
         model_name: 'qwen3:0.6b',
         is_default: true,
+        native_tools: true,
       },
       {
         id: 2,
@@ -34,6 +35,7 @@ describe('LlmList', () => {
         api_key: null,
         model_name: 'qwen2.5:7b',
         is_default: false,
+        native_tools: false,
       },
     ] as Llm[];
 
@@ -48,6 +50,9 @@ describe('LlmList', () => {
     expect(text).toContain('vllm-cluster');
     expect(text).toContain('http://vllm:8000/v1');
     expect(text).toContain('qwen2.5:7b');
+    // Режим инструментов: нативный tool calling или запасной текстовый.
+    expect(text).toContain('Инструменты: tool calling');
+    expect(text).toContain('текстовый режим');
 
     act(() => root.unmount());
   });
@@ -61,6 +66,7 @@ describe('LlmList', () => {
         api_key: null,
         model_name: 'qwen3:0.6b',
         is_default: true,
+        native_tools: true,
       },
     ] as Llm[];
 
