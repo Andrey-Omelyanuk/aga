@@ -158,6 +158,11 @@ dev-verify: dev-roles
 		if curl -s --resolve auth.localhost:80:127.0.0.1 http://auth.localhost/realms/aga | grep -q '"realm"'; then break; fi; \
 		sleep 2; \
 	done
+	@# Ядро стартует HTTP только после JWKS Keycloak — ждём и его.
+	@for i in $$(seq 1 60); do \
+		if [ "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/users)" = "401" ]; then break; fi; \
+		sleep 2; \
+	done
 	@test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/users)" = "401" && echo "core SSO: anonymous rejected OK"
 	@test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/auth/login)" = "307" && echo "core auth/login redirect OK"
 	@docker exec ws-1 sh -c "test -d /work/project/.git" && echo "ws-1 OK"
@@ -182,11 +187,12 @@ dev-seed:
 # E2E всего рабочего цикла агента на dev-стенде (см. infra/dev-e2e.sh):
 # свободный воркстейшн, switch на mobx-model-ui, сессия, агент отвечает; затем
 # ASK_HUMAN на mock-LLM (вопрос в чат, ответ по parent_id возобновляет агента).
-# --force-recreate core ws-1 ws-2 подхватывает свежие образы ядра и
+# --force-recreate core agent ws-1 ws-2 подхватывает свежие образы ядра (HTTP и
+# агент-рантайм — один образ) и
 # воркстейшнов (пользователь aga, права /work, ключ в /home/aga/.ssh), сид
 # сбрасывает БД в детерминированное состояние (делает сам скрипт).
 dev-e2e: dev-roles
-	$(DEV_COMPOSE_CMD) up -d --build --force-recreate core ws-1 ws-2
+	$(DEV_COMPOSE_CMD) up -d --build --force-recreate core agent ws-1 ws-2
 	bash infra/dev-e2e.sh
 
 # Восстановить тестовый набор в БД кластера (PVC). Образ ядра должен быть

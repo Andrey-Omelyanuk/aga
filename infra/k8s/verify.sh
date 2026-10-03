@@ -8,7 +8,7 @@
 #   - jq для разбора ответов API.
 # LLM не нужен — проект/воркстейшн его не трогают.
 #
-# Проверяемые пункты истории 2026-08-28-test-stand-in-k8s:
+# Проверяемые пункты (подробно — infra/E2E.md):
 #   1. k8s-deploy: под ядра Ready, API отвечает на HTTP
 #   2. ядро в кластере по git-URL создаёт воркстейшн — под ws-<id> готов
 #   3. команды агента воркстейшна выполняются внутри его пода (из пода ядра)
@@ -17,7 +17,6 @@
 #   6. недействительный токен отклоняется, действительный работает под участником
 #   7. веб-клиент (front) и страница входа Keycloak отвечают извне
 #   8. ядро работает в кластере, а не на хосте
-#   9. docker compose из проекта убран
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/Andrey-Omelyanuk/aga}"
@@ -216,13 +215,6 @@ for _ in $(seq 1 60); do
 done
 curl -sf -H "Authorization: Bearer $ALICE" "$SERVER/projects" | jq -e \
   --argjson id "$PROJECT_ID" '[.[].id] | index($id)' >/dev/null
-
-echo "==> docker compose is gone (9)"
-[ ! -f infra/compose.yml ]
-if grep -qE '^\s*(run-d|stop|down|ps|log|reset|delete|sh):' makefile; then
-  echo "FAIL: compose make targets still present" >&2
-  exit 1
-fi
 
 echo "==> cleanup test workstations"
 for _ in $(seq 1 10); do

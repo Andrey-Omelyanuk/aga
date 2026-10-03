@@ -80,24 +80,10 @@
   получает 401, `/auth/login` редиректит в Keycloak на `auth.localhost`),
   ws-1/ws-2 ready, фронт отвечает на `${AGA_FRONT_PORT:-8081}`, прокси отдаёт
   SPA на `dev.localhost`, API на `api.localhost`, Keycloak на `auth.localhost`.
-- `make dev-e2e` — e2e всего рабочего цикла агента на dev-стенде
-  (`infra/dev-e2e.sh`): сеет БД (секция ASK_HUMAN подменяет набор — сид внутри
-  делает повторный прогон идемпотентным), перезапускает агент-рантайм (свежие
-  привязки после сида),
-  через HTTP API со SSO закрывает сессию занятого
-  воркстейшна, отпускает его, открывает сессию с проектом mobx-model-ui
-  (ядро разворачивает git-клон в `/work/project`); bob спрашивает `@alice`
-  (агент `ui` обслуживает alice) — рантайм (общий канал) отвечает от её имени
-  (`origin='agent'`), ждёт непустой ответ с артефактом.
-  Затем секция ASK_HUMAN на детерминированной mock-LLM (контейнер `node:22` в сети
-  агент-рантайма; 1-й запрос — нативный вызов `ask_human`, дальше — финал): переключает набор
-  проекта на agent-echo с mock-LLM, bob спрашивает `@alice` — вопрос появляется
-  в чате текстом (не `Request ID`), bob (непривязанный участник) отвечает
-  `parent_id` на сообщение-вопрос — запрос закрывается и агент возобновляется,
-  финальный ответ от имени alice.
-  Требует SSH-доступа по
-  `AGA_SSH_PRIVATE_KEY` к репозиторию
-  `git@github.com:Andrey-Omelyanuk/mobx-model-ui.git`.
+- `make dev-e2e` — e2e рабочего цикла на dev-стенде (`infra/dev-e2e.sh`):
+  SSO, жизненный цикл воркстейшна (git-клон mobx-model-ui по SSH), ответ
+  агента через Centrifugo и ollama, `ask_human` на mock-LLM. Что и почему
+  проверяется e2e, а что юнит-тестами, — `infra/E2E.md`.
 - Вход в Keycloak — тестовые учётки `alice`/`alice-pass` (participant) и
   `bob`/`bob-pass` (admin); фиксированные `sso_subject` заданы в
   `k8s/core/keycloak-realm.json` и совпадают с участниками сида (`aga seed`).

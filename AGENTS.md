@@ -159,6 +159,8 @@ aga/
 - Тесты ядра: `make test` (cargo test в `main/`).
 - Фронт: `make run-front` — страница грузится без ошибок консоли; Storybook
   и unit-тесты строятся без ошибок.
+- E2E: `make dev-e2e` (dev-стенд) и `make k8s-verify` (кластер); что
+  покрывает e2e и почему — `infra/E2E.md`.
 - Интеграционный тест стенда: `make k8s-verify` — ядро, фронт и Keycloak
   поднимаются в кластере (minikube), проверяются воркстейшны-поды, SSO и
   персистентность; локально `make run` отвечает на `/users`, `/chats/:id/messages`.

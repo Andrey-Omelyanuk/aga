@@ -74,6 +74,11 @@ fn sign_jwt(
     )
 }
 
+/// Connect-запрос unidirectional-SSE (значение параметра `cf_connect`).
+fn sse_connect_request(token: &str) -> String {
+    serde_json::json!({ "token": token }).to_string()
+}
+
 /// Один кадр событий unidirectional-SSE Centrifugo (`/connection/sse`,
 /// JSON-протокол): из `data:`-строк собираем JSON и достаём публикацию —
 /// (канал, данные). Кадры без публикации (соединение, ping) → None.
@@ -90,7 +95,8 @@ pub fn parse_sse_event(frame: &str) -> Option<(String, serde_json::Value)> {
     }
     let value: serde_json::Value = serde_json::from_str(&data).ok()?;
     let publication = value.get("pub")?;
-    let channel = publication["channel"].as_str()?.to_string();
+    // Centrifugo v6 кладёт канал рядом с `pub`, а не внутрь.
+    let channel = value["channel"].as_str()?.to_string();
     Some((channel, publication["data"].clone()))
 }
 
@@ -232,11 +238,16 @@ impl CentrifugeClient {
     /// Ответ остаётся открытым стримом — читает его вызывающий (`runtime.rs`).
     pub async fn sse_stream(&self, token: &str) -> Result<reqwest::Response, CentrifugeError> {
         let inner = self.inner.as_ref().ok_or(CentrifugeError::NotConfigured)?;
-        let url = format!(
-            "{}/connection/sse?format=json&token={}",
-            inner.api_url, token
-        );
-        let resp = inner.http.get(url).send().await?.error_for_status()?;
+        // Uni-SSE принимает connect-запрос JSON-ом в `cf_connect`; голый
+        // `?token=` Centrifugo отклоняет (disconnect 3501 «bad request»).
+        let url = format!("{}/connection/sse", inner.api_url);
+        let resp = inner
+            .http
+            .get(url)
+            .query(&[("cf_connect", sse_connect_request(token))])
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(resp)
     }
 }
@@ -291,8 +302,16 @@ mod tests {
     }
 
     #[test]
+    fn sse_connect_request_carries_token_as_json() {
+        let req: serde_json::Value =
+            serde_json::from_str(&sse_connect_request("abc.def.ghi")).unwrap();
+        assert_eq!(req["token"], "abc.def.ghi");
+    }
+
+    #[test]
     fn sse_frames_carry_publications_and_ignore_pings() {
-        let frame = "data: {\"pub\":{\"channel\":\"user:5\",\"data\":{\"type\":\"message\"}}}";
+        // Кадр uni-SSE Centrifugo v6 как есть: канал — рядом с `pub`.
+        let frame = r#"data: {"channel":"user:5","pub":{"data":{"type":"message"}}}"#;
         let (channel, data) = parse_sse_event(frame).expect("публикация в SSE-кадре");
         assert_eq!(channel, "user:5");
         assert_eq!(data["type"], "message");

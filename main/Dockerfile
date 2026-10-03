@@ -31,6 +31,8 @@ RUN cargo build --release || true
 # Удаляем фейковый код и копируем реальный
 RUN rm -rf src
 COPY src/ ./src/
+# Промпты агентов встраиваются в бинарь (include_str! в agent.rs).
+COPY prompts/ ./prompts/
 
 # Собираем релизную версию. Стаб сбрасываем принудительно: метки времени
 # COPY и стабового src/main.rs совпадают в пределах секунды, и cargo считает
