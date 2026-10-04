@@ -1,0 +1,5 @@
+{
+  "name": "e2e-mock",
+  "api_url": "http://aga-llm-mock:8000/v1",
+  "model_name": "mock"
+}

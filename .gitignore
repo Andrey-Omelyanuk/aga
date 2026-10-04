@@ -34,3 +34,9 @@ htmlcov/
 .coverage
 .mypy_cache/
 .pytest_cache/
+
+# E2E (Playwright): зависимости, сессии входа, отчёты
+e2e/node_modules/
+e2e/.auth/
+e2e/test-results/
+e2e/playwright-report/

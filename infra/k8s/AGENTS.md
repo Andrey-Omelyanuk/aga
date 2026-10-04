@@ -12,8 +12,8 @@ dev-стенд без кластера — docker compose (`infra/dev-compose.ym
 - **Делает:** манифесты стенда (`core/`): ядро, Keycloak, RBAC, PVC, сервисы,
   тестовый realm, ingress; манифесты веб-клиента (`front/`): Deployment и Service
   nginx; образ машины-воркстейшна (DinD + git); шаблон воркстейшн-пода;
-  скрипты развёртывания (`core/deploy.sh`, `front/deploy.sh`) и интеграционную
-  проверку (`verify.sh`).
+  скрипты развёртывания (`core/deploy.sh`, `front/deploy.sh`). Проверка
+  стенда в кластере — `e2e/k8s.sh` (см. `e2e/README.md`).
 - **Не делает:** не содержит логики ядра (это `main/src/`, модуль `cluster.rs`);
   не содержит кода веб-клиента (это `front/`); не собирает образы
   (`main/Dockerfile`, `front/Dockerfile`).
@@ -43,11 +43,10 @@ infra/k8s/
 │   ├── 54-service-centrifugo.yaml     # NodePort 30083
 │   ├── 70-ingress.yaml       # dev.localhost→front, api.localhost→core, auth.localhost→Keycloak, pub-sub.localhost→centrifugo
 │   └── keycloak-realm.json   # тестовый realm (участники alice/bob)
-├── front/                    # стенд веб-клиента
-│   ├── deploy.sh
-│   ├── 30-deployment-front.yaml  # nginx, раздаёт SPA
-│   └── 40-service-front.yaml     # NodePort 30082 (веб-клиент)
-└── verify.sh                 # интеграционная проверка (make k8s-verify)
+└── front/                    # стенд веб-клиента
+    ├── deploy.sh
+    ├── 30-deployment-front.yaml  # nginx, раздаёт SPA
+    └── 40-service-front.yaml     # NodePort 30082 (веб-клиент)
 ```
 
 ## Patterns
@@ -105,9 +104,6 @@ infra/k8s/
   `minikube image load` не обновляет уже существующий тег — после пересборки
   образа его нужно перезагружать (удалить тег в кластере и загрузить заново,
   либо импортировать через `docker save | docker exec -i minikube docker load`).
-- `verify.sh` форвардит порты ядра (18080), Keycloak (18081) и фронта (18082),
-  чтобы не конфликтовать с рабочим сервером. Стенд после проверки остаётся
-  поднятым.
 - `minikube service aga-front -n aga` — адрес веб-клиента (NodePort);
   страница входа Keycloak — `http://$(minikube ip):30081/realms/aga`.
 - Ручной доступ без `/etc/hosts`: `make k8s-dev` включает ingress addon,
@@ -122,15 +118,9 @@ infra/k8s/
   для curl нужен `--resolve dev.localhost:80:127.0.0.1`.
 
 ## Verification
-- Интеграционный тест: `make k8s-verify` (или `bash infra/k8s/verify.sh`) —
-  требует kubectl-контекст на кластер и docker на хосте. Поднимает стенд,
-  проверяет пункты истории `2026-08-28-test-stand-in-k8s`: под ядра Ready и
-  API отвечает; фронт раздаёт SPA; воркстейшн по git-URL поднимает под рядом;
-  команды агента идут в под из пода ядра; данные переживают рестарт (PVC);
-  Keycloak и вход через него; токены (недействительный отклоняется, участник
-  работает); внешний доступ. Dev-стенд (compose) — отдельный уровень, на
-  кластер не влияет.
-- Критерий готовности: скрипт завершается с `==> OK`.
+- `make k8s-deploy` + `make k8s-wait` — стенд поднят, API отвечает.
+- Проверка стенда в кластере — `make k8s-verify` (`e2e/k8s.sh`, описание —
+  `e2e/README.md`).
 
 ## Dependencies
 - Ядро aga (`main/src/cluster.rs`) — рендерит шаблон и управляет подами.

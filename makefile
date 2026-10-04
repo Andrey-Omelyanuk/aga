@@ -47,8 +47,8 @@ help:
 	@echo "dev-logs    - Follow dev stand logs"
 	@echo "dev-ps      - Show dev stand containers"
 	@echo "dev-reset   - Recreate dev stand from scratch (fresh DB)"
-	@echo "dev-verify  - Check dev stand: core API + both workstations ready"
-	@echo "dev-e2e     - E2E on dev stand: agent answers; ASK_HUMAN question/answer via mock LLM"
+	@echo "dev-verify  - Check dev stand is up (e2e/dev-verify.sh)"
+	@echo "dev-e2e     - E2E via web client (Playwright) on dev stand (e2e/run.sh)"
 	@echo "dev-seed    - Restore test dataset into dev stand DB (aga seed in core)"
 	@echo "k8s-seed    - Restore test dataset into cluster DB (aga seed via kubectl exec)"
 	@echo "k8s-up      - Start local cluster (minikube)"
@@ -62,7 +62,7 @@ help:
 	@echo "k8s-dev     - Access the stand via dev.localhost/api.localhost/auth.localhost (nginx proxy)"
 	@echo "k8s-dev-stop - Stop the local nginx proxy (*.localhost access)"
 	@echo "k8s-reset   - Recreate the stand from scratch"
-	@echo "k8s-verify  - Run infra/k8s integration check against the cluster"
+	@echo "k8s-verify  - E2E checks in the cluster (e2e/k8s.sh)"
 
 init:
 	@if [ ! -f "./.env"                  ]; then cp ./infra/.env.example     ./.env; fi
@@ -153,30 +153,7 @@ dev-reset:
 	$(MAKE) dev-up
 
 dev-verify: dev-roles
-	@echo "Waiting for Keycloak realm (auth.localhost)..."
-	@for i in $$(seq 1 60); do \
-		if curl -s --resolve auth.localhost:80:127.0.0.1 http://auth.localhost/realms/aga | grep -q '"realm"'; then break; fi; \
-		sleep 2; \
-	done
-	@# Ядро стартует HTTP только после JWKS Keycloak — ждём и его.
-	@for i in $$(seq 1 60); do \
-		if [ "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/users)" = "401" ]; then break; fi; \
-		sleep 2; \
-	done
-	@test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/users)" = "401" && echo "core SSO: anonymous rejected OK"
-	@test "$$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/auth/login)" = "307" && echo "core auth/login redirect OK"
-	@docker exec ws-1 sh -c "test -d /work/project/.git" && echo "ws-1 OK"
-	@docker exec ws-2 sh -c "test -d /work/project/.git" && echo "ws-2 OK"
-	@echo "Waiting for small LLM model (ollama:qwen3:0.6b)..."
-	@for i in $$(seq 1 60); do \
-		if docker exec aga-ollama ollama list 2>/dev/null | grep -q 'qwen3:0.6b'; then break; fi; \
-		sleep 2; \
-	done
-	@docker exec aga-ollama ollama list | grep -q 'qwen3:0.6b' && echo "ollama small LLM OK"
-	@curl -fsS http://localhost:$${AGA_FRONT_PORT:-8081}/ >/dev/null && echo "front OK"
-	@curl -s --resolve auth.localhost:80:127.0.0.1 http://auth.localhost/realms/aga | grep -q '"realm"' && echo "proxy auth.localhost (keycloak) OK"
-	@curl -fsS --resolve dev.localhost:80:127.0.0.1 http://dev.localhost/ >/dev/null && echo "proxy dev.localhost OK"
-	@test "$$(curl -s -o /dev/null -w '%{http_code}' --resolve api.localhost:80:127.0.0.1 http://api.localhost/users)" = "401" && echo "proxy api.localhost (SSO) OK"
+	bash e2e/dev-verify.sh
 
 # Восстановить тестовый набор в БД dev-стенда (контейнер aga-core).
 # Пересобирает образ ядра — seed-подкоманда живёт в бинаре /app/aga.
@@ -184,16 +161,12 @@ dev-seed:
 	$(DEV_COMPOSE_CMD) up -d --build
 	docker exec aga-core /app/aga seed
 
-# E2E всего рабочего цикла агента на dev-стенде (см. infra/dev-e2e.sh):
-# свободный воркстейшн, switch на mobx-model-ui, сессия, агент отвечает; затем
-# ASK_HUMAN на mock-LLM (вопрос в чат, ответ по parent_id возобновляет агента).
-# --force-recreate core agent ws-1 ws-2 подхватывает свежие образы ядра (HTTP и
-# агент-рантайм — один образ) и
-# воркстейшнов (пользователь aga, права /work, ключ в /home/aga/.ssh), сид
-# сбрасывает БД в детерминированное состояние (делает сам скрипт).
+# E2E через веб-клиент (Playwright) на dev-стенде: e2e/run.sh, описание —
+# e2e/README.md. Ядро и агент-рантайм — один образ: пересоздаём оба, иначе
+# рантайм останется на старом бинаре. Фронт — vite с HMR, пересборка не нужна.
 dev-e2e: dev-roles
 	$(DEV_COMPOSE_CMD) up -d --build --force-recreate core agent ws-1 ws-2
-	bash infra/dev-e2e.sh
+	bash e2e/run.sh
 
 # Восстановить тестовый набор в БД кластера (PVC). Образ ядра должен быть
 # передеплоен с поддержкой seed (make k8s-build && make k8s-load && make k8s-deploy).
@@ -250,4 +223,4 @@ k8s-reset:
 	bash $(K8S_FRONT)/deploy.sh
 
 k8s-verify:
-	bash infra/k8s/verify.sh
+	bash e2e/k8s.sh

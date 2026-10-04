@@ -110,8 +110,13 @@ services:
     environment:
       - KEYCLOAK_ADMIN=admin
       - KEYCLOAK_ADMIN_PASSWORD=admin
-      - KC_HOSTNAME_STRICT=false
       - KC_HTTP_PORT=8080
+      # Издатель токенов — всегда публичный адрес (браузер ходит через
+      # auth.localhost), а ядро обращается по keycloak:8080. Без фиксированного
+      # hostname Keycloak отклоняет refresh из ядра: «Invalid token issuer»
+      # (тихое обновление токена в SPA не работало). Пойман e2e (access.spec.ts).
+      - KC_HOSTNAME=http://auth.localhost
+      - KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true
     ports:
       - "${KEYCLOAK_PORT:-8082}:8080"
     volumes:

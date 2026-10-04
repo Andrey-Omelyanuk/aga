@@ -43,6 +43,7 @@ SPA на nginx). Стенд — в Kubernetes (`infra/`). Чат — единс�
 - Фронт: React SPA (Vite, mobx-model-ui, Tailwind, shadcn/ui, Storybook),
   собирается в `dist/`, раздаётся nginx.
 - Инфра: Kubernetes (minikube), Keycloak, Docker.
+- E2E: Playwright через веб-клиент (`e2e/`, в docker-образе Playwright).
 
 ## Architecture
 ```
@@ -61,6 +62,7 @@ aga/
 │   ├── stories/        # Storybook
 │   └── Dockerfile      # образ nginx (раздаёт dist/)
 ├── infra/              # .env.example, dev-compose (ядро + фронт + воркстейшны), k8s-стенд, AGENTS.md
+├── e2e/                # e2e (Playwright), фикстуры, проверки стендов и README
 └── stories/            # истории разработки
 ```
 
@@ -159,11 +161,9 @@ aga/
 - Тесты ядра: `make test` (cargo test в `main/`).
 - Фронт: `make run-front` — страница грузится без ошибок консоли; Storybook
   и unit-тесты строятся без ошибок.
-- E2E: `make dev-e2e` (dev-стенд) и `make k8s-verify` (кластер); что
-  покрывает e2e и почему — `infra/E2E.md`.
-- Интеграционный тест стенда: `make k8s-verify` — ядро, фронт и Keycloak
-  поднимаются в кластере (minikube), проверяются воркстейшны-поды, SSO и
-  персистентность; локально `make run` отвечает на `/users`, `/chats/:id/messages`.
+- E2E: `make dev-verify`, `make dev-e2e` (dev-стенд), `make k8s-verify`
+  (кластер) — всё про e2e в `e2e/README.md`.
+- Локально `make run` отвечает на `/users`, `/chats/:id/messages`.
 - Критерий готовности: фреймворк компилируется, ядро запускается и отвечает на
   HTTP, фронт раздаётся отдельно, цикл агента выполняется, трассировка
   сохраняется.

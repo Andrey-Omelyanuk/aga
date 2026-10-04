@@ -79,7 +79,9 @@ class Me {
     window.location.href = this.loginUrl;
   }
 
-  logout(): void {
+  // Стрелочная функция: передаётся как onClick={me.logout} — без привязки
+  // this обычный метод падал бы, и выход не срабатывал.
+  logout = (): void => {
     // Удаляем токены и уходим на /auth/logout ядра: оно сбрасывает HttpOnly-куку
     // aga_token и редиректит на end-session Keycloak (если настроен) → фронт.
     if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
@@ -90,7 +92,7 @@ class Me {
       this.show_login = true;
     });
     window.location.href = this.logoutUrl;
-  }
+  };
 
   // Обработчик 401 (из http.ts): молча обновляем access-токен по refresh-токену
   // через /auth/refresh ядра. True — новый токен сохранён, запрос повторится.

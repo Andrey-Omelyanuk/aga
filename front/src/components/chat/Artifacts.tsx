@@ -25,6 +25,7 @@ export const Artifacts = observer(({ messageId }: { messageId: number }) => {
       {items.map((art, i) => (
         <div
           key={i}
+          data-testid="artifact"
           className="mt-1 rounded-lg border border-yellow-200 bg-yellow-50 px-3 py-1.5 text-xs whitespace-pre-wrap text-slate-700"
         >
           📎 {art.title || art.kind}: {art.content}

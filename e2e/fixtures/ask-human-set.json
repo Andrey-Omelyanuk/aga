@@ -1,0 +1,15 @@
+{
+  "name": "e2e-ask-human",
+  "agents": [
+    {
+      "name": "echo",
+      "description": "e2e-агент на mock-LLM",
+      "tools": [],
+      "max_iterations": 2,
+      "llm_id": null,
+      "parent": null,
+      "skills": [],
+      "listen_user_id": null
+    }
+  ]
+}

@@ -16,6 +16,8 @@ export interface ChatMessage {
   /** Скрытая часть — заметка, по умолчанию свёрнутая. Заполняется
    *  сокращениями (`/имя`), вводом не задаётся. */
   hidden?: string | null;
+  /** Источник: 'user' — набрано человеком, 'agent' — ответ агента от имени автора. */
+  origin?: string;
 }
 
 export interface ChatParticipant {

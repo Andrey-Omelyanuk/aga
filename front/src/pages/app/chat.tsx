@@ -257,7 +257,7 @@ const ChatPage = observer(() => {
               <p>Выберите сессию или откройте новую</p>
             </EmptyState>
           ) : (
-            <MessageList chat={currentChat} onChanged={reloadDetail} />
+            <MessageList chat={currentChat} onChanged={reloadDetail} users={users.items} />
           )}
         </div>
         <div className="border-t border-slate-200 p-3.5">

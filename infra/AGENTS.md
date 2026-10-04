@@ -76,18 +76,11 @@
 
 ## Verification
 - `make init` — создаёт `.env` и `main/config/roles.yaml` из примеров.
-- `make dev-up` + `make dev-verify` — dev-стенд поднят, SSO работает (аноним
-  получает 401, `/auth/login` редиректит в Keycloak на `auth.localhost`),
-  ws-1/ws-2 ready, фронт отвечает на `${AGA_FRONT_PORT:-8081}`, прокси отдаёт
-  SPA на `dev.localhost`, API на `api.localhost`, Keycloak на `auth.localhost`.
-- `make dev-e2e` — e2e рабочего цикла на dev-стенде (`infra/dev-e2e.sh`):
-  SSO, жизненный цикл воркстейшна (git-клон mobx-model-ui по SSH), ответ
-  агента через Centrifugo и ollama, `ask_human` на mock-LLM. Что и почему
-  проверяется e2e, а что юнит-тестами, — `infra/E2E.md`.
+- Проверка стенда и e2e — `make dev-verify`, `make dev-e2e`, `make k8s-verify`;
+  скрипты и описание — `e2e/` (`e2e/README.md`).
 - Вход в Keycloak — тестовые учётки `alice`/`alice-pass` (participant) и
   `bob`/`bob-pass` (admin); фиксированные `sso_subject` заданы в
   `k8s/core/keycloak-realm.json` и совпадают с участниками сида (`aga seed`).
 - `make k8s-deploy` + `make k8s-wait` — стенд поднят, API отвечает.
-- `make k8s-verify` — интеграционная проверка стенда в локальном кластере.
 - Критерий: ядро отвечает на HTTP, фронт раздаёт SPA, воркстейшн поднимается
   подом в том же кластере (`make`-targets).

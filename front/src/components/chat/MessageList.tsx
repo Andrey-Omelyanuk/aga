@@ -1,5 +1,5 @@
 import { observer } from 'mobx-react-lite';
-import { useState } from 'react';
+import { createContext, useContext, useState } from 'react';
 import { Chat, ChatMessage, ChatParticipant, ChatThread } from '@/models/chat';
 import { formatTime } from '@/utils/dates';
 import { Artifacts } from './Artifacts';
@@ -11,7 +11,12 @@ export interface MessageListProps {
   /** Перезагрузить деталь чата после действия (начата нить, отправлено в
    *  нить или в родителя). */
   onChanged?: () => void;
+  /** Все пользователи: имя автора, который не участник чата (например, написал
+   *  в чужую нить), берётся отсюда — иначе в ленте был бы `#id`. */
+  users?: { id: number; name: string }[];
 }
+
+const UsersContext = createContext<{ id: number; name: string }[]>([]);
 
 /** Найти цепочку нитей (сверху вниз) до нити, начатой от сообщения originId.
  *  Возвращает id всех нитей-предков и самой нити — их надо раскрыть. */
@@ -25,7 +30,7 @@ function findThreadPath(threads: ChatThread[], originId: number): number[] | nul
 }
 
 export const MessageList = observer((props: MessageListProps) => {
-  const { chat, onChanged } = props;
+  const { chat, onChanged, users = [] } = props;
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [startFor, setStartFor] = useState<number | null>(null);
   const [replyFor, setReplyFor] = useState<number | null>(null);
@@ -58,48 +63,50 @@ export const MessageList = observer((props: MessageListProps) => {
     return <div className="py-16 text-center text-slate-400">Сообщений пока нет</div>;
   }
   return (
-    <div>
-      {chat.messages.map((msg) => (
-        <div key={msg.id} id={`msg-${msg.id}`}>
-          <MessageRow
-            scopeId={chat.id}
-            participants={chat.participants}
-            message={msg}
-            onStart={() => setStartFor(startFor === msg.id ? null : msg.id)}
-            onReply={() => setReplyFor(replyFor === msg.id ? null : msg.id)}
-            onOpenThread={() => (msg.thread_of_id ? openThreadAt(msg.thread_of_id) : undefined)}
-          />
-          {startFor === msg.id && (
-            <StartThreadForm
-              messageId={msg.id}
-              onDone={() => {
-                setStartFor(null);
-                reload();
-              }}
-              onCancel={() => setStartFor(null)}
-            />
-          )}
-          {replyFor === msg.id && (
-            <ReplyForm
-              chatId={chat.id}
+    <UsersContext.Provider value={users}>
+      <div>
+        {chat.messages.map((msg) => (
+          <div key={msg.id} id={`msg-${msg.id}`}>
+            <MessageRow
+              scopeId={chat.id}
+              participants={chat.participants}
               message={msg}
-              onDone={() => {
-                setReplyFor(null);
-                reload();
-              }}
-              onCancel={() => setReplyFor(null)}
+              onStart={() => setStartFor(startFor === msg.id ? null : msg.id)}
+              onReply={() => setReplyFor(replyFor === msg.id ? null : msg.id)}
+              onOpenThread={() => (msg.thread_of_id ? openThreadAt(msg.thread_of_id) : undefined)}
             />
-          )}
-          <Threads
-            threads={chat.threads}
-            originId={msg.id}
-            expanded={expanded}
-            onToggle={toggle}
-            onChanged={reload}
-          />
-        </div>
-      ))}
-    </div>
+            {startFor === msg.id && (
+              <StartThreadForm
+                messageId={msg.id}
+                onDone={() => {
+                  setStartFor(null);
+                  reload();
+                }}
+                onCancel={() => setStartFor(null)}
+              />
+            )}
+            {replyFor === msg.id && (
+              <ReplyForm
+                chatId={chat.id}
+                message={msg}
+                onDone={() => {
+                  setReplyFor(null);
+                  reload();
+                }}
+                onCancel={() => setReplyFor(null)}
+              />
+            )}
+            <Threads
+              threads={chat.threads}
+              originId={msg.id}
+              expanded={expanded}
+              onToggle={toggle}
+              onChanged={reload}
+            />
+          </div>
+        ))}
+      </div>
+    </UsersContext.Provider>
   );
 });
 
@@ -119,11 +126,21 @@ interface MessageRowProps {
 const MessageRow = observer(
   ({ scopeId, participants, message, onStart, onReply, onToParent, onOpenThread }: MessageRowProps) => {
     const isUser = message.author_id === scopeId;
-    const author = participants.find((p) => p.id === message.author_id)?.name ?? `#${message.author_id}`;
+    const users = useContext(UsersContext);
+    const author =
+      participants.find((p) => p.id === message.author_id)?.name ??
+      users.find((u) => u.id === message.author_id)?.name ??
+      `#${message.author_id}`;
     const [showHidden, setShowHidden] = useState(false);
 
     return (
-      <div className={`mb-3 flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+      <div
+        className={`mb-3 flex ${isUser ? 'justify-end' : 'justify-start'}`}
+        data-testid="message"
+        data-message-id={message.id}
+        data-author={author}
+        data-origin={message.origin ?? 'user'}
+      >
         <div className="max-w-[70%]">
           <div
             className={`rounded-xl px-3.5 py-2.5 text-sm whitespace-pre-wrap break-words ${

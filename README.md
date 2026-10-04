@@ -109,6 +109,7 @@ Dev-стенд без кластера (ядро + рантайм + Keycloak + C
 make dev-up      # собрать и поднять стенд
 make dev-seed    # тестовые данные (юзеры alice/bob, проекты, наборы, LLM)
 make dev-verify  # проверка стенда
+make dev-e2e     # e2e-сценарии (см. e2e/README.md)
 ```
 
 Веб-клиент — `http://dev.localhost`, API — `http://api.localhost`, Keycloak —
@@ -121,7 +122,7 @@ make dev-verify  # проверка стенда
 make k8s-up k8s-build k8s-load k8s-deploy k8s-wait
 make k8s-seed
 make k8s-dev     # доступ по *.localhost через локальный прокси
-make k8s-verify  # интеграционная проверка
+make k8s-verify  # e2e в кластере (см. e2e/README.md)
 ```
 
 Локальная разработка: `make build`, `make run` (ядро), `make run-agent`
