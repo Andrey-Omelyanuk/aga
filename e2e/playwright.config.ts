@@ -16,6 +16,9 @@ export default defineConfig({
   use: {
     baseURL: process.env.E2E_BASE_URL ?? 'http://dev.localhost',
     locale: 'ru-RU',
+    // Зависший шаг падает быстро, а не по таймауту всего теста (15 мин).
+    actionTimeout: 30_000,
+    navigationTimeout: 30_000,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

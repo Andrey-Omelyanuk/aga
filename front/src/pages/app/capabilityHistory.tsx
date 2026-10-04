@@ -67,6 +67,7 @@ const CapabilityHistoryPage = observer(() => {
             {history.map((entry, index) => (
               <div
                 key={entry.id}
+                data-testid="history-entry"
                 className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-600"
               >
                 <div className="flex items-center gap-2">

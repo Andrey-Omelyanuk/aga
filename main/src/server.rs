@@ -874,7 +874,9 @@ async fn update_capability(
             }
         }
     }
-    if let Some(content) = payload.content {
+    // Содержимое — тоже только при реальном изменении: веб-клиент шлёт его при
+    // каждом сохранении, и переименование писало бы пустое «изменил содержимое».
+    if let Some(content) = payload.content.filter(|c| *c != current.content) {
         if !state
             .trace_store
             .update_capability_content(id, &content, actor, &actor_name)
@@ -3860,7 +3862,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_edit_skips_rename_when_name_unchanged_and_conflicts_return_409() {
+    async fn capability_edit_skips_unchanged_name_and_content_and_conflicts_return_409() {
         let (state, file) = test_state(true).await;
         let headers = auth_headers("alice", &["participant"]);
         let (status, body) = post_json(
@@ -3899,6 +3901,38 @@ mod tests {
             .map(|e| e["action"].as_str().unwrap())
             .collect();
         assert_eq!(actions, vec!["create", "update"]);
+        // И наоборот: переименование с тем же содержимым — только «переименовал»,
+        // без пустого «изменил содержимое».
+        let (status, _) = patch_json(
+            &format!("/skills/{skill_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "review-2", "content": "v2" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body) = get(
+            &format!("/skills/{skill_id}/history"),
+            &headers,
+            state.clone(),
+        )
+        .await;
+        let entries: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let actions: Vec<&str> = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(actions, vec!["create", "update", "rename"]);
+        let (status, _) = patch_json(
+            &format!("/skills/{skill_id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({ "name": "review" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
         // Переименование в занятое имя — 409, а не 500.
         let (status, _) = post_json(
             "/skills",

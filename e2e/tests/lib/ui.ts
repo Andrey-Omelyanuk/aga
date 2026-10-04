@@ -44,10 +44,26 @@ export function messages(page: Page, text?: string | RegExp): Locator {
   return text ? rows.filter({ hasText: text }) : rows;
 }
 
-/** Сообщение агента, отправленное от имени alice. */
-export function agentReply(page: Page, text?: string | RegExp): Locator {
-  const rows = page.locator('[data-testid="message"][data-origin="agent"][data-author="alice"]');
+/** Сообщения агента от имени пользователя (по умолчанию alice). Сюда же
+ *  попадают шаги агента — команды shell с выводом в «▸ скрытое». */
+export function agentReply(page: Page, text?: string | RegExp, author: UserName = 'alice'): Locator {
+  const rows = page.locator(`[data-testid="message"][data-origin="agent"][data-author="${author}"]`);
   return text ? rows.filter({ hasText: text }) : rows;
+}
+
+/** Ответить на сообщение: «↩ ответить» → форма ответа → «Отправить». */
+export async function replyTo(page: Page, message: Locator, body: string) {
+  await message.getByRole('button', { name: '↩ ответить' }).click();
+  const form = closestWith(page.getByPlaceholder('Ответ…'), 'Отправить');
+  await form.getByPlaceholder('Ответ…').fill(body);
+  await form.getByRole('button', { name: 'Отправить' }).click();
+}
+
+/** Открыть сессию «e2e: mobx-model-ui» (её открывает 40-agent-cycle). */
+export async function openSessionChat(page: Page) {
+  await page.goto('/sessions');
+  await card(page, /^e2e: mobx-model-ui/).getByRole('button', { name: 'Открыть в чате' }).click();
+  await expect(page).toHaveURL(/\/chat\/\d+/);
 }
 
 /** Открыть чат из списка слева на вкладке «Чат». */

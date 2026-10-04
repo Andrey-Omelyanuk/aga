@@ -33,10 +33,22 @@ cleanup
 docker run -d --name aga-llm-mock --network "$AGENT_NET" \
   -v "$PWD/e2e/fixtures/mock-llm.js":/s.js:ro node:22 node /s.js >/dev/null
 
+# Тесты устойчивости перезапускают контейнеры стенда: в контейнер Playwright
+# пробрасываем docker-сокет и статический docker CLI (из образа docker:27-cli).
+if [ ! -x e2e/.bin/docker ]; then
+  mkdir -p e2e/.bin
+  CLI=$(docker create docker:27-cli)
+  docker cp "$CLI":/usr/local/bin/docker e2e/.bin/docker >/dev/null
+  docker rm "$CLI" >/dev/null
+fi
+
 echo "==> playwright"
 rm -rf e2e/.auth
 docker run --rm --network host --ipc host \
-  --user "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 \
+  --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
+  -e HOME=/tmp -e CI=1 -e PATH="/e2e/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  -e E2E_LLM_MODEL="${E2E_LLM_MODEL:-}" \
+  -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD/e2e":/e2e -w /e2e "$PLAYWRIGHT_IMAGE" \
   sh -c '[ -d node_modules/@playwright/test ] || npm ci --no-audit --no-fund --loglevel=error; exec npx playwright test "$@"' \
   playwright "$@"

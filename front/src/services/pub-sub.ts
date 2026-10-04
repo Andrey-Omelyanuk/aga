@@ -28,10 +28,13 @@ class PubSub {
       },
     });
     this.centrifuge.on('error', (ctx: any) => console.error(ctx));
-    // Один общий канал: подписка доступна только аутентифицированным —
-    // connection-JWT несёт право на `channels: [common]`.
-    const sub = this.centrifuge.newSubscription(CHANNEL);
-    sub.on('publication', (ctx: any) => {
+    // Подписка серверная: connection-JWT несёт `channels: [common]`, и
+    // Centrifugo сам подписывает соединение — в том числе заново после
+    // переподключения. Клиентская подписка на тот же канал отвергалась
+    // («already subscribed», 105), и после рестарта Centrifugo события в чат
+    // переставали приходить (пойман e2e: 50-resilience).
+    this.centrifuge.on('publication', (ctx: any) => {
+      if (ctx.channel !== CHANNEL) return;
       for (const handler of this.handlers) {
         try {
           handler(ctx.data);
@@ -40,7 +43,6 @@ class PubSub {
         }
       }
     });
-    sub.subscribe();
     this.centrifuge.connect();
   }
 

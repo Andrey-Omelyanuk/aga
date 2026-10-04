@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 // Доступ к стенду мимо браузера — только для подготовки, которой нет в
 // веб-клиенте (привязка набора агентов к проекту) или которая не является
 // предметом проверки. Всё, что проверяется, делается через UI.
@@ -45,4 +46,10 @@ export async function api<T = any>(user: UserName, method: string, path: string,
   if (!res.ok) throw new Error(`${method} ${path}: ${res.status} ${await res.text()}`);
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
+}
+
+/** docker на хосте (сокет и CLI проброшены в контейнер Playwright, см. run.sh):
+ *  тесты устойчивости перезапускают контейнеры стенда. */
+export function docker(...args: string[]): string {
+  return execFileSync('docker', args, { encoding: 'utf8' });
 }

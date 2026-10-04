@@ -59,6 +59,8 @@ const MAX_CONCURRENT_AGENT_RUNS: usize = 4;
 /// Как часто живая подписка прерывается на переподключение, чтобы перечитать
 /// каналы (новая сессия/привязка подхватывается без рестарта), сек.
 const CHANNELS_REFRESH_SECS: u64 = 30;
+/// Сколько пропущенных сообщений догружать за одно переподключение.
+const CATCH_UP_LIMIT: i64 = 500;
 
 /// Собрать конфиг агента из набора: промпт = правила + данные агенту скиллы
 /// (единственное содержимое каталога), инструменты — отдельный список
@@ -96,6 +98,11 @@ struct RuntimeState {
     agent_locks: StdMutex<HashMap<(Option<i64>, String), RunLock>>,
     /// message_id уже принятых событий — повторная доставка не запускает агента.
     seen: StdMutex<HashSet<i64>>,
+    /// Наибольший id сообщения, которое рантайм уже принял (из события или
+    /// догрузки). Подписка Centrifugo без истории: всё, что опубликовано, пока
+    /// стрим не подключён (плановое переподключение, рестарт Centrifugo),
+    /// иначе терялось бы — после подключения рантайм догружает id новее отметки.
+    watermark: StdMutex<i64>,
 }
 
 impl RuntimeState {
@@ -109,7 +116,13 @@ impl RuntimeState {
 
     /// true — сообщение принято впервые; false — redelivery, пропустить.
     fn mark_seen(&self, message_id: i64) -> bool {
+        let mut watermark = self.watermark.lock().unwrap();
+        *watermark = (*watermark).max(message_id);
         self.seen.lock().unwrap().insert(message_id)
+    }
+
+    fn watermark(&self) -> i64 {
+        *self.watermark.lock().unwrap()
     }
 }
 
@@ -169,6 +182,7 @@ impl AgentRuntime {
     /// переподключение при обрыве. Привязки перечитываются при каждом
     /// переподключении — новая привязка подхватывается без рестарта.
     pub async fn run(&self) {
+        self.mark_start().await;
         loop {
             let channels = self.listen_channels().await.unwrap_or_default();
             if channels.is_empty() {
@@ -195,6 +209,9 @@ impl AgentRuntime {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.centrifuge.subscriber_jwt(channels)?;
         let response = self.centrifuge.sse_stream(&token).await?;
+        // Стрим подключён — теперь догружаем то, что опубликовано без нас:
+        // новые события уже придут в стрим, дубли отсечёт `seen`.
+        self.catch_up().await;
         let mut stream = response.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
         let mut refresh = tokio::time::interval_at(
@@ -228,13 +245,45 @@ impl AgentRuntime {
         let Some(message_id) = data["message_id"].as_i64() else {
             return;
         };
+        self.accept(message_id);
+    }
+
+    /// Принять сообщение к обработке: повторно принятое (redelivery Centrifugo
+    /// или догрузка того же id) пропускается.
+    fn accept(&self, message_id: i64) {
         if !self.state.mark_seen(message_id) {
-            return; // redelivery Centrifugo — запуск уже идёт или прошёл
+            return; // запуск уже идёт или прошёл
         }
         let runtime = self.clone();
         tokio::spawn(async move {
             runtime.dispatch(message_id).await;
         });
+    }
+
+    /// Отметка старта: сообщения до запуска процесса не догружаются — после
+    /// простоя рантайм не отвечает на старое.
+    pub async fn mark_start(&self) {
+        if let Ok(max_id) = self.chat_store.max_message_id().await {
+            let mut watermark = self.state.watermark.lock().unwrap();
+            *watermark = (*watermark).max(max_id);
+        }
+    }
+
+    /// Догрузка сообщений, опубликованных, пока стрим не был подключён: всё
+    /// новее отметки идёт тем же путём, что и события Centrifugo.
+    pub async fn catch_up(&self) {
+        let after = self.state.watermark();
+        match self.chat_store.message_ids_after(after, CATCH_UP_LIMIT).await {
+            Ok(ids) => {
+                if !ids.is_empty() {
+                    tracing::info!("agent runtime: догрузка {} пропущенных сообщений", ids.len());
+                }
+                for id in ids {
+                    self.accept(id);
+                }
+            }
+            Err(e) => tracing::warn!("agent runtime: догрузка пропущенных не удалась: {e}"),
+        }
     }
 
     /// Путь события из Centrifugo: лимит общего параллелизма, далее — handle_message.
@@ -1571,6 +1620,36 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         // Ровно один ответ, несмотря на два события.
         assert_eq!(chat.list_messages(chat_id).await.unwrap().len(), 2);
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    #[tokio::test]
+    async fn message_missed_by_stream_is_caught_up_once_old_ones_are_not() {
+        let (runtime, _alice, chat_id, _trace, chat, file, llm) = fixture("Готово").await;
+        let bob = user_id(&chat, "bob").await;
+        // До старта процесса: старое упоминание рантайм не трогает.
+        say(&chat, chat_id, bob, "@alice старое").await;
+        runtime.mark_start().await;
+        // Стрим не подключён (переподключение, рестарт Centrifugo) — события нет.
+        let missed = say(&chat, chat_id, bob, "@alice пропущенное").await;
+        runtime.catch_up().await;
+        for _ in 0..100 {
+            if chat.list_messages(chat_id).await.unwrap().len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Запоздалое событие того же сообщения и повторная догрузка — не дубли.
+        let data = serde_json::json!({"type": "message", "chat_id": chat_id, "message_id": missed.id});
+        runtime.on_event(&data).await;
+        runtime.catch_up().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let messages = chat.list_messages(chat_id).await.unwrap();
+        // Два упоминания + один ответ — на пропущенное, не на старое.
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].origin, "agent");
+        assert!(messages[2].id > missed.id);
         llm.abort();
         cleanup(&file).await;
     }

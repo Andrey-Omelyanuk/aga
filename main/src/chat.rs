@@ -897,6 +897,26 @@ impl ChatStore {
         Ok(row.map(|r| message_from_row(&r)))
     }
 
+    /// Наибольший id сообщения во всех чатах (0 — сообщений нет). Агент-рантайм
+    /// берёт его отметкой старта: всё, что новее, он ещё не обработал.
+    pub async fn max_message_id(&self) -> Result<i64, sqlx::Error> {
+        let row = sqlx::query("SELECT COALESCE(MAX(id), 0) AS id FROM messages")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get("id"))
+    }
+
+    /// id сообщений новее `after` по возрастанию (не больше `limit`): догрузка
+    /// событий, пропущенных агент-рантаймом, пока он был отключён от Centrifugo.
+    pub async fn message_ids_after(&self, after: i64, limit: i64) -> Result<Vec<i64>, sqlx::Error> {
+        let rows = sqlx::query("SELECT id FROM messages WHERE id > ? ORDER BY id LIMIT ?")
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get("id")).collect())
+    }
+
     pub async fn list_messages(&self, chat_id: i64) -> Result<Vec<Message>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, chat_id, parent_id, author_id, shared_by_id, share_of_id, created_at, last_message_id, title, thread_of_id, body, hidden, origin, kind, tool_call FROM messages WHERE chat_id = ? ORDER BY created_at, id",

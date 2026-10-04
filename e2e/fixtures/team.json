@@ -1,0 +1,18 @@
+{
+  "agents": [
+    {
+      "name": "e2e",
+      "parent": null,
+      "listen": "alice",
+      "rules": "Корневой e2e-агент: весь проект, кроме docs/.",
+      "tools": ["cat", "ls"]
+    },
+    {
+      "name": "docs",
+      "parent": "e2e",
+      "listen": "bob",
+      "rules": "Агент документации: пишет только в docs/.",
+      "tools": ["cat"]
+    }
+  ]
+}
