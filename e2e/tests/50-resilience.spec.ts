@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type WebSocket } from '@playwright/test';
 import { container, docker } from './lib/stand';
 import { agentReply, as, messages, openChat, openSessionChat, send } from './lib/ui';
 
@@ -13,6 +13,30 @@ function waitHealthy(container: string) {
   expect(docker('inspect', '-f', '{{.State.Running}}', container).trim()).toBe('true');
 }
 
+// Дождаться успешного реконнекта браузера к Centrifugo. После рестарта
+// контейнер уже running, но демон ещё не слушает — первая попытка centrifuge
+// может упасть (502 через прокси). Поэтому слушаем все pub-sub-вебсокеты и
+// берём тот, что реально получил кадр `connect`, игнорируя упавшие попытки.
+function waitForReconnect(page: Page, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      page.off('websocket', onWebSocket);
+      reject(new Error('Centrifugo: браузер не переподключился за отведённое время'));
+    }, timeoutMs);
+    const onWebSocket = (ws: WebSocket) => {
+      if (!ws.url().includes('pub-sub')) return;
+      ws.on('framereceived', (frame) => {
+        if (String(frame.payload).includes('"connect"')) {
+          clearTimeout(timer);
+          page.off('websocket', onWebSocket);
+          resolve();
+        }
+      });
+    };
+    page.on('websocket', onWebSocket);
+  });
+}
+
 test('Centrifugo restart: browsers reconnect, people keep chatting live', async ({ browser }) => {
   const alice = await as(browser, 'alice');
   const bob = await as(browser, 'bob');
@@ -21,14 +45,11 @@ test('Centrifugo restart: browsers reconnect, people keep chatting live', async 
 
   // Ждём, пока браузер bob заново подключится к Centrifugo: событие,
   // опубликованное до этого, браузер не получит (истории у канала нет).
-  const reconnected = bob.waitForEvent('websocket', {
-    predicate: (ws) => ws.url().includes('pub-sub'),
-    timeout: 60_000,
-  });
+  // Слушатель ставим до рестарта, чтобы поймать любую попытку реконнекта.
+  const reconnected = waitForReconnect(bob, 60_000);
   docker('restart', container('centrifugo'));
   waitHealthy(container('centrifugo'));
-  const ws = await reconnected;
-  await ws.waitForEvent('framereceived', { predicate: (f) => String(f.payload).includes('"connect"') });
+  await reconnected;
 
   await send(alice, `после рестарта Centrifugo ${run}`);
   await expect(messages(bob, `после рестарта Centrifugo ${run}`)).toBeVisible();
