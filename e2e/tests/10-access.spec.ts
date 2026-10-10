@@ -35,7 +35,7 @@ test('logout ends the SSO session: back to the login screen, next login asks for
   await page.getByRole('button', { name: 'Выйти' }).click();
   // Keycloak просит подтвердить выход (ядро не передаёт id_token_hint) —
   // подтверждаем, как человек, и возвращаемся в SPA.
-  await expect(page).toHaveURL(/auth\.localhost/);
+  await expect(page).toHaveURL(/openid-connect\/logout/);
   await page.locator('#kc-logout').click();
   await expect(page.getByRole('button', { name: 'Войти через SSO' })).toBeVisible();
   await expect(profileLink(page)).toHaveCount(0);

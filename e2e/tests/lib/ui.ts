@@ -12,11 +12,11 @@ export async function loginViaKeycloak(page: Page, user: UserName) {
   const { login, password } = USERS[user];
   await page.goto('/');
   await page.getByRole('button', { name: 'Войти через SSO' }).click();
-  await expect(page).toHaveURL(/auth\.localhost/);
+  await expect(page).toHaveURL(/openid-connect\/auth/);
   await page.locator('#username').fill(login);
   await page.locator('#password').fill(password);
   await page.locator('#kc-login').click();
-  await expect(page).toHaveURL(/dev\.localhost/);
+  await expect(page).toHaveURL(/\/\/dev\./);
   await expect(profileLink(page)).toContainText(login);
 }
 

@@ -35,7 +35,9 @@ http {
         location / {
             proxy_pass http://core:8080;
             proxy_http_version 1.1;
-            proxy_set_header Host $host;
+            # Ядро строит redirect_uri SSO из Host — нужен с портом инстанса
+            # ($http_host), иначе после входа браузер уйдёт на :80.
+            proxy_set_header Host $http_host;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection "upgrade";
             proxy_set_header X-Real-IP $remote_addr;
