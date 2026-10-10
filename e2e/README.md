@@ -26,7 +26,7 @@ e2e-кейс нужен, только когда в нём участвует с
 e2e/
 ├── README.md                       # этот документ
 ├── run.sh                          # подготовка стенда + Playwright (make dev-e2e)
-├── playwright.config.ts            # baseURL http://dev.localhost, порядок, таймауты
+├── playwright.config.ts            # baseURL из run.sh (dev.<user>.localhost:<port>), порядок, таймауты
 ├── tests/                          # файлы идут по номеру, строго по очереди
 │   ├── login.setup.ts              # вход через Keycloak, сессии alice/bob
 │   ├── 10-access.spec.ts           # роли, обновление токена, выход
@@ -68,7 +68,7 @@ make dev-e2e     # пересобрать core/agent/ws-1/ws-2 и прогнат
 предыдущими.
 
 Настоящая LLM — по желанию: `E2E_LLM_MODEL=qwen3:4b make dev-e2e`. Модель
-должна быть в ollama стенда (`docker exec aga-ollama ollama pull qwen3:4b`).
+должна быть в ollama стенда (`docker exec aga-<user>-ollama ollama pull qwen3:4b`).
 Маленькая `qwen3:0.6b` с инструментами не справляется; на CPU модель 4b
 думает минуты, поэтому по умолчанию этот тест пропущен.
 
@@ -84,8 +84,9 @@ make dev-e2e     # пересобрать core/agent/ws-1/ws-2 и прогнат
    (`e2e/.bin/docker`, из образа `docker:27-cli`) — тесты устойчивости
    перезапускают контейнеры стенда.
 
-Браузер открывает `http://dev.localhost` — тот же адрес, что у человека;
-Chromium сам резолвит `*.localhost` в loopback, где слушает прокси стенда.
+Браузер открывает `http://dev.<user>.localhost:<AGA_PROXY_PORT>` — тот же адрес,
+что у человека (инстанс = Linux-пользователь); Chromium сам резолвит `*.localhost`
+в loopback, где слушает прокси стенда.
 
 Нужно: `AGA_SSH_PRIVATE_KEY` в `.env` с доступом к
 `git@github.com:Andrey-Omelyanuk/mobx-model-ui.git`; для `k8s-verify` —
@@ -125,7 +126,7 @@ alice, весь проект, инструменты `cat`, `ls`) и дочер�
 | Кейс | Что проверяет |
 |---|---|
 | Аноним видит только экран входа | без токена SPA не показывает приложение |
-| alice / bob входят через форму Keycloak | SPA → `/auth/login` → форма на `auth.localhost` → токен в SPA; в шапке имя, у bob бейдж `admin` (роль из токена) |
+| alice / bob входят через форму Keycloak | SPA → `/auth/login` → форма на `auth.<user>.localhost` → токен в SPA; в шапке имя, у bob бейдж `admin` (роль из токена) |
 
 Сессии входа сохраняются в `e2e/.auth/` — остальные тесты стартуют
 вошедшими.
@@ -204,7 +205,7 @@ websocket браузера. Здесь нашлись две ошибки ран
 |---|---|
 | Перезапуск Centrifugo | браузеры переподключаются сами, переписка alice и bob идёт вживую дальше |
 | Сообщение, пока Centrifugo лежит | `@alice …` отправлено при остановленном Centrifugo — после его старта агент отвечает ровно один раз |
-| Перезапуск агент-рантайма | после `docker restart aga-agent` новое упоминание получает ровно один ответ, старые не переигрываются |
+| Перезапуск агент-рантайма | после `docker restart aga-<user>-agent` новое упоминание получает ровно один ответ, старые не переигрываются |
 | Сообщение, пока процесс агента остановлен | `test.fixme` — известный пробел (ниже) |
 
 Нашлись две ошибки:
@@ -246,8 +247,9 @@ websocket браузера. Здесь нашлись две ошибки ран
   редиректит (`307`).
 - В `ws-1`/`ws-2` есть git-репозиторий `/work/project`.
 - В ollama загружена `qwen3:0.6b`.
-- Фронт отвечает на `${AGA_FRONT_PORT:-8081}`; прокси раздаёт
-  `dev.localhost`, `api.localhost`, `auth.localhost`.
+- Фронт отвечает на `${AGA_FRONT_PORT}`; прокси раздаёт
+  `dev.<user>.localhost`, `api.<user>.localhost`, `auth.<user>.localhost`
+  (порт — `${AGA_PROXY_PORT}` инстанса).
 
 ## k8s-verify: только то, что есть в кластере
 Скрипт — `e2e/k8s.sh`, без браузера: проверяется инфраструктура, а не путь
@@ -302,14 +304,14 @@ Keycloak (18081) и фронта (18082). После проверки стенд
 - Отчёт: `e2e/playwright-report/` (HTML). У упавшего теста — trace, скриншот
   и видео в `e2e/test-results/`. Открыть: `cd e2e && npx playwright show-report`
   или `npx playwright show-trace test-results/<тест>/trace.zip`.
-- Ответа агента нет — смотри `docker logs aga-agent`. Цикл
+- Ответа агента нет — смотри `docker logs aga-<user>-agent`. Цикл
   `подписка завершена, переподключение` каждые пару секунд означает, что
-  рантайм не подключается к Centrifugo (`docker logs aga-centrifugo`).
+  рантайм не подключается к Centrifugo (`docker logs aga-<user>-centrifugo`).
   Плановое переподключение раз в 30 секунд — норма.
 - Сообщения не появляются без перезагрузки — websocket браузера не
-  подключился к `pub-sub.localhost` (консоль браузера в trace).
+  подключился к `pub-sub.<user>.localhost` (консоль браузера в trace).
 - `README.md` не появился на «Файлах» — нет SSH-доступа к GitHub из станции
   (`AGA_SSH_PRIVATE_KEY` в `.env`).
-- Рантайм и ядро — один образ `aga-core:dev`. При ручном запуске
+- Рантайм и ядро — один образ `aga-core:<user>`. При ручном запуске
   `e2e/run.sh` после правок ядра пересобери оба (`make dev-e2e` делает это
   сам), иначе рантайм останется старым.

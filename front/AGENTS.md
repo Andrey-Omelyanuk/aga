@@ -90,7 +90,8 @@ front/
 ├── src/
 │   ├── main.tsx         # маршруты (lazy-страницы), BrowserRouter
 │   ├── index.css        # tailwind
-│   ├── services/        # http (axios), http-adapter (@api + HttpAdapter),
+│   ├── services/        # http (axios), endpoints (адреса API/WS из location),
+│   │                    #   http-adapter (@api + HttpAdapter),
 │   │                    #   me (SSO-токен), pub-sub (centrifuge)
 │   ├── utils/           # mobx.ts (хуки), useMobX_ORM (URL-sync), toaster,
 │   │                    #   dates/html; barrel index.ts
@@ -114,9 +115,10 @@ front/
 ```
 
 ## Patterns
-- **HTTP:** один axios-клиент (`services/http.ts`): `API_BASE` из
-  `window.API_ENDPOINT` (старт контейнера) или fallback по hostname
-  (`api.localhost` / `localhost:8080`); request-interceptor добавляет
+- **HTTP:** один axios-клиент (`services/http.ts`): `API_BASE` из общего вывода
+  `services/endpoints.ts` — `window.API_ENDPOINT` (старт контейнера) или по
+  `location` (`dev.<user>.localhost` → `api.<user>.localhost`, с сохранением
+  порта инстанса; fallback `localhost:8080`); request-interceptor добавляет
   `Authorization: Bearer <token>` из `localStorage[aga_token]`; на 401 —
   `me.refresh()` молча обновляет токен по refresh-токену (`/auth/refresh` ядра),
   при неудаче — `me.show_login = true`.
@@ -219,12 +221,18 @@ front/
   деталь разворачивает `loadChatDetail` (`models/chat/Chat.ts`).
 - **API_ENDPOINT в runtime:** index.html содержит `window.API_ENDPOINT =
   '<API_ENDPOINT>'`; Dockerfile/`replace-env.sh` подставляют значение при
-  старте контейнера (k8s: `env: API_ENDPOINT` в deployment). В dev — fallback.
+  старте контейнера (k8s: `env: API_ENDPOINT` в deployment). В dev — адрес
+  выводится из `location` (`services/endpoints.ts`), включая порт инстанса.
 - **Действия воркстейшнов/сессий** — `model.action(name, kwargs)` →
   `POST endpoint/{id}/{name}/`. После действия страница перезагружает Query
   (`shadowLoad()`), т.к. ядро не всегда возвращает обновлённый объект.
+- **Адреса ядра и pub-sub:** `services/endpoints.ts` выводит `API_BASE` и
+  `WS_URL` из `location` — dev-стенд открывается по `dev.<user>.localhost:<port>`,
+  где `<user>` — Linux-пользователь, поэтому ядро — `api.<user>.localhost:<port>`,
+  а Centrifugo — `pub-sub.<user>.localhost:<port>` (несколько инстансов на одной
+  машине не путают друг друга). `WS_URL` строит схему из `protocol`.
 - **`WS` pub-sub:** клиент centrifuge (`services/pub-sub.ts`) подключается к
-  центрифуго на `ws://pub-sub.localhost` (dev-compose и k8s). `pub_sub.init()`
+  центрифуго по `WS_URL` (адрес инстанса; см. endpoints). `pub_sub.init()`
   зовётся в layout после входа; один общий канал `common` для всех
   аутентифицированных — connection-JWT ядро выдаёт на `/connection-jwt/` (право
   на канал в токене). Подключение деградирует молча: центрифуго недоступен —

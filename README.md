@@ -112,9 +112,11 @@ make dev-verify  # проверка стенда
 make dev-e2e     # e2e-сценарии (см. e2e/README.md)
 ```
 
-Веб-клиент — `http://dev.localhost`, API — `http://api.localhost`, Keycloak —
-`http://auth.localhost`. Вход: `alice`/`alice-pass` (participant),
-`bob`/`bob-pass` (admin).
+Веб-клиент — `http://dev.<user>.localhost:<AGA_PROXY_PORT>`,
+API — `http://api.<user>.localhost:<AGA_PROXY_PORT>`,
+Keycloak — `http://auth.<user>.localhost:<AGA_PROXY_PORT>` (порт инстанса выводится
+из `$USER`, см. `makefile`; `:80` на общей машине занят). Вход: `alice`/`alice-pass`
+(participant), `bob`/`bob-pass` (admin).
 
 Тестовый стенд в Kubernetes (minikube):
 

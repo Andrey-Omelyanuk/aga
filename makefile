@@ -6,6 +6,24 @@ ifneq (,$(wildcard .env))
 	export
 endif
 
+# Dev-инстанс = Linux-пользователь: несколько инстансов на одной машине делят
+# loopback (порты) и Docker-демон (имена контейнеров и named volume), поэтому
+# имена и порты выводим из $USER и не пересекаемся между пользователями.
+# Переопределяется в .env (INSTANCE / PORT_BASE / NAME_PREFIX / WS_PREFIX).
+INSTANCE ?= $(USER)
+# Блок из 4 портов на пользователя: proxy, core, front, keycloak (контейнеры
+# слушают 80/8080 внутри, наружу публикуется порт инстанса).
+PORT_BASE ?= $(shell echo $$(( 20000 + (($$(id -u)) % 1000) * 10 )))
+AGA_PROXY_PORT := $(shell expr $(PORT_BASE) + 0)
+AGA_CORE_PORT  := $(shell expr $(PORT_BASE) + 1)
+AGA_FRONT_PORT := $(shell expr $(PORT_BASE) + 2)
+KEYCLOAK_PORT  := $(shell expr $(PORT_BASE) + 3)
+# Префикс имён контейнеров инстанса (и ws-контейнеров, которые ищет ядро).
+NAME_PREFIX ?= aga-$(INSTANCE)
+WS_PREFIX   ?= $(NAME_PREFIX)-
+# PORT намеренно не переопределяем: его читают k8s deploy.sh и локальный 'make run'.
+export INSTANCE PORT_BASE AGA_PROXY_PORT AGA_CORE_PORT AGA_FRONT_PORT KEYCLOAK_PORT NAME_PREFIX WS_PREFIX
+
 CARGO ?= cargo
 KUBECTL ?= kubectl
 
@@ -26,7 +44,7 @@ CARGO_IN_MAIN = cd main && $(CARGO)
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
  dev-up dev-down dev-logs dev-ps dev-reset dev-verify dev-e2e \
-        dev-roles dev-seed k8s-seed
+        dev-roles dev-proxy dev-seed k8s-seed
 
 help:
 	@echo "init        - Copy example files to working config (.env, roles.yaml)"
@@ -42,6 +60,7 @@ help:
 	@echo "front-test  - Run frontend unit tests (vitest)"
 	@echo "storybook   - Run Storybook dev server"
 	@echo "dev-roles   - Generate infra/dev-roles.yaml with SSO enabled (dev Keycloak)"
+	@echo "dev-proxy   - Generate infra/dev-proxy/nginx.conf for the instance"
 	@echo "dev-up      - Start dev stand (docker compose: core + Keycloak + ws-1 + ws-2)"
 	@echo "dev-down    - Stop dev stand (docker compose down)"
 	@echo "dev-logs    - Follow dev stand logs"
@@ -116,8 +135,11 @@ run-front:
 # пересоздаёт контейнеры при смене образов (в т.ч. ws-1/ws-2). Проекты — пустые
 # репо в named volumes (entrypoint инициализирует их сам).
 # Стенд — по-прежнему k8s (make k8s-*); compose только для разработки.
+# Проект compose привязан к инстансу (-p aga-<user>): у каждого пользователя
+# свои контейнеры, сеть и named volume (в т.ч. отдельная БД), а имена
+# контейнеров заданы явно через ${NAME_PREFIX}.
 DEV_COMPOSE = infra/dev-compose.yml
-DEV_COMPOSE_CMD = docker compose --env-file .env -f $(DEV_COMPOSE)
+DEV_COMPOSE_CMD = docker compose --env-file .env -p aga-$(INSTANCE) -f $(DEV_COMPOSE)
 
 # Конфиг dev-стенда со включённым SSO: из main/config/roles.yaml (локальный,
 # sso выключен) генерируется infra/dev-roles.yaml, где sso-блок заменён на
@@ -129,14 +151,20 @@ dev-roles:
 	@# Центрифуго-блок: из свежего roles.yaml (make init) он уже есть до sso;
 	@# в старом — подставляем дефолты, совпадающие с сервисом centrifugo compose.
 	@grep -q '^centrifuge:' infra/dev-roles.yaml || printf 'centrifuge:\n  api_url: http://centrifugo:8000\n  api_key: aga-api-key\n  secret: aga-hmac-secret\n  channel: common\n' >> infra/dev-roles.yaml
-	@printf 'sso:\n  enabled: true\n  jwks_url: http://keycloak:8080/realms/aga/protocol/openid-connect/certs\n  authorize_url: http://auth.localhost/realms/aga/protocol/openid-connect/auth\n  token_url: http://keycloak:8080/realms/aga/protocol/openid-connect/token\n  end_session_url: http://auth.localhost/realms/aga/protocol/openid-connect/logout\n  client_id: aga\n  client_secret: aga-secret\n' >> infra/dev-roles.yaml
-	@echo "dev-roles.yaml written (SSO enabled -> dev Keycloak)"
+	@printf 'sso:\n  enabled: true\n  jwks_url: http://keycloak:8080/realms/aga/protocol/openid-connect/certs\n  authorize_url: http://auth.$(INSTANCE).localhost:$(AGA_PROXY_PORT)/realms/aga/protocol/openid-connect/auth\n  token_url: http://keycloak:8080/realms/aga/protocol/openid-connect/token\n  end_session_url: http://auth.$(INSTANCE).localhost:$(AGA_PROXY_PORT)/realms/aga/protocol/openid-connect/logout\n  client_id: aga\n  client_secret: aga-secret\n' >> infra/dev-roles.yaml
+	@echo "dev-roles.yaml written (SSO enabled -> dev Keycloak, instance $(INSTANCE))"
 
-dev-up: dev-roles
+# nginx-прокси инстанса: server_name из шаблона (dev.<instance>.localhost и т.д.).
+# Генерируется из шаблона, т.к. зависит от инстанса; монтируется в сервис proxy.
+dev-proxy:
+	@sed "s/__INSTANCE__/$(INSTANCE)/g" infra/dev-proxy/nginx.conf.template > infra/dev-proxy/nginx.conf
+	@echo "dev-proxy nginx.conf written (instance $(INSTANCE))"
+
+dev-up: dev-roles dev-proxy
 	$(DEV_COMPOSE_CMD) up -d --build
 	# Прокси монтирует nginx.conf bind'ом — compose не пересоздаёт его при смене
-	# файла; reload подхватывает новую конфигурацию (в т.ч. auth.localhost).
-	@docker exec aga-proxy nginx -s reload >/dev/null 2>&1 || true
+	# файла; reload подхватывает новую конфигурацию (в т.ч. auth.<instance>).
+	@$(DEV_COMPOSE_CMD) exec -T proxy nginx -s reload >/dev/null 2>&1 || true
 
 dev-down:
 	$(DEV_COMPOSE_CMD) down
@@ -152,19 +180,19 @@ dev-reset:
 	rm -f main/data/trace.db main/data/trace.db-wal main/data/trace.db-shm
 	$(MAKE) dev-up
 
-dev-verify: dev-roles
+dev-verify: dev-roles dev-proxy
 	bash e2e/dev-verify.sh
 
-# Восстановить тестовый набор в БД dev-стенда (контейнер aga-core).
+# Восстановить тестовый набор в БД dev-стенда (контейнер core).
 # Пересобирает образ ядра — seed-подкоманда живёт в бинаре /app/aga.
-dev-seed:
+dev-seed: dev-roles dev-proxy
 	$(DEV_COMPOSE_CMD) up -d --build
-	docker exec aga-core /app/aga seed
+	$(DEV_COMPOSE_CMD) exec -T core /app/aga seed
 
 # E2E через веб-клиент (Playwright) на dev-стенде: e2e/run.sh, описание —
 # e2e/README.md. Ядро и агент-рантайм — один образ: пересоздаём оба, иначе
 # рантайм останется на старом бинаре. Фронт — vite с HMR, пересборка не нужна.
-dev-e2e: dev-roles
+dev-e2e: dev-roles dev-proxy
 	$(DEV_COMPOSE_CMD) up -d --build --force-recreate core agent ws-1 ws-2
 	bash e2e/run.sh
 

@@ -31,6 +31,10 @@ pub struct Cluster {
     pub namespace: String,
     pub template: String,
     pub image: String,
+    /// Префикс имён ws-контейнеров/подов (env `AGA_WS_PREFIX`). В k8s пуст;
+    /// dev-стенд задаёт `aga-<user>-`, чтобы контейнеры разных пользователей на
+    /// общем Docker-демоне не сталкивались.
+    pub ws_prefix: String,
     pub wait_timeout_secs: u64,
 }
 
@@ -96,13 +100,15 @@ impl Cluster {
             namespace: env("AGA_K8S_NAMESPACE", "default"),
             template: env("AGA_K8S_TEMPLATE", "./infra/k8s/workstation-pod.yaml"),
             image: env("AGA_K8S_IMAGE", "aga-workstation:latest"),
+            ws_prefix: env("AGA_WS_PREFIX", ""),
             wait_timeout_secs,
         }
     }
 
-    /// Имя пода воркстейшна. Производное от id: стабильно и уникально.
-    pub fn pod_name(ws_id: i64) -> String {
-        format!("ws-{ws_id}")
+    /// Имя пода/контейнера воркстейшна. Производное от id: стабильно и уникально.
+    /// Префикс — `ws_prefix` из env `AGA_WS_PREFIX` (dev: `aga-<user>-`; k8s: пуст).
+    pub fn pod_name(&self, ws_id: i64) -> String {
+        format!("{}ws-{ws_id}", self.ws_prefix)
     }
 
     /// Ветка, на которой воркстейшн работает в своём поде.
@@ -454,6 +460,7 @@ mod tests {
             namespace: "aga".into(),
             template: "/nonexistent/workstation-pod.yaml".into(),
             image: "aga-workstation:test".into(),
+            ws_prefix: String::new(),
             wait_timeout_secs: 1,
         }
     }
@@ -502,8 +509,16 @@ mod tests {
 
     #[test]
     fn each_workstation_gets_its_own_pod() {
-        assert_ne!(Cluster::pod_name(1), Cluster::pod_name(2));
-        assert_eq!(Cluster::pod_name(1), "ws-1");
+        let c = cluster();
+        assert_ne!(c.pod_name(1), c.pod_name(2));
+        assert_eq!(c.pod_name(1), "ws-1");
+    }
+
+    #[test]
+    fn pod_name_carries_ws_prefix() {
+        let mut c = cluster();
+        c.ws_prefix = "aga-alice-".into();
+        assert_eq!(c.pod_name(1), "aga-alice-ws-1");
     }
 
     #[test]

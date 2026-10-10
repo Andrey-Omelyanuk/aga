@@ -89,18 +89,23 @@ aga/
   `make fmt`.
 - Dev-стенд без кластера (ядро + маленькая LLM + Keycloak + веб-клиент +
   2 воркстейшна в docker compose; SSO включён, как в стенде):
-  `make dev-roles`, `make dev-up`, `make dev-down`,
+  `make dev-roles`, `make dev-proxy`, `make dev-up`, `make dev-down`,
   `make dev-logs`, `make dev-ps`, `make dev-reset`, `make dev-verify`.
-  Воркстейшны — контейнеры `ws-1`/`ws-2` с пустыми git-репо в отдельных named
-  volumes (проект агент наполняет сам); ядро в docker-режиме
-  (`AGA_WS_BACKEND=docker`) переиспользует
-  их; маленькая LLM — контейнер `ollama` с моделью до 1B (`qwen3:0.6b`),
-  подключение к нему в БД создаёт сид (`make dev-seed`, адрес `ollama:11434/v1`)
-  или настраивается вручную на странице «LLM» — из env LLM не читается;
-  фронт — сервис `front` (vite, `:8081`); прокси `*.localhost` на `:80`
-  (`dev.localhost` → front, `api.localhost` → core, `auth.localhost` → Keycloak)
-  — как в k8s-стенде. `make dev-roles` генерирует `infra/dev-roles.yaml`
-  (roles.yaml со включённым SSO для dev-Keycloak).
+  Инстанс = Linux-пользователь (`$USER`): несколько инстансов на одной машине
+  делят loopback и Docker-демон, поэтому порты (блок из `PORT_BASE`), префикс
+  контейнеров (`aga-<user>`) и ws-контейнеров (`aga-<user>-ws-1`) выводятся из
+  `$USER` (см. `makefile`, переопределяются в `.env`). Воркстейшны — контейнеры
+  `aga-<user>-ws-1`/`-ws-2` с пустыми git-репо в отдельных named volumes (проект
+  агент наполняет сам); ядро в docker-режиме (`AGA_WS_BACKEND=docker`)
+  переиспользует их; маленькая LLM — контейнер `ollama` с моделью до 1B
+  (`qwen3:0.6b`), подключение к нему в БД создаёт сид (`make dev-seed`, адрес
+  `ollama:11434/v1`) или настраивается вручную на странице «LLM» — из env LLM
+  не читается; фронт — сервис `front` (vite); прокси `*.localhost` на порту
+  инстанса `${AGA_PROXY_PORT}` (`:80` на общей машине занят) —
+  `dev.<user>.localhost` → front, `api.<user>.localhost` → core,
+  `auth.<user>.localhost` → Keycloak. `make dev-roles` генерирует
+  `infra/dev-roles.yaml`, `make dev-proxy` — `infra/dev-proxy/nginx.conf`
+  (оба — с хостами инстанса).
 - Тестовый стенд — в k8s (minikube): `make k8s-up`, `make k8s-build`, `make k8s-load`,
   `make k8s-deploy`, `make k8s-wait`, `make k8s-web`, `make k8s-verify`; ручной
   доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси
@@ -128,6 +133,8 @@ aga/
 - Проект регистрируется git-URL; воркстейшн — под/контейнер `ws-<id>` с
   собственным Docker (DinD) и копией проекта; кластером/контейнерами управляет
   только ядро. Dev-compose поднимает контейнеры заранее — ядро их переиспользует.
+  В dev-стенде имя контейнера — с префиксом инстанса (`aga-<user>-ws-<id>`, env
+  `AGA_WS_PREFIX`): на общей машине `ws-<id>` сталкиваются у разных пользователей.
 - `ask_human` (`[ASK_HUMAN]` в текстовом режиме) — единственный протокол human-in-the-loop, живёт в чате: текст вопроса
   публикуется сообщением агента, задача ждёт (`waiting_human`); ответ — сообщение с
   `parent_id` на вопрос от любого участника, оно закрывает запрос и запускает продолжение.
@@ -154,7 +161,8 @@ aga/
   читается вовсе (LLM_API_URL/LLM_API_KEY/LLM_MODEL и bootstrap нет) — всё
   настраивается в БД.
 - В стенде SPA и API разнесены по сервисам: `dev.localhost` → `front/`,
-  `api.localhost` → `main/`. Ядро статику не раздаёт.
+  `api.localhost` → `main/` (в dev-стенде — `dev.<user>.localhost` /
+  `api.<user>.localhost` : `${AGA_PROXY_PORT}`). Ядро статику не раздаёт.
 
 ## Verification
 - Сборка и линт ядра: `make build`, `make lint` — без ошибок.

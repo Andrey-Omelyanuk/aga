@@ -10,7 +10,7 @@ use crate::cluster::Cluster;
 pub fn executor_for_workstation(ws_id: Option<i64>, cluster: &Cluster) -> Executor {
     match ws_id {
         Some(id) => {
-            let name = Cluster::pod_name(id);
+            let name = cluster.pod_name(id);
             match cluster.backend {
                 crate::cluster::Backend::K8s => Executor::KubectlExec {
                     namespace: cluster.namespace.clone(),
@@ -34,6 +34,7 @@ mod tests {
             namespace: "aga".into(),
             template: "/nonexistent/workstation-pod.yaml".into(),
             image: "aga-workstation:test".into(),
+            ws_prefix: String::new(),
             wait_timeout_secs: 1,
         }
     }

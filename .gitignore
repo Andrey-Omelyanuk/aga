@@ -21,6 +21,9 @@ main/config/roles.yaml
 # Dev-SSO config (генерируется make dev-roles из main/config/roles.yaml)
 infra/dev-roles.yaml
 
+# Dev-прокси инстанса (генерируется make dev-proxy)
+infra/dev-proxy/nginx.conf
+
 # Runtime nginx config (генерируется infra/k8s/local-proxy.sh start)
 infra/k8s/local-proxy/run/
 

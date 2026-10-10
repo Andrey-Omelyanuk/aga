@@ -12,20 +12,22 @@
 # Проекты воркстейшнов — пустые git-репо в отдельных named volumes
 # (ws-1-data/ws-2-data, без доступа с хоста); GIT_URL не задан, entrypoint
 # инициализирует пустое репо сам. Проект агент наполняет сам в dev.
-name: aga-dev
-
+# Проект compose задаётся извне (-p aga-<user>, см. makefile): у каждого
+# пользователя свои контейнеры, сеть и named volume. Имена контейнеров —
+# ${NAME_PREFIX} (ага-<user>), ws-контейнеры — ${WS_PREFIX}ws-<id> (их ищет ядро
+# по AGA_WS_PREFIX). Порты и публичные хосты — от инстанса (${INSTANCE}).
 services:
   core:
-    image: aga-core:dev
+    image: aga-core:${INSTANCE}
     build:
       context: ../main
       dockerfile: Dockerfile
-    container_name: aga-core
+    container_name: ${NAME_PREFIX}-core
     # Воркстейшны управляются через docker.sock хоста; образ ядра запускается
     # пользователем aga (uid 1000) — для dev переходим на root.
     user: "0:0"
     ports:
-      - "${PORT:-8080}:8080"
+      - "${AGA_CORE_PORT:-8080}:8080"
     volumes:
       # Конфиг ядра со включённым SSO (dev-roles.yaml), указывающим на Keycloak
       # этого compose. Генерируется из main/config/roles.yaml — make dev-roles
@@ -35,24 +37,27 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - RUST_LOG=${RUST_LOG:-info}
-      - PORT=${PORT:-8080}
+      - PORT=8080
       - AGA_CONFIG_PATH=/etc/aga/roles.yaml
       - AGA_DB_PATH=/var/lib/aga/trace.db
       # Воркстейшны как docker-контейнеры (не поды): переиспользуем ws-1/ws-2
       # из compose, при необходимости создаём через docker run.
       - AGA_WS_BACKEND=docker
       # Образ воркстейшна: тот же, что собирает compose (server ниже).
-      - AGA_K8S_IMAGE=aga-workstation:dev
+      - AGA_K8S_IMAGE=aga-workstation:${INSTANCE}
+      # Префикс имён ws-контейнеров инстанса (ws-<id> без него сталкиваются
+      # у разных пользователей на общем Docker-демоне).
+      - AGA_WS_PREFIX=${WS_PREFIX}
       - AGA_MAX_THREAD_DEPTH=${AGA_MAX_THREAD_DEPTH:-10}
       - AGA_MAX_THREAD_MESSAGES=${AGA_MAX_THREAD_MESSAGES:-100}
       # SSH-ключ aga (git+ssh для воркстейшнов): приватный задаёт админ в .env;
       # ядро прокидывает его в контейнеры ws (inject_ssh_key) при подъёме.
       - AGA_SSH_PRIVATE_KEY=${AGA_SSH_PRIVATE_KEY:-}
-      # Канонический адрес SPA dev-стенда — через прокси (dev.localhost),
+      # Канонический адрес SPA dev-стенда — через прокси (dev.<instance>.localhost),
       # туда же возвращается токен после SSO (auth_callback). Задаём явно,
       # а не из .env: там AGA_FRONT_URL=http://localhost:8081 (для make run),
       # что ломает возврат токена в SSO-флоу dev-стенда.
-      - AGA_FRONT_URL=http://dev.localhost
+      - AGA_FRONT_URL=http://dev.${INSTANCE}.localhost:${AGA_PROXY_PORT}
     restart: "no"
 
   # Агент-рантайм — отдельный процесс того же образа (`aga agent`): подписан на
@@ -62,8 +67,8 @@ services:
   # команды агентов идут в контейнеры ws через docker.sock (AGA_WS_BACKEND=docker).
   # Centrifugo обязателен: без него рантайм не поднимается (нет источника событий).
   agent:
-    image: aga-core:dev
-    container_name: aga-agent
+    image: aga-core:${INSTANCE}
+    container_name: ${NAME_PREFIX}-agent
     command: ["agent"]
     user: "0:0"
     volumes:
@@ -75,7 +80,8 @@ services:
       - AGA_CONFIG_PATH=/etc/aga/roles.yaml
       - AGA_DB_PATH=/var/lib/aga/trace.db
       - AGA_WS_BACKEND=docker
-      - AGA_K8S_IMAGE=aga-workstation:dev
+      - AGA_K8S_IMAGE=aga-workstation:${INSTANCE}
+      - AGA_WS_PREFIX=${WS_PREFIX}
       - AGA_MAX_THREAD_DEPTH=${AGA_MAX_THREAD_DEPTH:-10}
       - AGA_MAX_THREAD_MESSAGES=${AGA_MAX_THREAD_MESSAGES:-100}
       - AGA_SSH_PRIVATE_KEY=${AGA_SSH_PRIVATE_KEY:-}
@@ -91,7 +97,7 @@ services:
   # вручную на странице «LLM».
   ollama:
     image: ollama/ollama:latest
-    container_name: aga-ollama
+    container_name: ${NAME_PREFIX}-ollama
     # Entrypoint образа — ollama, поэтому явно задаём shell: поднимаем сервер и
     # тянем маленькую модель (после первого раза pull — no-op, volume хранит).
     entrypoint: ["/bin/sh", "-c"]
@@ -105,7 +111,7 @@ services:
   # ядро тянет по имени сервиса (keycloak:8080) из compose-сети.
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
-    container_name: aga-keycloak
+    container_name: ${NAME_PREFIX}-keycloak
     command: ["start-dev", "--import-realm"]
     environment:
       - KEYCLOAK_ADMIN=admin
@@ -115,7 +121,7 @@ services:
       # auth.localhost), а ядро обращается по keycloak:8080. Без фиксированного
       # hostname Keycloak отклоняет refresh из ядра: «Invalid token issuer»
       # (тихое обновление токена в SPA не работало). Пойман e2e (access.spec.ts).
-      - KC_HOSTNAME=http://auth.localhost
+      - KC_HOSTNAME=http://auth.${INSTANCE}.localhost:${AGA_PROXY_PORT}
       - KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true
     ports:
       - "${KEYCLOAK_PORT:-8082}:8080"
@@ -129,7 +135,7 @@ services:
       # Правки подхватываются без пересборки образа; прод-сборка (nginx, dist/)
       # остаётся отдельной: make build + k8s/front.
       image: node:22
-      container_name: aga-front
+      container_name: ${NAME_PREFIX}-front
       working_dir: /app
       command: npm run dev -- --host 0.0.0.0 --port 80 --strictPort
       volumes:
@@ -147,7 +153,7 @@ services:
   # (генерируется из main/config/roles.yaml).
   centrifugo:
     image: centrifugo/centrifugo:v6
-    container_name: aga-centrifugo
+    container_name: ${NAME_PREFIX}-centrifugo
     environment:
       # Centrifugo v6: имена env — по путям конфига (client.token_hmac_secret_key,
       # http.api_key, client.allowed_origins, uni_sse.enabled), uni-SSE по
@@ -155,8 +161,9 @@ services:
       # /connection/sse, как обращается агент-рантайм (centrifuge.rs).
       - CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY=aga-hmac-secret
       - CENTRIFUGO_HTTP_API_KEY=aga-api-key
-      # SPA живёт на dev.localhost (прокси) — это и есть Origin websocket-соединения.
-      - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=http://dev.localhost
+      # SPA живёт на dev.<instance>.localhost (прокси) — это и есть Origin
+      # websocket-соединения.
+      - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=http://dev.${INSTANCE}.localhost:${AGA_PROXY_PORT}
       # Unidirectional SSE (/connection/sse): им пользуется агент-рантайм
       # (`aga agent`) для серверной подписки на общий канал (runtime.rs).
       - CENTRIFUGO_UNI_SSE_ENABLED=true
@@ -167,25 +174,27 @@ services:
       - CENTRIFUGO_LOG_LEVEL=info
     restart: "no"
 
-  # Прокси *.localhost как в k8s-стенде: dev.localhost → front (SPA),
-  # api.localhost → core (API). Браузер сам резолвит *.localhost в
-  # 127.0.0.1/::1 (RFC 6761), порт 80 — как в стенде. Конфиг: dev-proxy/nginx.conf.
+  # Прокси *.localhost как в k8s-стенде, но по хостам инстанса: браузер
+  # резолвит *.localhost в 127.0.0.1/::1 (RFC 6761), а порт — инстанса
+  # (${AGA_PROXY_PORT}; :80 занят на общей машине). dev.<instance>.localhost →
+  # front (SPA), api.<instance>.localhost → core (API). Конфиг генерируется
+  # make dev-proxy из dev-proxy/nginx.conf.template.
   proxy:
     image: nginx:alpine
-    container_name: aga-proxy
+    container_name: ${NAME_PREFIX}-proxy
     depends_on:
       - core
       - front
     ports:
-      - "${AGA_PROXY_PORT:-80}:80"
+      - "${AGA_PROXY_PORT:-8080}:80"
     volumes:
       - ./dev-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
     restart: "no"
 
   ws-1:
-    image: aga-workstation:dev
+    image: aga-workstation:${INSTANCE}
     build: ./k8s/workstation-image
-    container_name: ws-1
+    container_name: ${WS_PREFIX}ws-1
     # Rootful DinD (dockerd внутри работает root'ом); команды агента ядро
     # выполняет через `docker exec -u 1000`, поэтому файлы проекта в volume
     # принадлежат uid 1000. Проект в отдельном named volume (не bind-mount) —
@@ -199,9 +208,9 @@ services:
     restart: "no"
 
   ws-2:
-    image: aga-workstation:dev
+    image: aga-workstation:${INSTANCE}
     build: ./k8s/workstation-image
-    container_name: ws-2
+    container_name: ${WS_PREFIX}ws-2
     privileged: true
     volumes:
       - ws-2-data:/work/project

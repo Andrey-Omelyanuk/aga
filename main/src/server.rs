@@ -1941,7 +1941,7 @@ async fn create_workstation(
 
     // Станция пустая: GIT_URL не задан — entrypoint инициализирует пустое
     // git-репо в /work/project, код проекта развернёт открытие сессии.
-    let pod_name = Cluster::pod_name(ws.id);
+    let pod_name = state.cluster.pod_name(ws.id);
     let branch = Cluster::branch_name(ws.id);
 
     // Ключ до подъёма станции: в k8s — Secret в кластере (монтируется в под
@@ -2019,7 +2019,7 @@ async fn delete_workstation(
     }
     // Сначала под, потом запись: если кластер не отдал под — состояние не
     // трогаем, пользователь повторит.
-    if let Err(e) = state.cluster.delete_pod(&Cluster::pod_name(id)).await {
+    if let Err(e) = state.cluster.delete_pod(&state.cluster.pod_name(id)).await {
         tracing::error!("failed to delete workstation pod ws-{id}: {e}");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -2315,7 +2315,7 @@ async fn open_workstation_session(
     ) {
         if let Err(e) = state
             .cluster
-            .inject_ssh_key(&Cluster::pod_name(id), key)
+            .inject_ssh_key(&state.cluster.pod_name(id), key)
             .await
         {
             tracing::warn!("failed to inject ssh key into ws-{id}: {e}");
@@ -2435,6 +2435,7 @@ mod tests {
             namespace: "default".into(),
             template: "/nonexistent.yaml".into(),
             image: "img".into(),
+            ws_prefix: String::new(),
             wait_timeout_secs: 1,
         };
         let centrifuge = CentrifugeClient::from_config(&crate::config::CentrifugeConfig {

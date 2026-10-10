@@ -20,19 +20,22 @@
   Статику ядро не раздаёт.
 - `front/Dockerfile` — nginx, раздаёт `front/dist` (отдельный сервис).
 - `.env.example` — шаблон, копируется в корневой `.env` через `make init`.
-- `dev-compose.yml` — dev-стенд: ядро (docker.sock, `AGA_WS_BACKEND=docker`),
-  агент-рантайм (`agent`: тот же образ `aga-core:dev`, команда `aga agent`,
-  общий с ядром том БД `aga-data` и docker.sock — подписан на Centrifugo,
-  агентов ядро не запускает),
+- `dev-compose.yml` — dev-стенд одного инстанса (= Linux-пользователь; проект
+  compose `-p aga-<user>`, имена контейнеров `${NAME_PREFIX}`): ядро
+  (docker.sock, `AGA_WS_BACKEND=docker`), агент-рантайм (`agent`: тот же образ
+  `aga-core:<user>`, команда `aga agent`, общий с ядром том БД `aga-data` и
+  docker.sock — подписан на Centrifugo, агентов ядро не запускает),
   веб-клиент (`front`, vite dev-server с HMR, образ `node:22`, bind-mount
-  `../front`, host-порт `${AGA_FRONT_PORT:-8081}:80`; прод-сборка nginx из
-  `dist/` — отдельно, `make build` + k8s/front),
+  `../front`, host-порт `${AGA_FRONT_PORT}:80`; прод-сборка nginx из `dist/` —
+  отдельно, `make build` + k8s/front),
   Keycloak (SSO dev-стенда, тот же realm `aga`, host-порт
-  `${KEYCLOAK_PORT:-8082}:8080`),
-  nginx-прокси `*.localhost` (`proxy`, `dev-proxy/nginx.conf`, host-порт
-  `${AGA_PROXY_PORT:-80}`) + 2 воркстейшна (`ws-1`, `ws-2`, privileged, пустые
-  git-репо в отдельных named volumes `ws-1-data`/`ws-2-data` — на хосте файлов
-  воркстейшнов нет) + маленькая LLM (`ollama`, модель до 1B `qwen3:0.6b` —
+  `${KEYCLOAK_PORT}:8080`),
+  nginx-прокси `*.localhost` (`proxy`, host-порт `${AGA_PROXY_PORT}` — порт
+  инстанса, не `:80`; конфиг `dev-proxy/nginx.conf` генерируется
+  `make dev-proxy` из шаблона) + 2 воркстейшна (`ws-1`, `ws-2`, privileged,
+  контейнеры `${WS_PREFIX}ws-1`/`-ws-2`, пустые git-репо в отдельных named
+  volumes `ws-1-data`/`ws-2-data` — на хосте файлов воркстейшнов нет) +
+  маленькая LLM (`ollama`, модель до 1B `qwen3:0.6b` —
   тянется при старте; подключение к ней в БД создаёт сид (`make dev-seed`,
   адрес `ollama:11434/v1`) или админ вручную на странице «LLM») + Centrifugo (события чата: общий канал
   `common` для аутентифицированных (на него же подписан агент-рантайм) +
@@ -40,8 +43,9 @@
   unidirectional-SSE (`CENTRIFUGO_UNI_SSE=true`) — транспорт подписки
   агент-рантайма; секреты — `aga-api-key`/`aga-hmac-secret`,
   совпадают с центрифуго-блоком roles.yaml). Прокси маршрутизирует как ingress
-  в k8s: `dev.localhost` → front, `api.localhost` → core, `auth.localhost` →
-  Keycloak, `pub-sub.localhost` → centrifugo.
+  в k8s, но по хостам инстанса: `dev.<user>.localhost` → front,
+  `api.<user>.localhost` → core, `auth.<user>.localhost` →
+  Keycloak, `pub-sub.<user>.localhost` → centrifugo.
   Конфиг ядра — `infra/dev-roles.yaml` (генерируется `make dev-roles` из
   `main/config/roles.yaml`, sso-блок — стендовый, Keycloak этого compose).
   SSH-ключ aga (`AGA_SSH_PRIVATE_KEY`) пробрасывается ядру из `.env` и
@@ -57,7 +61,9 @@
   cargo run в `main/`), `make run-front` (vite dev, `front/`), `make dev-*`
   (dev-стенд в compose), `make k8s-*` (стенд в кластере).
 - Dev-стенд — опциональный, только для разработки; стенд поднимается в k8s.
-  Compose-команды идут с `--env-file .env` (только ssh-ключ и порты).
+  Compose-команды идут с `--env-file .env` и `-p aga-<user>` (инстанс = Linux-
+  пользователь): порты, префикс контейнеров и ws-контейнеров выводятся из
+  `$USER` (см. `makefile`), ssh-ключ — из `.env`.
 - LLM из env не читается вовсе (LLM_API_URL/LLM_API_KEY/LLM_MODEL и
   AGA_K8S_LLM_API_URL не используются): подключения к LLM живут в БД и
   выбираются на странице «LLM». Dev-стенд поднимает свою маленькую LLM
@@ -71,8 +77,9 @@
   стартует без него (анонимный доступ закрыт).
 - Веб-клиент разнесён с API по сервисам: `dev.localhost` → фронт,
   `api.localhost` → ядро, `auth.localhost` → Keycloak, `pub-sub.localhost` →
-  Centrifugo (см. `k8s/core/70-ingress.yaml`). В dev-compose те же маршруты —
-  `dev-proxy/nginx.conf`.
+  Centrifugo (см. `k8s/core/70-ingress.yaml`). В dev-compose — те же маршруты,
+  но с хостом инстанса (`dev.<user>.localhost`, порт `${AGA_PROXY_PORT}`) —
+  `dev-proxy/nginx.conf.template`.
 
 ## Verification
 - `make init` — создаёт `.env` и `main/config/roles.yaml` из примеров.

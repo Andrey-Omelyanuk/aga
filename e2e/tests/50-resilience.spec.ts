@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { docker } from './lib/stand';
+import { container, docker } from './lib/stand';
 import { agentReply, as, messages, openChat, openSessionChat, send } from './lib/ui';
 
 // Устойчивость: перезапуски Centrifugo и агент-рантайма посреди работы.
@@ -25,8 +25,8 @@ test('Centrifugo restart: browsers reconnect, people keep chatting live', async 
     predicate: (ws) => ws.url().includes('pub-sub'),
     timeout: 60_000,
   });
-  docker('restart', 'aga-centrifugo');
-  waitHealthy('aga-centrifugo');
+  docker('restart', container('centrifugo'));
+  waitHealthy(container('centrifugo'));
   const ws = await reconnected;
   await ws.waitForEvent('framereceived', { predicate: (f) => String(f.payload).includes('"connect"') });
 
@@ -39,11 +39,11 @@ test('message sent while Centrifugo is down still reaches the agent', async ({ b
   await openSessionChat(bob);
 
   // Centrifugo лежит: ядро сохраняет сообщение, но событие никуда не уходит.
-  docker('stop', 'aga-centrifugo');
+  docker('stop', container('centrifugo'));
   try {
     await send(bob, `@alice пока шина лежит ${run}`);
   } finally {
-    docker('start', 'aga-centrifugo');
+    docker('start', container('centrifugo'));
   }
 
   // Рантайм переподключается и догружает пропущенное из БД — агент отвечает
@@ -64,8 +64,8 @@ test('agent runtime restart: the next mention is answered once, old ones are not
   await expect(agentReply(bob).first()).toBeVisible();
   const before = await agentReply(bob).count();
 
-  docker('restart', 'aga-agent');
-  waitHealthy('aga-agent');
+  docker('restart', container('agent'));
+  waitHealthy(container('agent'));
 
   await send(bob, `@alice после рестарта агента ${run}`);
   const reply = agentReply(bob, new RegExp(`Готово \\(e2e mock\\).*после рестарта агента ${run}`));

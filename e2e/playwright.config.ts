@@ -1,8 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// E2E через веб-клиент dev-стенда (http://dev.localhost). Стенд готовит
-// e2e/run.sh (сид, mock-LLM), браузер ходит через прокси *.localhost как
-// пользователь. Описание сценариев — e2e/README.md.
+// E2E через веб-клиент dev-стенда (http://dev.<instance>.localhost:<port>).
+// Стенд готовит e2e/run.sh (сид, mock-LLM), браузер ходит через прокси
+// *.localhost как пользователь. baseURL задаёт run.sh (E2E_BASE_URL).
+// Описание сценариев — e2e/README.md.
 export default defineConfig({
   testDir: './tests',
   // Сценарии — один путь пользователя на общем стенде: строго по очереди.

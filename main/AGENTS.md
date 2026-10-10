@@ -138,11 +138,14 @@ src/
 - **Проект = git-URL:** воркстейшн-под клонирует репозиторий; `compose_path` из старых БД мигрируется в `git_url` (см. `migrate_projects_git_url`).
 - **Воркстейшн = под/контейнер:** в стенде `ws-<id>` — под в неймспейсе кластера,
   команды агента — `kubectl exec`; в dev (`AGA_WS_BACKEND=docker`) — контейнер
-  `ws-<id>`, команды — `docker exec`. Pod-манифест рендерит `cluster.rs` из шаблона
+  `<префикс>ws-<id>`, команды — `docker exec`. Префикс задаёт env `AGA_WS_PREFIX`
+  (`pod_name` в `cluster.rs`): на общей машине контейнеры разных пользователей
+  делят Docker-демон, и `ws-<id>` без префикса сталкиваются (dev-стенд задаёт
+  `aga-<user>-`); в k8s префикс пуст — имя как раньше. Pod-манифест рендерит `cluster.rs` из шаблона
   (встроенный дефолт совпадает с `infra/k8s/workstation-pod.yaml`); под
   привилегированный (DinD) и без доступа к k8s API (`automountServiceAccountToken: false`).
   В docker-режиме `create_workstation` переиспользует уже существующий контейнер
-  `ws-<id>` (compose-стенд поднимает их заранее), иначе запускает `docker run`
+  `<префикс>ws-<id>` (compose-стенд поднимает их заранее), иначе запускает `docker run`
   (локальный путь в git_url — бинд-маунт, git-URL — клонирование как в k8s).
 - **Жизненный цикл воркстейшна:** при подъёме в ws может монтироваться именованный
   k8s-Secret (секреты для сторонних CLI, `secret` у воркстейшна) — хранится только
@@ -350,7 +353,7 @@ src/
   и дефолтное подключение к LLM (`ollama-local`, адрес `http://ollama:11434/v1`,
   модель `qwen3:0.6b` — контейнер ollama dev-стенда; локально `cargo run -- seed`
   для host-ollama адрес правится на странице «LLM»). Запуск:
-  `make dev-seed` (контейнер aga-core) / `make k8s-seed` (кластер); локально —
+  `make dev-seed` (контейнер aga-<user>-core) / `make k8s-seed` (кластер); локально —
   `cargo run -- seed` в `main/`. `roles.yaml` для сида не нужен — подкоманда
   отрабатывает до загрузки конфига. Участники `alice`/`bob` — учётки Keycloak
   (фиксированные `sso_subject` из `infra/k8s/core/keycloak-realm.json`, пароли

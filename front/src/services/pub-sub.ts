@@ -2,12 +2,13 @@ import { Centrifuge } from 'centrifuge';
 import { autorun } from 'mobx';
 import http from './http';
 import me from './me';
+import { WS_URL } from './endpoints';
 
 // Клиент Centrifuge для реального времени. Аналогично эталону (infobiz):
 // серверное pub-sub подпитывает кэш моделей. В aga pub-sub-сервис — это
 // centrifugo (поднят в dev-compose и k8s), общий канал `common` для всех
 // аутентифицированных. Токен на подключение ядро выдаёт на `/connection-jwt/`.
-const WS_URL = 'ws://pub-sub.localhost/connection/websocket';
+// Адрес — из endpoints (pub-sub.<instance>.localhost:<port>).
 // Канал обновлений чата: один общий для всех аутентифицированных (см. историю
 // chat-websocket-centrifuge). Пока без пер-чатовых каналов.
 const CHANNEL = 'common';

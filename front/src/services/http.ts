@@ -1,13 +1,8 @@
 import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios';
 
-// API_ENDPOINT подставляется в index.html при старте контейнера
-// (replace-env.sh, см. Dockerfile). В dev-режиме — fallback по hostname.
-export const API_BASE =
-  (window as any)?.API_ENDPOINT && (window as any).API_ENDPOINT !== '<API_ENDPOINT>'
-    ? (window as any).API_ENDPOINT
-    : location.hostname === 'dev.localhost'
-      ? 'http://api.localhost'
-      : 'http://localhost:8080';
+// Адрес ядра — из общего вывода endpoints (location/API_ENDPOINT); см. там.
+import { API_BASE } from './endpoints';
+export { API_BASE };
 
 export const TOKEN_KEY = 'aga_token';
 

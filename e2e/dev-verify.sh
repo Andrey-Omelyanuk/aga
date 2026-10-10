@@ -5,10 +5,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CORE="${CORE:-http://localhost:${PORT:-8080}}"
-FRONT="http://localhost:${AGA_FRONT_PORT:-8081}"
-LOCAL=(--resolve dev.localhost:80:127.0.0.1 --resolve api.localhost:80:127.0.0.1
-       --resolve auth.localhost:80:127.0.0.1)
+# Инстанс = Linux-пользователь (переменные экспортирует makefile).
+INSTANCE="${AGA_INSTANCE:-${INSTANCE:-$USER}}"
+NAME_PREFIX="${NAME_PREFIX:-aga-${INSTANCE}}"
+WS_PREFIX="${WS_PREFIX:-${NAME_PREFIX}-}"
+PROXY_PORT="${AGA_PROXY_PORT:-8080}"
+CORE="${CORE:-http://localhost:${AGA_CORE_PORT:-8080}}"
+FRONT="${FRONT:-http://localhost:${AGA_FRONT_PORT:-8081}}"
+LOCAL=(--resolve "dev.${INSTANCE}.localhost:${PROXY_PORT}:127.0.0.1"
+       --resolve "api.${INSTANCE}.localhost:${PROXY_PORT}:127.0.0.1"
+       --resolve "auth.${INSTANCE}.localhost:${PROXY_PORT}:127.0.0.1")
 
 ok() { echo "$* OK"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -24,8 +30,8 @@ wait_for() {
   return 1
 }
 
-echo "Waiting for Keycloak realm (auth.localhost)..."
-wait_for 120 sh -c "curl -s ${LOCAL[*]} http://auth.localhost/realms/aga | grep -q '\"realm\"'" \
+echo "Waiting for Keycloak realm (auth.${INSTANCE}.localhost)..."
+wait_for 120 sh -c "curl -s ${LOCAL[*]} http://auth.${INSTANCE}.localhost:${PROXY_PORT}/realms/aga | grep -q '\"realm\"'" \
   || fail "Keycloak realm aga"
 # Ядро поднимает HTTP только после JWKS Keycloak — ждём и его.
 wait_for 120 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' $CORE/users)\" = 401 ]" \
@@ -33,16 +39,19 @@ wait_for 120 sh -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' $CORE/users)\"
 
 [ "$(code "$CORE/users")" = "401" ] && ok "core SSO: anonymous rejected" || fail "core SSO"
 [ "$(code "$CORE/auth/login")" = "307" ] && ok "core auth/login redirect" || fail "core auth/login"
-for ws in ws-1 ws-2; do
-  docker exec "$ws" sh -c "test -d /work/project/.git" && ok "$ws" || fail "$ws"
+for ws in 1 2; do
+  docker exec "${WS_PREFIX}ws-${ws}" sh -c "test -d /work/project/.git" \
+    && ok "${WS_PREFIX}ws-${ws}" || fail "${WS_PREFIX}ws-${ws}"
 done
 
 echo "Waiting for small LLM model (ollama:qwen3:0.6b)..."
-wait_for 120 sh -c "docker exec aga-ollama ollama list | grep -q 'qwen3:0.6b'" || fail "ollama qwen3:0.6b"
+wait_for 120 sh -c "docker exec ${NAME_PREFIX}-ollama ollama list | grep -q 'qwen3:0.6b'" || fail "ollama qwen3:0.6b"
 ok "ollama small LLM"
 
 curl -fsS "$FRONT/" >/dev/null && ok "front" || fail "front"
-curl -s "${LOCAL[@]}" http://auth.localhost/realms/aga | grep -q '"realm"' \
-  && ok "proxy auth.localhost (keycloak)" || fail "proxy auth.localhost"
-curl -fsS "${LOCAL[@]}" http://dev.localhost/ >/dev/null && ok "proxy dev.localhost" || fail "proxy dev.localhost"
-[ "$(code http://api.localhost/users)" = "401" ] && ok "proxy api.localhost (SSO)" || fail "proxy api.localhost"
+curl -s "${LOCAL[@]}" "http://auth.${INSTANCE}.localhost:${PROXY_PORT}/realms/aga" | grep -q '"realm"' \
+  && ok "proxy auth.${INSTANCE}.localhost (keycloak)" || fail "proxy auth"
+curl -fsS "${LOCAL[@]}" "http://dev.${INSTANCE}.localhost:${PROXY_PORT}/" >/dev/null \
+  && ok "proxy dev.${INSTANCE}.localhost" || fail "proxy dev"
+[ "$(code "http://api.${INSTANCE}.localhost:${PROXY_PORT}/users")" = "401" ] \
+  && ok "proxy api.${INSTANCE}.localhost (SSO)" || fail "proxy api"

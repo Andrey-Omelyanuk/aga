@@ -678,6 +678,7 @@ mod tests {
             namespace: "default".into(),
             template: "/nonexistent.yaml".into(),
             image: "img".into(),
+            ws_prefix: String::new(),
             wait_timeout_secs: 1,
         }
     }

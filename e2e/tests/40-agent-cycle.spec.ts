@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
-import { PROJECT_GIT_URL, api } from './lib/stand';
+import { PROJECT_GIT_URL, MOCK_LLM_URL, api } from './lib/stand';
 import { agentReply, as, card, closestWith, messages, replyTo, send, wsSelect } from './lib/ui';
 
 // Рабочий цикл агентов через веб-клиент: alice и bob — два браузера на одном
@@ -98,6 +98,9 @@ test('team: bob adds a mock LLM and builds a two-agent set in the editor', async
 
   // LLM-подключение — через страницу «LLM».
   const conn = fixture('mock-llm-connection.json');
+  // Адрес mock-LLM — контейнер инстанса (имя с префиксом aga-<user>, см. run.sh),
+  // а не общий aga-llm-mock из фикстуры.
+  conn.api_url = MOCK_LLM_URL;
   await bob.goto('/config/llms');
   await bob.getByPlaceholder('Название').fill(conn.name);
   await bob.getByPlaceholder('URL API (…/v1)').fill(conn.api_url);

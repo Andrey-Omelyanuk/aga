@@ -1,16 +1,19 @@
 # Шаблон nginx-прокси dev-стенда (compose): *.localhost как в k8s-стенде
-# (см. infra/k8s/70-ingress.yaml) — dev.localhost → SPA (front),
-# api.localhost → API (core), auth.localhost → Keycloak (SSO). Браузер резолвит
-# *.localhost в 127.0.0.1/::1 без /etc/hosts (RFC 6761). Монтируется в сервис
-# `proxy` (infra/dev-compose.yml). В compose-сети сервисы доступны по имени:
-# front:80, core:8080, keycloak:8080.
+# (см. infra/k8s/70-ingress.yaml), но с хостом инстанса (<instance> = Linux-
+# пользователь): dev.<instance>.localhost → SPA (front),
+# api.<instance>.localhost → API (core), auth.<instance>.localhost → Keycloak
+# (SSO). Браузер резолвит *.localhost в 127.0.0.1/::1 без /etc/hosts
+# (RFC 6761); наружу порт инстанса, контейнер слушает 80.
+# Плейсхолдер <instance> подставляет make dev-proxy в nginx.conf (сервис `proxy`,
+# infra/dev-compose.yml). В compose-сети сервисы доступны по имени:
+# front:80, core:8080, keycloak:8080, centrifugo:8000.
 events {}
 
 http {
-    # dev.localhost и всё остальное — веб-клиент (front, nginx).
+    # dev.<instance>.localhost и всё остальное — веб-клиент (front).
     server {
         listen 80 default_server;
-        server_name _;
+        server_name dev.__INSTANCE__.localhost __INSTANCE__.localhost _;
 
         location / {
             proxy_pass http://front;
@@ -24,10 +27,10 @@ http {
         }
     }
 
-    # api.localhost — API (ядро, core).
+    # api.<instance>.localhost — API (ядро, core).
     server {
         listen 80;
-        server_name api.localhost;
+        server_name api.__INSTANCE__.localhost;
 
         location / {
             proxy_pass http://core:8080;
@@ -41,11 +44,10 @@ http {
         }
     }
 
-    # auth.localhost — Keycloak (SSO): authorize_url в dev-roles.yaml.
-    # Keycloak запущен с KC_HOSTNAME_STRICT=false — произвольный Host ок.
+    # auth.<instance>.localhost — Keycloak (SSO): authorize_url в dev-roles.yaml.
     server {
         listen 80;
-        server_name auth.localhost;
+        server_name auth.__INSTANCE__.localhost;
 
         location / {
             proxy_pass http://keycloak:8080;
@@ -57,12 +59,12 @@ http {
         }
     }
 
-    # pub-sub.localhost — Centrifugo (websocket реального времени для чата).
-    # Connection-JWT веб-клиент берёт у ядра; сюда он приходит с тем же Origin
-    # (dev.localhost), что разрешён в CENTRIFUGO_ALLOWED_ORIGINS.
+    # pub-sub.<instance>.localhost — Centrifugo (websocket реального времени
+    # для чата). Connection-JWT веб-клиент берёт у ядра; Origin (dev.<instance>)
+    # разрешён в CENTRIFUGO_CLIENT_ALLOWED_ORIGINS.
     server {
         listen 80;
-        server_name pub-sub.localhost;
+        server_name pub-sub.__INSTANCE__.localhost;
 
         location / {
             proxy_pass http://centrifugo:8000;

@@ -6,6 +6,17 @@ import { execFileSync } from 'node:child_process';
 export const CORE = process.env.E2E_CORE ?? 'http://localhost:8080';
 export const KEYCLOAK = process.env.E2E_KEYCLOAK ?? 'http://localhost:8082';
 
+// Инстанс dev-стенда = Linux-пользователь (несколько на машине): контейнеры
+// именуются с префиксом aga-<user> (см. makefile/run.sh).
+export const CONTAINER_PREFIX = process.env.E2E_CONTAINER_PREFIX ?? 'aga';
+/** Имя контейнера сервиса инстанса (agent, centrifugo, …). */
+export function container(service: string): string {
+  return `${CONTAINER_PREFIX}-${service}`;
+}
+
+/** Адрес mock-LLM инстанса (контейнер создаёт run.sh). */
+export const MOCK_LLM_URL = process.env.E2E_MOCK_LLM_URL ?? 'http://aga-llm-mock:8000/v1';
+
 /** Учётки realm Keycloak стенда, совпадают с сидом (`aga seed`). */
 export const USERS = {
   alice: { login: 'alice', password: 'alice-pass' }, // participant
