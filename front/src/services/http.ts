@@ -6,7 +6,7 @@ export const API_BASE =
   (window as any)?.API_ENDPOINT && (window as any).API_ENDPOINT !== '<API_ENDPOINT>'
     ? (window as any).API_ENDPOINT
     : location.hostname === 'dev.localhost'
-      ? 'http://api.localhost'
+      ? `http://api.localhost:${location.port || '80'}`
       : 'http://localhost:8080';
 
 export const TOKEN_KEY = 'aga_token';
