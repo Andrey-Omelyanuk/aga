@@ -1,0 +1,22 @@
+{
+  "common": {
+    "save": "Сохранить",
+    "cancel": "Отменить",
+    "delete": "Удалить",
+    "edit": "Редактировать",
+    "create": "Создать",
+    "close": "Закрыть",
+    "confirm": "Подтвердить",
+    "loading": "Загрузка...",
+    "error": "Ошибка",
+    "success": "Успешно"
+  },
+  "navigation": {
+    "projects": "Проекты",
+    "workstations": "Воркстейшны",
+    "sessions": "Сессии",
+    "files": "Файлы",
+    "chat": "Чат",
+    "config": "Настройки"
+  }
+}
