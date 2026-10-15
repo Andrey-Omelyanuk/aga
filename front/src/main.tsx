@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import NotFoundPage from './pages/404';
 import './index.css';
+import './i18n/config';
 
 const AppLayout = lazy(() => import('./pages/app/layout'));
 const ProjectsPage = lazy(() => import('./pages/app/projects'));
