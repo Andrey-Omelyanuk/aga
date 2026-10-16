@@ -53,7 +53,7 @@ describe('ConfigHelpPage', () => {
 
     const link = container.querySelector('a[href="/config/help"]');
     expect(link).not.toBeNull();
-    expect(link?.textContent).toBe('Help');
+    expect(link?.textContent).toBe('navigation.help');
 
     act(() => root.unmount());
   });
@@ -74,7 +74,7 @@ describe('ConfigHelpPage', () => {
 
     const link = container.querySelector('a[href="/config/shortcuts"]');
     expect(link).not.toBeNull();
-    expect(link?.textContent).toBe('Shortcuts');
+    expect(link?.textContent).toBe('navigation.shortcuts');
 
     act(() => root.unmount());
   });
