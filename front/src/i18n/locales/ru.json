@@ -17,6 +17,36 @@
     "sessions": "Сессии",
     "files": "Файлы",
     "chat": "Чат",
-    "config": "Настройки"
+    "config": "Настройки",
+    "env": "Env",
+    "users": "Users",
+    "skills": "Skills",
+    "shortcuts": "Shortcuts",
+    "agentSets": "Набор агентов",
+    "llms": "LLM",
+    "mcp": "MCP",
+    "help": "Помощь",
+    "profile": "Профиль",
+    "allProjects": "— все проекты —"
+  },
+  "workstations": {
+    "empty": "Воркстейшнов нет"
+  },
+  "projects": {
+    "empty": "Проектов пока нет",
+    "projectNumber": "Проект #"
+  },
+  "chat": {
+    "sessionNumber": "Сессия #"
+  },
+  "agentSets": {
+    "empty": "Наборов пока нет",
+    "newName": "Имя нового набора",
+    "create": "Создать набор",
+    "created": "Набор создан",
+    "createError": "Не удалось создать набор",
+    "deleted": "Набор удалён",
+    "deleteError": "Не удалось удалить набор",
+    "agentsCount": "Агентов: {{count}}"
   }
 }

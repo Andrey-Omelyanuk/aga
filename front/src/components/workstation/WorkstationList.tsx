@@ -1,4 +1,5 @@
 import { observer } from 'mobx-react-lite';
+import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/components/ui/tabs';
 import { Workstation } from '@/models/workstation';
 import { WorkstationCard } from './WorkstationCard';
@@ -11,6 +12,7 @@ export interface WorkstationListProps {
 }
 
 export const WorkstationList = observer((props: WorkstationListProps) => {
+  const { t } = useTranslation();
   const { title, workstations, projectName, onChanged } = props;
 
   return (
@@ -18,7 +20,7 @@ export const WorkstationList = observer((props: WorkstationListProps) => {
       <h3 className="mb-2 text-sm font-semibold text-slate-700">
         {title} ({workstations.length})
       </h3>
-      {workstations.length === 0 && <EmptyState>Воркстейшнов нет</EmptyState>}
+      {workstations.length === 0 && <EmptyState>{t('workstations.empty')}</EmptyState>}
       {workstations.map((ws) => (
         <WorkstationCard
           key={ws.id}
