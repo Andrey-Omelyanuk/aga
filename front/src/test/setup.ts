@@ -1,14 +1,12 @@
 import { vi } from 'vitest';
+import i18n from '@/i18n/config';
 
-// Mock react-i18next to return translation keys instead of actual translations
-// This ensures tests verify that components use the correct keys without depending on translation files
+// Mock react-i18next to use the real i18n instance
+// This ensures tests can verify language switching behavior
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
-    i18n: {
-      language: 'en',
-      changeLanguage: vi.fn(),
-    },
+    i18n,
   }),
   initReactI18next: {
     type: '3rdParty',

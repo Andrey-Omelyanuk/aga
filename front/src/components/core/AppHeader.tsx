@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import me from '@/services/me';
 import { useApp } from '@/store-hooks';
 import { SelectInput } from '@/components/core/inputs';
+import { LanguageSwitcher } from '@/components/ui/LanguageSwitcher';
 
 export type TabName =
   | 'projects'
@@ -80,6 +81,7 @@ export const AppHeader = observer(() => {
           ))}
         </nav>
         <span className="flex-1" />
+        <LanguageSwitcher />
         {me.user && !me.anonymous && (
           <NavLink
             to={{ pathname: '/profile', search: location.search }}
