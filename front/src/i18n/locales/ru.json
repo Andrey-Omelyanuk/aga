@@ -37,7 +37,24 @@
     "projectNumber": "Проект #"
   },
   "chat": {
-    "sessionNumber": "Сессия #"
+    "sessionNumber": "Сессия #",
+    "noMessages": "Сообщений пока нет",
+    "sharePrefix": "шар №",
+    "openThread": "Открыть нить",
+    "fromThread": "из нити от сообщения #",
+    "startThread": "↺ начать нить",
+    "reply": "↩ ответить",
+    "toParent": "→ в родителя",
+    "showHidden": "▸ скрытое",
+    "hideHidden": "▾ скрытое",
+    "threadTitlePlaceholder": "Заголовок нити",
+    "firstMessagePlaceholder": "Первое сообщение нити",
+    "start": "Начать",
+    "replyTo": "в ответ на #",
+    "replyPlaceholder": "Ответ…",
+    "send": "Отправить",
+    "threadFallback": "Нить #",
+    "threadMessagePlaceholder": "Сообщение в нить…"
   },
   "agentSets": {
     "empty": "Наборов пока нет",

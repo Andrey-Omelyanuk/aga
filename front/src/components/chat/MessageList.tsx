@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { createContext, useContext, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Chat, ChatMessage, ChatParticipant, ChatThread } from '@/models/chat';
 import { formatTime } from '@/utils/dates';
 import { Artifacts } from './Artifacts';
@@ -31,6 +32,7 @@ function findThreadPath(threads: ChatThread[], originId: number): number[] | nul
 
 export const MessageList = observer((props: MessageListProps) => {
   const { chat, onChanged, users = [] } = props;
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [startFor, setStartFor] = useState<number | null>(null);
   const [replyFor, setReplyFor] = useState<number | null>(null);
@@ -60,7 +62,7 @@ export const MessageList = observer((props: MessageListProps) => {
   };
 
   if (chat.messages.length === 0) {
-    return <div className="py-16 text-center text-slate-400">Сообщений пока нет</div>;
+    return <div className="py-16 text-center text-slate-400">{t('chat.noMessages')}</div>;
   }
   return (
     <UsersContext.Provider value={users}>
@@ -125,6 +127,7 @@ interface MessageRowProps {
 
 const MessageRow = observer(
   ({ scopeId, participants, message, onStart, onReply, onToParent, onOpenThread }: MessageRowProps) => {
+    const { t } = useTranslation();
     const isUser = message.author_id === scopeId;
     const users = useContext(UsersContext);
     const author =
@@ -148,27 +151,27 @@ const MessageRow = observer(
             }`}
           >
             {message.body}
-            {message.share_of_id ? ` · шар №${message.share_of_id}` : ''}
+            {message.share_of_id ? ` · ${t('chat.sharePrefix')}${message.share_of_id}` : ''}
           </div>
           <div className="mt-0.5 text-[11px] text-slate-400">
             {author} · {formatTime(message.created_at)}
           </div>
           <div className="mt-0.5 flex items-center gap-2 text-[11px]">
             {message.thread_of_id ? (
-              <button onClick={onOpenThread} className="text-blue-600 hover:underline" title="Открыть нить">
-                из нити от сообщения #{message.thread_of_id}
+              <button onClick={onOpenThread} className="text-blue-600 hover:underline" title={t('chat.openThread')}>
+                {t('chat.fromThread')}{message.thread_of_id}
               </button>
             ) : (
               <button onClick={onStart} className="text-slate-400 hover:text-blue-600">
-                ↳ начать нить
+                ↳ {t('chat.startThread')}
               </button>
             )}
             <button onClick={onReply} className="text-slate-400 hover:text-blue-600">
-              ↩ ответить
+              ↩ {t('chat.reply')}
             </button>
             {onToParent ? (
               <button onClick={onToParent} className="text-slate-400 hover:text-blue-600">
-                → в родителя
+                → {t('chat.toParent')}
               </button>
             ) : null}
           </div>
@@ -178,7 +181,7 @@ const MessageRow = observer(
                 onClick={() => setShowHidden((v) => !v)}
                 className="text-[11px] text-slate-400 hover:text-blue-600"
               >
-                {showHidden ? '▾ скрытое' : '▸ скрытое'}
+                {showHidden ? t('chat.hideHidden') : t('chat.showHidden')}
               </button>
               {showHidden && (
                 <div className="mt-1 whitespace-pre-wrap break-words rounded-md border border-dashed border-slate-300 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-600">
@@ -201,6 +204,7 @@ interface StartThreadFormProps {
 }
 
 const StartThreadForm = observer(({ messageId, onDone, onCancel }: StartThreadFormProps) => {
+  const { t } = useTranslation();
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState(false);
@@ -223,23 +227,23 @@ const StartThreadForm = observer(({ messageId, onDone, onCancel }: StartThreadFo
     <div className="mb-3 ml-6 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
       <input
         className="mb-1.5 w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-500"
-        placeholder="Заголовок нити"
+        placeholder={t('chat.threadTitlePlaceholder')}
         value={title}
         onChange={(e) => setTitle(e.target.value)}
       />
       <textarea
         className="mb-1.5 min-h-[44px] w-full resize-none rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-500"
-        placeholder="Первое сообщение нити"
+        placeholder={t('chat.firstMessagePlaceholder')}
         rows={2}
         value={body}
         onChange={(e) => setBody(e.target.value)}
       />
       <div className="flex gap-2">
         <Button size="sm" onClick={submit}>
-          Начать
+          {t('chat.start')}
         </Button>
         <Button variant="ghost" size="sm" onClick={onCancel}>
-          Отмена
+          {t('common.cancel')}
         </Button>
       </div>
     </div>
@@ -265,6 +269,7 @@ interface ReplyFormProps {
  *  вопроса агента это и есть механизм human-in-the-loop (рантайм закроет
  *  pending-запрос и продолжит агента). */
 const ReplyForm = observer(({ chatId, message, onDone, onCancel }: ReplyFormProps) => {
+  const { t } = useTranslation();
   const [body, setBody] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -283,21 +288,21 @@ const ReplyForm = observer(({ chatId, message, onDone, onCancel }: ReplyFormProp
   return (
     <div className="mb-3 ml-6 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
       <div className="mb-1.5 truncate text-xs text-slate-400" title={message.body}>
-        в ответ на #{message.id}: {message.body}
+        {t('chat.replyTo')}{message.id}: {message.body}
       </div>
       <textarea
         className="mb-1.5 min-h-[44px] w-full resize-none rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-500"
-        placeholder="Ответ…"
+        placeholder={t('chat.replyPlaceholder')}
         rows={2}
         value={body}
         onChange={(e) => setBody(e.target.value)}
       />
       <div className="flex gap-2">
         <Button size="sm" onClick={submit}>
-          Отправить
+          {t('chat.send')}
         </Button>
         <Button variant="ghost" size="sm" onClick={onCancel}>
-          Отмена
+          {t('common.cancel')}
         </Button>
       </div>
     </div>
@@ -331,7 +336,8 @@ interface ThreadEntryProps {
 }
 
 const ThreadEntry = observer(({ thread, open, onToggle, onChanged }: ThreadEntryProps) => {
-  const title = thread.messages[0]?.title || `Нить #${thread.id}`;
+  const { t } = useTranslation();
+  const title = thread.messages[0]?.title || `${t('chat.threadFallback')}${thread.id}`;
   return (
     <div className="mb-2">
       <button
@@ -354,6 +360,7 @@ interface ThreadBodyProps {
 /** Раскрытая нить: свои сообщения (с началом вложенной нити и отправкой в
  *  родителя), ввод обычного сообщения и вложенные нити — рекурсивно. */
 const ThreadBody = observer(({ thread, onChanged }: ThreadBodyProps) => {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState('');
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [startFor, setStartFor] = useState<number | null>(null);
@@ -440,7 +447,7 @@ const ThreadBody = observer(({ thread, onChanged }: ThreadBodyProps) => {
       <div className="mt-2 flex gap-2">
         <input
           className="min-h-[36px] flex-1 rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-500"
-          placeholder="Сообщение в нить…"
+          placeholder={t('chat.threadMessagePlaceholder')}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -448,7 +455,7 @@ const ThreadBody = observer(({ thread, onChanged }: ThreadBodyProps) => {
           }}
         />
         <Button size="sm" onClick={send}>
-          Отправить
+          {t('chat.send')}
         </Button>
       </div>
     </div>
