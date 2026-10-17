@@ -34,7 +34,24 @@
     "projectNumber": "Project #"
   },
   "chat": {
-    "sessionNumber": "Session #"
+    "sessionNumber": "Session #",
+    "noMessages": "No messages yet",
+    "sharePrefix": "share #",
+    "openThread": "Open thread",
+    "fromThread": "from thread of message #",
+    "startThread": "↺ start thread",
+    "reply": "↩ reply",
+    "toParent": "→ to parent",
+    "showHidden": "▸ hidden",
+    "hideHidden": "▾ hidden",
+    "threadTitlePlaceholder": "Thread title",
+    "firstMessagePlaceholder": "First message of thread",
+    "start": "Start",
+    "replyTo": "in reply to #",
+    "replyPlaceholder": "Reply…",
+    "send": "Send",
+    "threadFallback": "Thread #",
+    "threadMessagePlaceholder": "Message in thread…"
   },
   "agentSets": {
     "empty": "No agent sets yet",

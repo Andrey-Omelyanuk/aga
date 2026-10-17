@@ -304,8 +304,8 @@ describe('ChatPage', () => {
     act(() => toggle!.click());
     await act(async () => {});
     expect(container.textContent).toContain('Что падает?');
-    expect(container.querySelector('input[placeholder*="Сообщение в нить"]')).not.toBeNull();
-    expect(container.textContent).toContain('в родителя');
+    expect(container.querySelector('input[placeholder*="chat.threadMessagePlaceholder"]')).not.toBeNull();
+    expect(container.textContent).toContain('chat.toParent');
     act(() => root.unmount());
   });
 
@@ -323,17 +323,17 @@ describe('ChatPage', () => {
     const { container, root } = await renderChat('42');
     await act(async () => {});
     const start = [...container.querySelectorAll('button')].find((b) =>
-      b.textContent?.includes('начать нить'),
+      b.textContent?.includes('chat.startThread'),
     );
     act(() => start!.click());
     await act(async () => {});
-    const title = container.querySelector<HTMLInputElement>('input[placeholder="Заголовок нити"]');
-    const body = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Первое сообщение нити"]');
+    const title = container.querySelector<HTMLInputElement>('input[placeholder="chat.threadTitlePlaceholder"]');
+    const body = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="chat.firstMessagePlaceholder"]');
     setInput(title!, 'Обсуждение');
     setInput(body!, 'Что падает?');
     act(() => {
       [...container.querySelectorAll('button')]
-        .find((b) => b.textContent?.trim() === 'Начать')!
+        .find((b) => b.textContent?.trim() === 'chat.start')!
         .click();
     });
     await act(async () => {});
@@ -354,7 +354,7 @@ describe('ChatPage', () => {
     act(() => toggle!.click());
     await act(async () => {});
     const toParent = [...container.querySelectorAll('button')].find((b) =>
-      b.textContent?.includes('в родителя'),
+      b.textContent?.includes('chat.toParent'),
     );
     act(() => toParent!.click());
     await act(async () => {});
@@ -367,16 +367,16 @@ describe('ChatPage', () => {
     const { container, root } = await renderChat('42');
     await act(async () => {});
     const reply = [...container.querySelectorAll('button')].find((b) =>
-      b.textContent?.includes('ответить'),
+      b.textContent?.includes('chat.reply'),
     );
     expect(reply).toBeTruthy();
     act(() => reply!.click());
     await act(async () => {});
-    const body = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Ответ…"]');
+    const body = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="chat.replyPlaceholder"]');
     setInput(body!, 'Порт 8080');
     act(() => {
       [...container.querySelectorAll('button')]
-        .find((b) => b.textContent?.trim() === 'Отправить')!
+        .find((b) => b.textContent?.trim() === 'chat.send')!
         .click();
     });
     await act(async () => {});
@@ -398,18 +398,18 @@ describe('ChatPage', () => {
     await act(async () => {});
     // У сообщения нити — своя кнопка «начать нить» (вложенная нить).
     const startButtons = [...container.querySelectorAll('button')].filter((b) =>
-      b.textContent?.includes('начать нить'),
+      b.textContent?.includes('chat.startThread'),
     );
     expect(startButtons.length).toBeGreaterThanOrEqual(2);
     act(() => startButtons[startButtons.length - 1]!.click());
     await act(async () => {});
-    const title = container.querySelector<HTMLInputElement>('input[placeholder="Заголовок нити"]');
-    const body = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Первое сообщение нити"]');
+    const title = container.querySelector<HTMLInputElement>('input[placeholder="chat.threadTitlePlaceholder"]');
+    const body = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="chat.firstMessagePlaceholder"]');
     setInput(title!, 'Вложенная');
     setInput(body!, 'глубже');
     act(() => {
       [...container.querySelectorAll('button')]
-        .find((b) => b.textContent?.trim() === 'Начать')!
+        .find((b) => b.textContent?.trim() === 'chat.start')!
         .click();
     });
     await act(async () => {});
@@ -463,7 +463,7 @@ describe('ChatPage', () => {
     const { container, root } = await renderChat('42');
     await act(async () => {});
     const link = [...container.querySelectorAll('button')].find((b) =>
-      b.textContent?.includes('из нити от сообщения #5'),
+      b.textContent?.includes('chat.fromThread'),
     );
     expect(link).toBeTruthy();
     // Нить свёрнута, пока не кликнут по ссылке.
@@ -497,7 +497,7 @@ describe('ChatPage', () => {
     const { container, root } = await renderChat('42');
     await act(async () => {});
     const toggle = [...container.querySelectorAll('button')].find((b) =>
-      b.textContent?.includes('скрытое'),
+      b.textContent?.includes('chat.showHidden') || b.textContent?.includes('chat.hideHidden'),
     );
     expect(toggle).toBeTruthy();
     // По умолчанию скрытая часть свёрнута.
@@ -524,7 +524,7 @@ describe('ChatPage', () => {
     const { container, root } = await renderChat('42');
     await act(async () => {});
     const toggle = [...container.querySelectorAll('button')].find((b) =>
-      b.textContent?.includes('скрытое'),
+      b.textContent?.includes('chat.showHidden') || b.textContent?.includes('chat.hideHidden'),
     );
     expect(toggle).toBeUndefined();
     act(() => root.unmount());
