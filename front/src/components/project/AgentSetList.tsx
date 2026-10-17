@@ -1,4 +1,5 @@
 import { observer } from 'mobx-react-lite';
+import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardMeta, CardTitle } from '@/components/ui/card';
@@ -17,6 +18,7 @@ export interface AgentSetListProps {
 }
 
 export const AgentSetList = observer((props: AgentSetListProps) => {
+  const { t } = useTranslation();
   const { sets, selectedId, onSelect, onChanged } = props;
   const [name, setName] = useState('');
 
@@ -25,11 +27,11 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
     if (!trimmed) return;
     try {
       await http.post('/agent-sets', { name: trimmed, agents: [] });
-      toaster.show({ message: 'Набор создан', intent: 'success' });
+      toaster.show({ message: t('agentSets.created'), intent: 'success' });
       setName('');
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось создать набор', intent: 'danger' });
+      toaster.show({ message: t('agentSets.createError'), intent: 'danger' });
     }
   };
 
@@ -37,10 +39,10 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
     e.stopPropagation();
     try {
       await http.delete(`/agent-sets/${set.id}`);
-      toaster.show({ message: 'Набор удалён', intent: 'success' });
+      toaster.show({ message: t('agentSets.deleted'), intent: 'success' });
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось удалить набор', intent: 'danger' });
+      toaster.show({ message: t('agentSets.deleteError'), intent: 'danger' });
     }
   };
 
@@ -48,7 +50,7 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
     <div>
       <div className="mb-4 flex items-center gap-2">
         <Input
-          placeholder="Имя нового набора"
+          placeholder={t('agentSets.newName')}
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
@@ -56,12 +58,12 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
           }}
         />
         <Button variant="secondary" onClick={create}>
-          Создать набор
+          {t('agentSets.create')}
         </Button>
       </div>
 
       {sets.length === 0 ? (
-        <EmptyState>Наборов пока нет</EmptyState>
+        <EmptyState>{t('agentSets.empty')}</EmptyState>
       ) : (
         sets.map((set) => (
           <Card
@@ -70,7 +72,7 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
             onClick={() => onSelect(set.id)}
           >
             <CardTitle>{set.name}</CardTitle>
-            <CardMeta>Агентов: {set.agents.length}</CardMeta>
+            <CardMeta>{t('agentSets.agentsCount', { count: set.agents.length })}</CardMeta>
             {set.agents.length > 0 && (
               <div className="mt-1.5 flex flex-wrap gap-1">
                 {set.agents.map((a) => (
@@ -82,10 +84,10 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
             )}
             <div className="mt-2 flex gap-2">
               <Button variant="outline" size="sm" onClick={() => onSelect(set.id)}>
-                Редактировать
+                {t('common.edit')}
               </Button>
               <Button variant="ghost" size="sm" onClick={(e) => void remove(e, set)}>
-                Удалить
+                {t('common.delete')}
               </Button>
             </div>
           </Card>

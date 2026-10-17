@@ -1,22 +1,49 @@
 {
   "common": {
-    "save": "Сохранить",
-    "cancel": "Отменить",
-    "delete": "Удалить",
-    "edit": "Редактировать",
-    "create": "Создать",
-    "close": "Закрыть",
-    "confirm": "Подтвердить",
-    "loading": "Загрузка...",
-    "error": "Ошибка",
-    "success": "Успешно"
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "create": "Create",
+    "close": "Close",
+    "confirm": "Confirm",
+    "loading": "Loading...",
+    "error": "Error",
+    "success": "Success"
   },
   "navigation": {
-    "projects": "Проекты",
-    "workstations": "Воркстейшны",
-    "sessions": "Сессии",
-    "files": "Файлы",
-    "chat": "Чат",
-    "config": "Настройки"
+    "projects": "Projects",
+    "workstations": "Workstations",
+    "sessions": "Sessions",
+    "files": "Files",
+    "chat": "Chat",
+    "config": "Config",
+    "env": "Env",
+    "users": "Users",
+    "skills": "Skills",
+    "shortcuts": "Shortcuts",
+    "agentSets": "Agent Set",
+    "llms": "LLM",
+    "mcp": "MCP",
+    "help": "Help",
+    "profile": "Profile",
+    "allProjects": "— all projects —"
+  },
+  "projects": {
+    "empty": "No projects yet",
+    "projectNumber": "Project #"
+  },
+  "chat": {
+    "sessionNumber": "Session #"
+  },
+  "agentSets": {
+    "empty": "No agent sets yet",
+    "newName": "New agent set name",
+    "create": "Create agent set",
+    "created": "Agent set created",
+    "createError": "Failed to create agent set",
+    "deleted": "Agent set deleted",
+    "deleteError": "Failed to delete agent set",
+    "agentsCount": "Agents: {{count}}"
   }
 }

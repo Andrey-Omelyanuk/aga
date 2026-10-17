@@ -1,4 +1,5 @@
 import { observer } from 'mobx-react-lite';
+import { useTranslation } from 'react-i18next';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardMeta, CardTitle } from '@/components/ui/card';
 import { DeleteObjectButton } from '@/components/core/inputs';
@@ -11,10 +12,11 @@ export interface ProjectListProps {
 }
 
 export const ProjectList = observer((props: ProjectListProps) => {
+  const { t } = useTranslation();
   const { projects, onDeleted } = props;
 
   if (projects.length === 0) {
-    return <EmptyState>Проектов пока нет</EmptyState>;
+    return <EmptyState>{t('projects.empty')}</EmptyState>;
   }
 
   return (
@@ -22,7 +24,7 @@ export const ProjectList = observer((props: ProjectListProps) => {
       {projects.map((p) => (
         <Card key={p.id}>
           <CardTitle>{p.git_url}</CardTitle>
-          <CardMeta>Проект #{p.id}</CardMeta>
+          <CardMeta>{t('projects.projectNumber')}{p.id}</CardMeta>
           {p.agents.length > 0 && (
             <div className="mt-1.5">
               {p.agents.map((a) => (
