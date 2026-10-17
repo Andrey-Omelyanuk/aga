@@ -51,7 +51,13 @@
     "replyPlaceholder": "Reply…",
     "send": "Send",
     "threadFallback": "Thread #",
-    "threadMessagePlaceholder": "Message in thread…"
+    "threadMessagePlaceholder": "Message in thread…",
+    "selectAgent": "Select an agent…",
+    "newSession": "+ New session",
+    "selectSession": "Select a session",
+    "changes": "Changes",
+    "selectOrNewSession": "Select a session or open a new one",
+    "messagePlaceholder": "Enter a message..."
   },
   "agentSets": {
     "empty": "No agent sets yet",

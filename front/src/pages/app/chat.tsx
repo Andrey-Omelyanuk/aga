@@ -1,6 +1,7 @@
 import { observer } from 'mobx-react-lite';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/tabs';
@@ -34,6 +35,7 @@ interface MentionItem {
 const ChatPage = observer(() => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState('');
   const [currentChat, setCurrentChat] = useState<Chat | null>(null);
@@ -113,7 +115,7 @@ const ChatPage = observer(() => {
   };
 
   const createNew = async () => {
-    const chat = new Chat({ title: 'Новая сессия' });
+    const chat = new Chat({ title: t('chat.newSession') });
     await chat.create();
     navigate(`/chat/${chat.id}`);
   };
@@ -216,7 +218,7 @@ const ChatPage = observer(() => {
       <div className="flex w-72 flex-col border-r border-slate-200 bg-white">
         <div className="border-b border-slate-200 p-4">
           <Select>
-            <option value="">Выберите агента…</option>
+            <option value="">{t('chat.selectAgent')}</option>
             {agents.map((a) => (
               <option key={a} value={a}>
                 {a}
@@ -226,7 +228,7 @@ const ChatPage = observer(() => {
         </div>
         <div className="p-2.5">
           <Button variant="outline" className="w-full" onClick={createNew}>
-            + Новая сессия
+            {t('chat.newSession')}
           </Button>
         </div>
         <ChatList
@@ -239,14 +241,14 @@ const ChatPage = observer(() => {
       <div className="flex flex-1 flex-col bg-white">
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
           <div className="font-semibold text-slate-800">
-            {currentChat ? currentChat.title || `Сессия #${currentChat.id}` : 'Выберите сессию'}
+            {currentChat ? currentChat.title || `${t('chat.sessionNumber')}${currentChat.id}` : t('chat.selectSession')}
           </div>
           {currentChat && currentChat.workstation_id ? (
             <Link
               to={`/workstations/${currentChat.workstation_id}/changes`}
               className="text-xs text-blue-600 hover:underline"
             >
-              Изменения
+              {t('chat.changes')}
             </Link>
           ) : null}
         </div>
@@ -254,7 +256,7 @@ const ChatPage = observer(() => {
           {!currentChat ? (
             <EmptyState>
               <div className="text-4xl">💬</div>
-              <p>Выберите сессию или откройте новую</p>
+              <p>{t('chat.selectOrNewSession')}</p>
             </EmptyState>
           ) : (
             <MessageList chat={currentChat} onChanged={reloadDetail} users={users.items} />
@@ -297,13 +299,13 @@ const ChatPage = observer(() => {
               <textarea
                 ref={inputRef}
                 className="min-h-[44px] flex-1 resize-none rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:border-blue-500"
-                placeholder="Введите сообщение..."
+                placeholder={t('chat.messagePlaceholder')}
                 rows={1}
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onInputKeyDown}
               />
-              <Button onClick={send}>Отправить</Button>
+              <Button onClick={send}>{t('chat.send')}</Button>
             </div>
           </div>
         </div>
