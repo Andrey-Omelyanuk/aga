@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   AND,
   ARRAY,
@@ -24,6 +25,7 @@ import { useInput, useObjectInput, useQuery, useQueryCacheSync } from '@/utils/m
 import { toaster } from '@/utils/toaster';
 
 const SessionsPage = observer(() => {
+  const { t } = useTranslation();
   const { activeProject } = useApp();
   const navigate = useNavigate();
 
@@ -52,12 +54,12 @@ const SessionsPage = observer(() => {
   const open = async () => {
     const projectId = activeProject.value;
     if (projectId === undefined || projectId === null) {
-      toaster.show({ message: 'Выберите проект', intent: 'danger' });
+      toaster.show({ message: t('sessions.selectProject'), intent: 'danger' });
       return;
     }
     const wsId = wsInput.value;
     if (wsId === undefined || wsId === null) {
-      toaster.show({ message: 'Выберите готовый воркстейшн', intent: 'danger' });
+      toaster.show({ message: t('sessions.selectWorkstation'), intent: 'danger' });
       return;
     }
     const ws = sessionWs.items.find((w) => w.id === Number(wsId));
@@ -75,8 +77,8 @@ const SessionsPage = observer(() => {
       toaster.show({
         message:
           status === 409
-            ? 'На этом воркстейшне уже открыта сессия'
-            : 'Не удалось открыть сессию',
+            ? t('sessions.sessionAlreadyOpen')
+            : t('sessions.failedToOpen'),
         intent: 'danger',
       });
     }
@@ -89,31 +91,31 @@ const SessionsPage = observer(() => {
           input={wsInput}
           optionKey={(w) => String(w.id)}
           optionLabel={(w) => `${w.name} (${w.state})`}
-          emptyLabel="Выберите воркстейшн..."
+          emptyLabel={t('sessions.selectWorkstationPlaceholder')}
         />
-        <StringInput input={titleInput} placeholder="Название сессии" />
+        <StringInput input={titleInput} placeholder={t('sessions.sessionName')} />
         <Button variant="secondary" onClick={open} disabled={sessionWs.items.length === 0}>
-          Открыть сессию
+          {t('sessions.openSession')}
         </Button>
       </div>
       {sessionWs.items.length === 0 && (
         <p className="mb-3 text-sm text-slate-400">
-          Нет готовых свободных воркстейшнов
+          {t('sessions.noFreeWorkstations')}
         </p>
       )}
-      {chats.items.length === 0 && <EmptyState>Сессий пока нет</EmptyState>}
+      {chats.items.length === 0 && <EmptyState>{t('sessions.noSessions')}</EmptyState>}
       {chats.items.map((chat) => (
         <Card key={chat.id}>
           <CardTitle>
-            {chat.title || `Сессия #${chat.id}`}{' '}
+            {chat.title || `${t('chat.sessionNumber')}${chat.id}`}{' '}
             <Badge variant={chat.isOpen ? 'ok' : 'warn'}>{chat.state}</Badge>
           </CardTitle>
           <CardMeta>
-            Воркстейшн #{chat.workstation_id ?? '—'} · создана #{chat.created_by_id}
+            {t('sessions.workstationNumber')}{chat.workstation_id ?? '—'}{t('sessions.createdBy')}{chat.created_by_id}
           </CardMeta>
           <div className="mt-1.5 flex gap-2">
             <Button variant="outline" size="sm" onClick={() => navigate(`/chat/${chat.id}`)}>
-              Открыть в чате
+              {t('sessions.openInChat')}
             </Button>
             {chat.isOpen && (
               <Button
@@ -124,7 +126,7 @@ const SessionsPage = observer(() => {
                   chats.shadowLoad();
                 }}
               >
-                Закрыть
+                {t('sessions.close')}
               </Button>
             )}
           </div>

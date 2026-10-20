@@ -1,13 +1,15 @@
 import { observer } from 'mobx-react-lite';
+import { useTranslation } from 'react-i18next';
 import { fileBrowser, langFor } from '@/models/files';
 import { EmptyState } from '@/components/ui/tabs';
 import { highlightText } from '@/utils/highlight';
 
 export const FileViewer = observer(() => {
+  const { t } = useTranslation();
   if (!fileBrowser.currentPath) {
     return (
       <div className="flex-1">
-        <EmptyState>Откройте папку или файл в дереве</EmptyState>
+        <EmptyState>{t('files.openFileHint')}</EmptyState>
       </div>
     );
   }
@@ -19,7 +21,7 @@ export const FileViewer = observer(() => {
       </div>
       <div className="flex-1 overflow-auto p-5">
         {fileBrowser.loading || !content ? (
-          <EmptyState>Загрузка…</EmptyState>
+          <EmptyState>{t('files.loading')}</EmptyState>
         ) : content.objectUrl ? (
           content.contentType.startsWith('image/') ? (
             <img src={content.objectUrl} alt={fileBrowser.currentPath} className="max-w-full rounded-lg" />
@@ -38,7 +40,7 @@ export const FileViewer = observer(() => {
             />
           </pre>
         ) : (
-          <EmptyState>Не удалось прочитать файл</EmptyState>
+          <EmptyState>{t('files.failedToRead')}</EmptyState>
         )}
       </div>
     </div>

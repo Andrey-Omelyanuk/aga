@@ -31,7 +31,11 @@
   },
   "projects": {
     "empty": "No projects yet",
-    "projectNumber": "Project #"
+    "projectNumber": "Project #",
+    "added": "Project added",
+    "addError": "Failed to add project",
+    "gitUrlPlaceholder": "Project git-URL",
+    "addProject": "Add project"
   },
   "chat": {
     "sessionNumber": "Session #",
@@ -58,6 +62,29 @@
     "changes": "Changes",
     "selectOrNewSession": "Select a session or open a new one",
     "messagePlaceholder": "Enter a message..."
+  },
+  "sessions": {
+    "selectProject": "Select a project",
+    "selectWorkstation": "Select a ready workstation",
+    "sessionAlreadyOpen": "A session is already open on this workstation",
+    "failedToOpen": "Failed to open session",
+    "selectWorkstationPlaceholder": "Select a workstation...",
+    "sessionName": "Session name",
+    "openSession": "Open session",
+    "noFreeWorkstations": "No ready free workstations available",
+    "noSessions": "No sessions yet",
+    "workstationCreated": "Workstation #",
+    "createdBy": " · created by #",
+    "openInChat": "Open in chat",
+    "close": "Close"
+  },
+  "files": {
+    "selectWorkstation": "Select a workstation...",
+    "emptyFolder": "Folder is empty",
+    "selectWorkstationToView": "Select a workstation",
+    "openFileHint": "Open a folder or file in the tree",
+    "loading": "Loading…",
+    "failedToRead": "Failed to read file"
   },
   "agentSets": {
     "empty": "No agent sets yet",
