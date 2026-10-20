@@ -30,7 +30,16 @@
     "allProjects": "— все проекты —"
   },
   "workstations": {
-    "empty": "Воркстейшнов нет"
+    "empty": "Воркстейшнов нет",
+    "projectNumber": "Проект #",
+    "allWorkstations": "Все воркстейшны",
+    "onCurrentProject": "На текущем проекте",
+    "otherProjects": "Другие проекты",
+    "sessionOpen": "На этом воркстейшне открыта сессия",
+    "insufficientPermissions": "Недостаточно прав",
+    "failedToAction": "Не удалось {{action}} воркстейшн",
+    "free": "Свободен",
+    "release": "Отпустить"
   },
   "projects": {
     "empty": "Проектов пока нет",

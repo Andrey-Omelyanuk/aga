@@ -68,5 +68,17 @@
     "deleted": "Agent set deleted",
     "deleteError": "Failed to delete agent set",
     "agentsCount": "Agents: {{count}}"
+  },
+  "workstations": {
+    "empty": "No workstations",
+    "projectNumber": "Project #",
+    "allWorkstations": "All workstations",
+    "onCurrentProject": "On current project",
+    "otherProjects": "Other projects",
+    "sessionOpen": "A session is open on this workstation",
+    "insufficientPermissions": "Insufficient permissions",
+    "failedToAction": "Failed to {{action}} workstation",
+    "free": "Free",
+    "release": "Release"
   }
 }
