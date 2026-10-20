@@ -1,10 +1,12 @@
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { fileBrowser, TreeEntry } from '@/models/files';
 import http from '@/services/http';
 import { EmptyState } from '@/components/ui/tabs';
 
 function TreeEntryView({ entry, onOpen }: { entry: TreeEntry; onOpen: (e: TreeEntry) => void }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<TreeEntry[]>([]);
 
@@ -30,7 +32,7 @@ function TreeEntryView({ entry, onOpen }: { entry: TreeEntry; onOpen: (e: TreeEn
         {expanded && (
           <div className="pl-4">
             {children.length === 0 && (
-              <div className="px-1.5 py-0.5 text-slate-400">Папка пуста</div>
+              <div className="px-1.5 py-0.5 text-slate-400">{t('files.emptyFolder')}</div>
             )}
             {children.map((child) => (
               <TreeEntryView key={child.path} entry={child} onOpen={onOpen} />
@@ -51,11 +53,12 @@ function TreeEntryView({ entry, onOpen }: { entry: TreeEntry; onOpen: (e: TreeEn
 }
 
 export const FileTree = observer(() => {
+  const { t } = useTranslation();
   if (fileBrowser.workstationId === null) {
-    return <EmptyState>Выберите воркстейшн</EmptyState>;
+    return <EmptyState>{t('files.selectWorkstationToView')}</EmptyState>;
   }
   if (fileBrowser.entries.length === 0) {
-    return <EmptyState>Папка пуста</EmptyState>;
+    return <EmptyState>{t('files.emptyFolder')}</EmptyState>;
   }
   return (
     <div>

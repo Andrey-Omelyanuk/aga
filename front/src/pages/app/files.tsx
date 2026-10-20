@@ -1,4 +1,5 @@
 import { observer } from 'mobx-react-lite';
+import { useTranslation } from 'react-i18next';
 import { Select } from '@/components/ui/select';
 import { Page } from '@/components/core/Page';
 import { FileTree } from '@/components/files/FileTree';
@@ -8,6 +9,7 @@ import { fileBrowser } from '@/models/files';
 import { useQuery } from '@/utils/mobx';
 
 const FilesPage = observer(() => {
+  const { t } = useTranslation();
   const [workstations] = useQuery(Workstation, { autoupdate: true });
 
   return (
@@ -21,7 +23,7 @@ const FilesPage = observer(() => {
                 fileBrowser.selectWorkstation(e.target.value ? Number(e.target.value) : null)
               }
             >
-              <option value="">Выберите воркстейшн...</option>
+              <option value="">{t('files.selectWorkstation')}</option>
               {workstations.items
                 .filter((ws) => ws.isReady)
                 .map((ws) => (

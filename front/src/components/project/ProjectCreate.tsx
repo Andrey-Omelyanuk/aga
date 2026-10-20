@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { SaveObjectForm, STRING, Variable } from 'mobx-model-ui';
 import { Button } from '@/components/ui/button';
 import { StringInput } from '@/components/core/inputs';
@@ -12,6 +13,7 @@ export interface ProjectCreateProps {
 }
 
 const CreateForm = observer(({ onCreated }: ProjectCreateProps) => {
+  const { t } = useTranslation();
   const obj = useState(() => new Project())[0];
   const form = useForm(
     () =>
@@ -21,10 +23,10 @@ const CreateForm = observer(({ onCreated }: ProjectCreateProps) => {
           git_url: new Variable(STRING({ required: true }), { value: '' }),
         },
         (project) => {
-          toaster.show({ message: 'Проект добавлен', intent: 'success' });
+          toaster.show({ message: t('projects.added'), intent: 'success' });
           onCreated?.(project as Project);
         },
-        () => toaster.show({ message: 'Не удалось создать проект', intent: 'danger' }),
+        () => toaster.show({ message: t('projects.addError'), intent: 'danger' }),
       ),
   );
 
@@ -36,11 +38,11 @@ const CreateForm = observer(({ onCreated }: ProjectCreateProps) => {
     <div className="mb-4 flex items-center gap-2">
       <StringInput
         input={form.inputs.git_url}
-        placeholder="git-URL проекта"
+        placeholder={t('projects.gitUrlPlaceholder')}
         onPressEnter={submit}
       />
       <Button variant="secondary" onClick={submit} disabled={form.isLoading}>
-        Добавить проект
+        {t('projects.addProject')}
       </Button>
     </div>
   );

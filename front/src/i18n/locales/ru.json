@@ -43,7 +43,11 @@
   },
   "projects": {
     "empty": "Проектов пока нет",
-    "projectNumber": "Проект #"
+    "projectNumber": "Проект #",
+    "added": "Проект добавлен",
+    "addError": "Не удалось создать проект",
+    "gitUrlPlaceholder": "git-URL проекта",
+    "addProject": "Добавить проект"
   },
   "chat": {
     "sessionNumber": "Сессия #",
@@ -70,6 +74,29 @@
     "changes": "Изменения",
     "selectOrNewSession": "Выберите сессию или откройте новую",
     "messagePlaceholder": "Введите сообщение..."
+  },
+  "sessions": {
+    "selectProject": "Выберите проект",
+    "selectWorkstation": "Выберите готовый воркстейшн",
+    "sessionAlreadyOpen": "На этом воркстейшне уже открыта сессия",
+    "failedToOpen": "Не удалось открыть сессию",
+    "selectWorkstationPlaceholder": "Выберите воркстейшн...",
+    "sessionName": "Название сессии",
+    "openSession": "Открыть сессию",
+    "noFreeWorkstations": "Нет готовых свободных воркстейшнов",
+    "noSessions": "Сессий пока нет",
+    "workstationCreated": "Воркстейшн #",
+    "createdBy": " · создана #",
+    "openInChat": "Открыть в чате",
+    "close": "Закрыть"
+  },
+  "files": {
+    "selectWorkstation": "Выберите воркстейшн...",
+    "emptyFolder": "Папка пуста",
+    "selectWorkstationToView": "Выберите воркстейшн",
+    "openFileHint": "Откройте папку или файл в дереве",
+    "loading": "Загрузка…",
+    "failedToRead": "Не удалось прочитать файл"
   },
   "agentSets": {
     "empty": "Наборов пока нет",
