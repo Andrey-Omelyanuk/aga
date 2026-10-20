@@ -130,7 +130,7 @@ function participantsChat(): any {
 }
 
 function chatInput(container: HTMLElement): HTMLTextAreaElement {
-  return container.querySelector<HTMLTextAreaElement>('textarea[placeholder="Введите сообщение..."]')!;
+  return container.querySelector<HTMLTextAreaElement>('textarea[placeholder="chat.messagePlaceholder"]')!;
 }
 
 function threadChat(): any {
@@ -262,7 +262,7 @@ describe('ChatPage', () => {
     await act(async () => {});
     const link = container.querySelector('a[href="/workstations/7/changes"]');
     expect(link).not.toBeNull();
-    expect(link?.textContent).toContain('Изменения');
+    expect(link?.textContent).toContain('chat.changes');
     act(() => root.unmount());
   });
 

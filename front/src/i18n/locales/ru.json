@@ -54,7 +54,13 @@
     "replyPlaceholder": "Ответ…",
     "send": "Отправить",
     "threadFallback": "Нить #",
-    "threadMessagePlaceholder": "Сообщение в нить…"
+    "threadMessagePlaceholder": "Сообщение в нить…",
+    "selectAgent": "Выберите агента…",
+    "newSession": "+ Новая сессия",
+    "selectSession": "Выберите сессию",
+    "changes": "Изменения",
+    "selectOrNewSession": "Выберите сессию или откройте новую",
+    "messagePlaceholder": "Введите сообщение..."
   },
   "agentSets": {
     "empty": "Наборов пока нет",
