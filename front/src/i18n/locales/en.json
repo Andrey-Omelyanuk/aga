@@ -68,5 +68,12 @@
     "deleted": "Agent set deleted",
     "deleteError": "Failed to delete agent set",
     "agentsCount": "Agents: {{count}}"
+  },
+  "workstations": {
+    "sessionOpen": "A session is open on this workstation",
+    "insufficientPermissions": "Insufficient permissions",
+    "failedToAction": "Failed to {{action}} workstation",
+    "free": "Free",
+    "release": "Release"
   }
 }
