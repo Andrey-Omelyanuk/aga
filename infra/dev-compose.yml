@@ -160,7 +160,7 @@ services:
       - CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY=aga-hmac-secret
       - CENTRIFUGO_HTTP_API_KEY=aga-api-key
       # SPA живёт на dev.localhost (прокси) — это и есть Origin websocket-соединения.
-      - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=http://dev.localhost
+      - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=http://dev.localhost:${AGA_PROXY_PORT:-80}
       # Unidirectional SSE (/connection/sse): им пользуется агент-рантайм
       # (`aga agent`) для серверной подписки на общий канал (runtime.rs).
       - CENTRIFUGO_UNI_SSE_ENABLED=true
