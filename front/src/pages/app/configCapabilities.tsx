@@ -1,6 +1,5 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 import { Page } from '@/components/core/Page';
 import {
@@ -15,7 +14,6 @@ import http from '@/services/http';
 /** Страницы каталога под Config: вид записи (skills/shortcuts) — из
  * пути (/config/skills, /config/shortcuts), как в capabilityHistory. */
 const ConfigCapabilitiesPage = observer(() => {
-  const { t } = useTranslation();
   const kind = useLocation().pathname.split('/')[2] as CapabilityKind;
   const [skills] = useQuery(Skill, { autoupdate: true });
   const [shortcuts] = useQuery(Shortcut, { autoupdate: true });

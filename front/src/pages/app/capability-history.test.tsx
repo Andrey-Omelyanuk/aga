@@ -45,7 +45,7 @@ describe('CapabilityHistoryPage', () => {
     const text = container.textContent ?? '';
 
     // Кто, когда и что сделал — все действия в порядке совершения.
-    const order = ['создал', 'изменил содержимое', 'переименовал', 'удалил'];
+    const order = ['agentSets.actionCreate', 'agentSets.actionUpdate', 'agentSets.actionRename', 'agentSets.actionDelete'];
     let last = -1;
     for (const label of order) {
       const idx = text.indexOf(label);
@@ -85,7 +85,7 @@ describe('CapabilityHistoryPage', () => {
     await act(async () => {});
 
     // История сокращения — та же страница, что у скиллов: кто, когда и что.
-    expect(container.textContent).toContain('создал');
+    expect(container.textContent).toContain('agentSets.actionCreate');
     expect(container.textContent).toContain('alice');
     expect(container.querySelector('a[href="/config/shortcuts"]')).not.toBeNull();
 
