@@ -8,6 +8,7 @@ import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export interface McpListProps {
   servers: McpServer[];
@@ -55,11 +56,12 @@ const payload = (d: McpDraft) => ({
 
 /** Поля сервера: имя, транспорт и его адрес (url или команда), ключ — у http. */
 const DraftFields = (props: { draft: McpDraft; onChange: (d: McpDraft) => void }) => {
+  const { t } = useTranslation();
   const { draft, onChange } = props;
   return (
     <>
       <Input
-        placeholder="Название"
+        placeholder={t('config.name')}
         value={draft.name}
         onChange={(e) => onChange({ ...draft, name: e.target.value })}
         className="max-w-40"
@@ -68,7 +70,7 @@ const DraftFields = (props: { draft: McpDraft; onChange: (d: McpDraft) => void }
         className="max-w-28"
         value={draft.transport}
         onChange={(e) => onChange({ ...draft, transport: e.target.value as McpDraft['transport'] })}
-        title="http — сервер по url; stdio — команда в воркстейшне агента"
+        title={`${t('config.httpTransport')}; ${t('config.stdioTransport')}`}
       >
         <option value="http">http</option>
         <option value="stdio">stdio</option>
@@ -76,13 +78,13 @@ const DraftFields = (props: { draft: McpDraft; onChange: (d: McpDraft) => void }
       {draft.transport === 'http' ? (
         <>
           <Input
-            placeholder="URL (…/mcp)"
+            placeholder={t('config.urlPlaceholder')}
             value={draft.url}
             onChange={(e) => onChange({ ...draft, url: e.target.value })}
             className="max-w-64"
           />
           <Input
-            placeholder="Ключ доступа (Bearer)"
+            placeholder={t('config.accessKeyBearer')}
             value={draft.api_key}
             onChange={(e) => onChange({ ...draft, api_key: e.target.value })}
             className="max-w-56"
@@ -90,7 +92,7 @@ const DraftFields = (props: { draft: McpDraft; onChange: (d: McpDraft) => void }
         </>
       ) : (
         <Input
-          placeholder="Команда (npx -y @modelcontextprotocol/server-…)"
+          placeholder={t('config.commandPlaceholder')}
           value={draft.command}
           onChange={(e) => onChange({ ...draft, command: e.target.value })}
           className="max-w-md"
@@ -104,6 +106,7 @@ const DraftFields = (props: { draft: McpDraft; onChange: (d: McpDraft) => void }
  *  (подключение и список его инструментов). stdio-сервер запускается только в
  *  воркстейшне агента — отсюда не проверяется. */
 export const McpList = observer((props: McpListProps) => {
+  const { t } = useTranslation();
   const { servers, onChanged } = props;
   const [draft, setDraft] = useState<McpDraft>(emptyDraft());
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -114,11 +117,11 @@ export const McpList = observer((props: McpListProps) => {
     if (!isComplete(draft)) return;
     try {
       await http.post('/mcp-servers', payload(draft));
-      toaster.show({ message: 'MCP-сервер добавлен', intent: 'success' });
+      toaster.show({ message: t('config.mcpServerAdded'), intent: 'success' });
       setDraft(emptyDraft());
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось добавить MCP-сервер (имя занято?)', intent: 'danger' });
+      toaster.show({ message: t('config.mcpServerAddFailed'), intent: 'danger' });
     }
   };
 
@@ -126,21 +129,21 @@ export const McpList = observer((props: McpListProps) => {
     if (!isComplete(edit)) return;
     try {
       await http.patch(`/mcp-servers/${id}`, payload(edit));
-      toaster.show({ message: 'MCP-сервер сохранён', intent: 'success' });
+      toaster.show({ message: t('config.mcpServerSaved'), intent: 'success' });
       setEditingId(null);
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось сохранить MCP-сервер', intent: 'danger' });
+      toaster.show({ message: t('config.mcpServerSaveFailed'), intent: 'danger' });
     }
   };
 
   const remove = async (id: number) => {
     try {
       await http.delete(`/mcp-servers/${id}`);
-      toaster.show({ message: 'MCP-сервер удалён', intent: 'success' });
+      toaster.show({ message: t('config.mcpServerDeleted'), intent: 'success' });
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось удалить MCP-сервер', intent: 'danger' });
+      toaster.show({ message: t('config.mcpServerDeleteFailed'), intent: 'danger' });
     }
   };
 
@@ -152,7 +155,7 @@ export const McpList = observer((props: McpListProps) => {
       const data = (e as { response?: { data?: unknown } }).response?.data;
       setChecked((c) => ({
         ...c,
-        [id]: typeof data === 'string' && data ? data : 'сервер недоступен',
+        [id]: typeof data === 'string' && data ? data : t('config.serverUnavailable'),
       }));
     }
   };
@@ -162,12 +165,12 @@ export const McpList = observer((props: McpListProps) => {
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <DraftFields draft={draft} onChange={setDraft} />
         <Button variant="secondary" onClick={create} disabled={!isComplete(draft)}>
-          Добавить сервер
+          {t('config.addServer')}
         </Button>
       </div>
 
       {servers.length === 0 ? (
-        <EmptyState>MCP-серверов пока нет</EmptyState>
+        <EmptyState>{t('config.noMcpServers')}</EmptyState>
       ) : (
         servers.map((s) => {
           const result = checked[s.id];
@@ -176,9 +179,9 @@ export const McpList = observer((props: McpListProps) => {
               {editingId === s.id ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <DraftFields draft={edit} onChange={setEdit} />
-                  <Button onClick={() => void save(s.id)}>Сохранить</Button>
+                  <Button onClick={() => void save(s.id)}>{t('config.save')}</Button>
                   <Button variant="ghost" onClick={() => setEditingId(null)}>
-                    Отмена
+                    {t('config.cancel')}
                   </Button>
                 </div>
               ) : (
@@ -188,22 +191,22 @@ export const McpList = observer((props: McpListProps) => {
                     <span className="ml-2 text-xs font-normal text-slate-500">· {s.transport}</span>
                   </CardTitle>
                   {s.transport === 'stdio' ? (
-                    <div className="text-xs text-slate-500">Команда: {s.command}</div>
+                    <div className="text-xs text-slate-500">{t('config.command')} {s.command}</div>
                   ) : (
-                    <div className="text-xs text-slate-500">URL: {s.url}</div>
+                    <div className="text-xs text-slate-500">{t('config.url')} {s.url}</div>
                   )}
                   {s.api_key != null && s.api_key !== '' && (
-                    <div className="text-xs text-slate-500">Ключ: {s.api_key}</div>
+                    <div className="text-xs text-slate-500">{t('config.key')} {s.api_key}</div>
                   )}
                   {typeof result === 'string' && (
-                    <div className="mt-1 text-xs text-red-600">Ошибка: {result}</div>
+                    <div className="mt-1 text-xs text-red-600">{t('config.error')} {result}</div>
                   )}
                   {Array.isArray(result) && (
                     <div className="mt-1 text-xs text-slate-600">
-                      Инструменты ({result.length}):{' '}
-                      {result.map((t) => (
-                        <span key={t.name} className="mr-2 font-mono" title={t.description}>
-                          {t.name}
+                      {t('config.toolsCount')} ({result.length}):{' '}
+                      {result.map((tool) => (
+                        <span key={tool.name} className="mr-2 font-mono" title={tool.description}>
+                          {tool.name}
                         </span>
                       ))}
                     </div>
@@ -211,7 +214,7 @@ export const McpList = observer((props: McpListProps) => {
                   <div className="mt-2 flex gap-2">
                     {s.transport === 'http' && (
                       <Button variant="outline" size="sm" onClick={() => void check(s.id)}>
-                        Проверить
+                        {t('config.check')}
                       </Button>
                     )}
                     <Button
@@ -222,10 +225,10 @@ export const McpList = observer((props: McpListProps) => {
                         setEdit(fromServer(s));
                       }}
                     >
-                      Править
+                      {t('config.edit')}
                     </Button>
                     <Button variant="ghost" size="sm" onClick={() => void remove(s.id)}>
-                      Удалить
+                      {t('config.delete')}
                     </Button>
                   </div>
                 </>

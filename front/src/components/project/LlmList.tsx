@@ -8,6 +8,7 @@ import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export interface LlmListProps {
   connections: Llm[];
@@ -39,24 +40,28 @@ const fromLlm = (c: Llm): LlmDraft => ({
 
 /** Флажок режима инструментов: нативный function calling или запасной
  *  текстовый (модель пишет команды блоками ```bash). */
-const NativeToolsToggle = (props: { checked: boolean; onChange: (v: boolean) => void }) => (
-  <label
-    className="flex items-center gap-2 text-sm"
-    title="Выключено — запасной текстовый режим для моделей без function calling"
-  >
-    <input
-      type="checkbox"
-      checked={props.checked}
-      onChange={(e) => props.onChange(e.target.checked)}
-    />
-    Tool calling
-  </label>
-);
+const NativeToolsToggle = (props: { checked: boolean; onChange: (v: boolean) => void }) => {
+  const { t } = useTranslation();
+  return (
+    <label
+      className="flex items-center gap-2 text-sm"
+      title={t('config.nativeToolsTooltip')}
+    >
+      <input
+        type="checkbox"
+        checked={props.checked}
+        onChange={(e) => props.onChange(e.target.checked)}
+      />
+      {t('config.toolCalling')}
+    </label>
+  );
+};
 
 /** Подключения к LLM: создание, правка (имя/url/ключ/модель/режим), удаление и
  *  выбор дефолтной LLM (одно из подключений; к нему ходят агенты без своего).
  *  Ключ показывается как есть, маскировки нет. */
 export const LlmList = observer((props: LlmListProps) => {
+  const { t } = useTranslation();
   const { connections, onChanged } = props;
   const [draft, setDraft] = useState<LlmDraft>(emptyDraft());
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -74,11 +79,11 @@ export const LlmList = observer((props: LlmListProps) => {
         model_name: draft.model_name.trim(),
         native_tools: draft.native_tools,
       });
-      toaster.show({ message: 'Подключение создано', intent: 'success' });
+      toaster.show({ message: t('config.connectionCreated'), intent: 'success' });
       setDraft(emptyDraft());
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось создать подключение', intent: 'danger' });
+      toaster.show({ message: t('config.connectionCreateFailed'), intent: 'danger' });
     }
   };
 
@@ -92,31 +97,31 @@ export const LlmList = observer((props: LlmListProps) => {
         model_name: edit.model_name.trim(),
         native_tools: edit.native_tools,
       });
-      toaster.show({ message: 'Подключение сохранено', intent: 'success' });
+      toaster.show({ message: t('config.connectionSaved'), intent: 'success' });
       setEditingId(null);
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось сохранить подключение', intent: 'danger' });
+      toaster.show({ message: t('config.connectionSaveFailed'), intent: 'danger' });
     }
   };
 
   const setDefault = async (llm_id: number | null) => {
     try {
       await http.post('/settings/llm-default', { llm_id });
-      toaster.show({ message: 'Дефолтная LLM обновлена', intent: 'success' });
+      toaster.show({ message: t('config.defaultLlmUpdated'), intent: 'success' });
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось обновить дефолтную LLM', intent: 'danger' });
+      toaster.show({ message: t('config.defaultLlmUpdateFailed'), intent: 'danger' });
     }
   };
 
   const remove = async (id: number) => {
     try {
       await http.delete(`/llms/${id}`);
-      toaster.show({ message: 'Подключение удалено', intent: 'success' });
+      toaster.show({ message: t('config.connectionDeleted'), intent: 'success' });
       onChanged();
     } catch {
-      toaster.show({ message: 'Не удалось удалить подключение', intent: 'danger' });
+      toaster.show({ message: t('config.connectionDeleteFailed'), intent: 'danger' });
     }
   };
 
@@ -124,25 +129,25 @@ export const LlmList = observer((props: LlmListProps) => {
     <div>
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Input
-          placeholder="Название"
+          placeholder={t('config.name')}
           value={draft.name}
           onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
           className="max-w-40"
         />
         <Input
-          placeholder="URL API (…/v1)"
+          placeholder={t('config.apiUrl')}
           value={draft.api_url}
           onChange={(e) => setDraft((d) => ({ ...d, api_url: e.target.value }))}
           className="max-w-64"
         />
         <Input
-          placeholder="Ключ доступа"
+          placeholder={t('config.accessKey')}
           value={draft.api_key}
           onChange={(e) => setDraft((d) => ({ ...d, api_key: e.target.value }))}
           className="max-w-56"
         />
         <Input
-          placeholder="Модель"
+          placeholder={t('config.model')}
           value={draft.model_name}
           onChange={(e) => setDraft((d) => ({ ...d, model_name: e.target.value }))}
           className="max-w-40"
@@ -152,19 +157,19 @@ export const LlmList = observer((props: LlmListProps) => {
           onChange={(v) => setDraft((d) => ({ ...d, native_tools: v }))}
         />
         <Button variant="secondary" onClick={create}>
-          Создать подключение
+          {t('config.createConnection')}
         </Button>
       </div>
 
       <div className="mb-4 flex items-center gap-2">
-        <span className="text-sm text-slate-500">Дефолтная LLM:</span>
+        <span className="text-sm text-slate-500">{t('config.defaultLlm')}</span>
         <Select
           className="max-w-56"
           value={defaultId != null ? String(defaultId) : ''}
           onChange={(e) => void setDefault(e.target.value ? Number(e.target.value) : null)}
-          title="К ней ходят агенты без выбранного подключения"
+          title={t('config.defaultLlmTooltip')}
         >
-          <option value="">— нет —</option>
+          <option value="">{t('config.none')}</option>
           {connections.map((c) => (
             <option key={c.id} value={String(c.id)}>
               {c.name}
@@ -174,7 +179,7 @@ export const LlmList = observer((props: LlmListProps) => {
       </div>
 
       {connections.length === 0 ? (
-        <EmptyState>Подключений к LLM пока нет</EmptyState>
+        <EmptyState>{t('config.noConnections')}</EmptyState>
       ) : (
         connections.map((c) => (
           <Card key={c.id}>
@@ -204,9 +209,9 @@ export const LlmList = observer((props: LlmListProps) => {
                   checked={edit.native_tools}
                   onChange={(v) => setEdit((d) => ({ ...d, native_tools: v }))}
                 />
-                <Button onClick={() => void save(c.id)}>Сохранить</Button>
+                <Button onClick={() => void save(c.id)}>{t('config.save')}</Button>
                 <Button variant="ghost" onClick={() => setEditingId(null)}>
-                  Отмена
+                  {t('config.cancel')}
                 </Button>
               </div>
             ) : (
@@ -215,17 +220,17 @@ export const LlmList = observer((props: LlmListProps) => {
                   {c.name}
                   {c.is_default && (
                     <span className="ml-2 text-xs font-normal text-blue-600">
-                      · дефолтная
+                      {t('config.default')}
                     </span>
                   )}
                 </CardTitle>
-                <div className="text-xs text-slate-500">URL: {c.api_url}</div>
+                <div className="text-xs text-slate-500">{t('config.url')} {c.api_url}</div>
                 {c.api_key != null && c.api_key !== '' && (
-                  <div className="text-xs text-slate-500">Ключ: {c.api_key}</div>
+                  <div className="text-xs text-slate-500">{t('config.key')} {c.api_key}</div>
                 )}
-                <div className="text-xs text-slate-500">Модель: {c.model_name}</div>
+                <div className="text-xs text-slate-500">{t('config.modelLabel')} {c.model_name}</div>
                 <div className="text-xs text-slate-500">
-                  Инструменты: {c.native_tools ? 'tool calling' : 'текстовый режим (```bash)'}
+                  {t('config.tools')} {c.native_tools ? t('config.toolCalling') : t('config.textMode')}
                 </div>
                 <div className="mt-2 flex gap-2">
                   <Button
@@ -236,10 +241,10 @@ export const LlmList = observer((props: LlmListProps) => {
                       setEdit(fromLlm(c));
                     }}
                   >
-                    Править
+                    {t('config.edit')}
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => void remove(c.id)}>
-                    Удалить
+                    {t('config.delete')}
                   </Button>
                 </div>
               </>

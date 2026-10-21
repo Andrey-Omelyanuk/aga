@@ -1,12 +1,14 @@
 import { SshKeyPanel } from '@/components/settings/SshKeyPanel';
 import { getSshKey } from '@/services/settings';
 import { useObject } from '@/utils/mobx';
+import { useTranslation } from 'react-i18next';
 
 const ConfigEnvPage = () => {
+  const { t } = useTranslation();
   const [info, loading] = useObject(getSshKey);
 
   if (loading) {
-    return <div className="p-10 text-slate-400">Загрузка…</div>;
+    return <div className="p-10 text-slate-400">{t('config.loading')}</div>;
   }
 
   return (

@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -15,22 +16,22 @@ import type { CatalogItem } from '@/models/project';
 export type CapabilityKind = 'skills' | 'shortcuts';
 
 /** Подписи зависят от вида: сокращения — не «способности». */
-function kindText(kind: CapabilityKind) {
+function kindText(kind: CapabilityKind, t: (key: string, options?: any) => string) {
   const shortcut = kind === 'shortcuts';
   return {
-    created: shortcut ? 'Сокращение создано' : 'Способность создана',
-    createFailed: shortcut ? 'Не удалось создать сокращение' : 'Не удалось создать способность',
-    deleted: shortcut ? 'Сокращение удалено' : 'Способность удалена',
-    deleteFailed: shortcut ? 'Не удалось удалить сокращение' : 'Не удалось удалить',
-    confirmTitle: shortcut ? 'Удалить сокращение?' : 'Удалить способность?',
+    created: shortcut ? t('config.shortcutCreated') : t('config.skillCreated'),
+    createFailed: shortcut ? t('config.shortcutCreateFailed') : t('config.skillCreateFailed'),
+    deleted: shortcut ? t('config.shortcutDeleted') : t('config.skillDeleted'),
+    deleteFailed: shortcut ? t('config.shortcutDeleteFailed') : t('config.skillDeleteFailed'),
+    confirmTitle: shortcut ? t('config.confirmDeleteShortcutTitle') : t('config.confirmDeleteSkillTitle'),
     confirmMessage: (name: string) =>
       shortcut
-        ? `«${name}» будет удалено, но его история сохранится.`
-        : `«${name}» будет удалена, но её история сохранится.`,
-    newLabel: shortcut ? 'Новое сокращение' : 'Новая способность',
+        ? t('config.confirmDeleteShortcutMessage', { name })
+        : t('config.confirmDeleteSkillMessage', { name }),
+    newLabel: shortcut ? t('config.newShortcut') : t('config.newSkill'),
     contentPlaceholder: shortcut
-      ? 'Текст сокращения (уйдёт в скрытую часть сообщения по /имя)'
-      : 'Содержимое скилла (markdown; агент берёт его всегда)',
+      ? t('config.shortcutContentPlaceholder')
+      : t('config.skillContentPlaceholder'),
   };
 }
 
@@ -58,7 +59,8 @@ interface CapabilityListProps {
 
 const CapabilityList = observer(
   ({ kind, items, selectedId, onSelect, onChanged }: CapabilityListProps) => {
-    const t = kindText(kind);
+    const { t } = useTranslation();
+    const texts = kindText(kind, t);
     const [name, setName] = useState('');
     const [busy, setBusy] = useState(false);
     const [confirming, setConfirming] = useState<CatalogItem | null>(null);
@@ -69,11 +71,11 @@ const CapabilityList = observer(
       setBusy(true);
       try {
         await http.post(`/${kind}`, { name: trimmed, content: '' });
-        toaster.show({ message: t.created, intent: 'success' });
+        toaster.show({ message: texts.created, intent: 'success' });
         setName('');
         onChanged();
       } catch {
-        toaster.show({ message: t.createFailed, intent: 'danger' });
+        toaster.show({ message: texts.createFailed, intent: 'danger' });
       } finally {
         setBusy(false);
       }
@@ -84,10 +86,10 @@ const CapabilityList = observer(
       setBusy(true);
       try {
         await http.delete(`/${kind}/${item.id}`);
-        toaster.show({ message: t.deleted, intent: 'success' });
+        toaster.show({ message: texts.deleted, intent: 'success' });
         onChanged();
       } catch {
-        toaster.show({ message: t.deleteFailed, intent: 'danger' });
+        toaster.show({ message: texts.deleteFailed, intent: 'danger' });
       } finally {
         setBusy(false);
       }
@@ -96,10 +98,10 @@ const CapabilityList = observer(
     return (
       <div className={cn(columnClass, 'gap-3')}>
         <div>
-          <div className="mb-2 text-sm font-medium text-slate-700">{t.newLabel}</div>
+          <div className="mb-2 text-sm font-medium text-slate-700">{texts.newLabel}</div>
           <div className="flex items-center gap-2">
             <Input
-              placeholder="Имя"
+              placeholder={t('config.namePlaceholder')}
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
@@ -112,13 +114,13 @@ const CapabilityList = observer(
               onClick={create}
               disabled={busy || !name.trim()}
             >
-              Создать
+              {t('config.create')}
             </Button>
           </div>
         </div>
 
         {items.length === 0 ? (
-          <EmptyState>Каталог пуст</EmptyState>
+          <EmptyState>{t('config.catalogEmpty')}</EmptyState>
         ) : (
           <div className="flex-1 space-y-1 overflow-y-auto">
             {items.map((item) => (
@@ -144,10 +146,10 @@ const CapabilityList = observer(
                 </button>
                 <Link
                   to={`/${kind}/${item.id}/history`}
-                  title="История"
+                  title={t('config.history')}
                   className="shrink-0 text-xs text-blue-600 hover:underline"
                 >
-                  История
+                  {t('config.history')}
                 </Link>
                 <Button
                   variant="ghost"
@@ -156,7 +158,7 @@ const CapabilityList = observer(
                   disabled={busy}
                   onClick={() => setConfirming(item)}
                 >
-                  Удалить
+                  {t('config.delete')}
                 </Button>
               </div>
             ))}
@@ -165,8 +167,8 @@ const CapabilityList = observer(
 
         {confirming && (
           <ConfirmDialog
-            title={t.confirmTitle}
-            message={t.confirmMessage(confirming.name)}
+            title={texts.confirmTitle}
+            message={texts.confirmMessage(confirming.name)}
             onConfirm={() => void remove(confirming)}
             onCancel={() => setConfirming(null)}
           />
@@ -185,7 +187,8 @@ interface CapabilityDetailProps {
 
 const CapabilityDetail = observer(
   ({ kind, item, onChanged }: CapabilityDetailProps) => {
-    const t = kindText(kind);
+    const { t } = useTranslation();
+    const texts = kindText(kind, t);
     const [name, setName] = useState(item.name);
     const [content, setContent] = useState(item.content);
     const [mode, setMode] = useState<'edit' | 'view'>('edit');
@@ -197,10 +200,10 @@ const CapabilityDetail = observer(
       setBusy(true);
       try {
         await http.patch(`/${kind}/${item.id}`, { name: trimmedName, content });
-        toaster.show({ message: 'Изменения сохранены', intent: 'success' });
+        toaster.show({ message: t('config.changesSaved'), intent: 'success' });
         onChanged();
       } catch {
-        toaster.show({ message: 'Не удалось сохранить', intent: 'danger' });
+        toaster.show({ message: t('config.saveFailed'), intent: 'danger' });
       } finally {
         setBusy(false);
       }
@@ -216,16 +219,16 @@ const CapabilityDetail = observer(
             disabled={busy || !name.trim()}
             onClick={() => void save()}
           >
-            Сохранить
+            {t('config.save')}
           </Button>
         </div>
 
         <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="text-sm font-medium text-slate-700">Содержимое</span>
+          <span className="text-sm font-medium text-slate-700">{t('config.content')}</span>
           <Tabs
             tabs={[
-              { value: 'edit', label: 'Правка' },
-              { value: 'view', label: 'Просмотр' },
+              { value: 'edit', label: t('config.editTab') },
+              { value: 'view', label: t('config.viewTab') },
             ]}
             value={mode}
             onChange={setMode}
@@ -236,12 +239,12 @@ const CapabilityDetail = observer(
             content.trim() ? (
               <Markdown content={content} />
             ) : (
-              <EmptyState>Содержимое пусто</EmptyState>
+              <EmptyState>{t('config.contentEmpty')}</EmptyState>
             )
           ) : (
             <textarea
               className={cn(textareaClass, 'h-full min-h-[300px]')}
-              placeholder={t.contentPlaceholder}
+              placeholder={texts.contentPlaceholder}
               value={content}
               onChange={(e) => setContent(e.target.value)}
             />
@@ -257,6 +260,7 @@ const CapabilityDetail = observer(
  *  (правка/просмотр, сохранение). Внизу списка — «Удалённые». */
 export const CapabilityEditor = observer(
   ({ kind, items, deleted, onChanged }: CapabilityEditorProps) => {
+    const { t } = useTranslation();
     const [selectedId, setSelectedId] = useState<number | null>(null);
 
     // Автовыбор: при пустом списке — ничего, иначе держим выбор валидным
@@ -283,7 +287,7 @@ export const CapabilityEditor = observer(
           />
           {deleted.length > 0 && (
             <div className="mt-3 border-t border-slate-200 pt-3">
-              <div className="mb-1 text-xs font-medium text-slate-500">Удалённые</div>
+              <div className="mb-1 text-xs font-medium text-slate-500">{t('config.deleted')}</div>
               <div className="space-y-1">
                 {deleted.map((item) => (
                   <div key={item.id} className="flex items-center gap-2 text-xs">
@@ -292,7 +296,7 @@ export const CapabilityEditor = observer(
                       to={`/${kind}/${item.id}/history`}
                       className="text-blue-600 hover:underline"
                     >
-                      История
+                      {t('config.history')}
                     </Link>
                   </div>
                 ))}
@@ -312,7 +316,7 @@ export const CapabilityEditor = observer(
           ) : (
             <Card className={cn(columnClass, 'mb-0 items-center justify-center')}>
               <EmptyState>
-                Выберите запись слева, чтобы просмотреть и отредактировать её
+                {t('config.selectItemToEdit')}
               </EmptyState>
             </Card>
           )}
