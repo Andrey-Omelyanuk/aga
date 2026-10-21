@@ -1,5 +1,6 @@
 import { Model, ObjectInput } from 'mobx-model-ui';
 import { observer } from 'mobx-react-lite';
+import { useTranslation } from 'react-i18next';
 import { Select } from '@/components/ui/select';
 
 export interface SelectInputProps<M extends Model> {
@@ -12,7 +13,8 @@ export interface SelectInputProps<M extends Model> {
 }
 
 export const SelectInput = observer(<M extends Model>(props: SelectInputProps<M>) => {
-  const { input, label, optionKey = (item) => String(item.id), optionLabel = (item) => String(item.id), emptyLabel = 'Выберите…', className } = props;
+  const { t } = useTranslation();
+  const { input, label, optionKey = (item) => String(item.id), optionLabel = (item) => String(item.id), emptyLabel = t('common.select'), className } = props;
 
   const items = input.options?.items ?? [];
 

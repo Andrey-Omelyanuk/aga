@@ -9,7 +9,10 @@
     "confirm": "Confirm",
     "loading": "Loading...",
     "error": "Error",
-    "success": "Success"
+    "success": "Success",
+    "objectDeleted": "Object deleted",
+    "failedToDelete": "Failed to delete object",
+    "select": "Select..."
   },
   "navigation": {
     "projects": "Projects",

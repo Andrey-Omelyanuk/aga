@@ -9,7 +9,10 @@
     "confirm": "Подтвердить",
     "loading": "Загрузка...",
     "error": "Ошибка",
-    "success": "Успешно"
+    "success": "Успешно",
+    "objectDeleted": "Объект удалён",
+    "failedToDelete": "Не удалось удалить объект",
+    "select": "Выберите…"
   },
   "navigation": {
     "projects": "Проекты",
