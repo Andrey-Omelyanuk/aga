@@ -1,21 +1,23 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card, CardTitle } from '@/components/ui/card';
 import { toaster } from '@/utils/toaster';
 import type { SshKeyInfo } from '@/services/settings';
 
 export const SshKeyPanel = ({ info }: { info: SshKeyInfo }) => {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   if (!info.configured) {
     return (
       <Card>
-        <CardTitle>SSH-ключ aga</CardTitle>
+        <CardTitle>{t('config.sshKeyTitle')}</CardTitle>
         <p className="text-sm text-slate-500">
-          Ключ не настроен. Приватный ключ задаёт админ в env ядра{' '}
+          {t('config.sshKeyNotConfigured')}{' '}
           <code className="rounded bg-slate-100 px-1 py-0.5">AGA_SSH_PRIVATE_KEY</code>{' '}
-          (OpenSSH-формат, <code>ssh-keygen -t ed25519</code>); здесь появится публичный
-          ключ для deploy-доступа воркстейшнов к репозиториям.
+          {t('config.sshKeyFormat')}, <code>ssh-keygen -t ed25519</code>); {t('config.sshKeyPublicDescription')}{' '}
+          <code className="rounded bg-slate-100 px-1 py-0.5">git+ssh</code>.
         </p>
       </Card>
     );
@@ -27,16 +29,15 @@ export const SshKeyPanel = ({ info }: { info: SshKeyInfo }) => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toaster.show({ message: 'Не удалось скопировать', intent: 'danger' });
+      toaster.show({ message: t('config.copyFailed'), intent: 'danger' });
     }
   };
 
   return (
     <Card>
-      <CardTitle>SSH-ключ aga</CardTitle>
+      <CardTitle>{t('config.sshKeyTitle')}</CardTitle>
       <p className="mb-3 text-sm text-slate-500">
-        Публичный ключ инстанса — добавьте его в deploy-ключи (GitHub/GitLab/Bitbucket)
-        репозиториев, чтобы воркстейшны могли клонировать и пушить по{' '}
+        {t('config.sshKeyPublicDescription')}{' '}
         <code className="rounded bg-slate-100 px-1 py-0.5">git+ssh</code>.
       </p>
       <div className="mb-3 flex flex-col gap-1">
@@ -48,7 +49,7 @@ export const SshKeyPanel = ({ info }: { info: SshKeyInfo }) => {
         </pre>
       </div>
       <Button variant="outline" size="sm" onClick={copy}>
-        {copied ? 'Скопировано' : 'Скопировать публичный ключ'}
+        {copied ? t('config.copied') : t('config.copyPublicKey')}
       </Button>
     </Card>
   );

@@ -46,13 +46,14 @@ describe('LlmList', () => {
     expect(text).toContain('http://llm:11434/v1');
     expect(text).toContain('secret-key');
     expect(text).toContain('qwen3:0.6b');
-    expect(text).toContain('дефолтная');
+    expect(text).toContain('config.default');
     expect(text).toContain('vllm-cluster');
     expect(text).toContain('http://vllm:8000/v1');
     expect(text).toContain('qwen2.5:7b');
     // Режим инструментов: нативный tool calling или запасной текстовый.
-    expect(text).toContain('Инструменты: tool calling');
-    expect(text).toContain('текстовый режим');
+    expect(text).toContain('config.tools');
+    expect(text).toContain('config.toolCalling');
+    expect(text).toContain('config.textMode');
 
     act(() => root.unmount());
   });
@@ -78,7 +79,7 @@ describe('LlmList', () => {
       (o) => o.textContent,
     );
     expect(options).toContain('ollama-local');
-    expect(options).toContain('— нет —');
+    expect(options).toContain('config.none');
 
     act(() => root.unmount());
   });

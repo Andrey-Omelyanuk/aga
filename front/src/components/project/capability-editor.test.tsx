@@ -60,7 +60,7 @@ describe('CapabilityEditor', () => {
     const { container, root } = renderEditor([], deleted);
     const text = container.textContent ?? '';
 
-    expect(text).toContain('Удалённые');
+    expect(text).toContain('config.deleted');
     expect(text).toContain('old-skill');
     expect(container.querySelector('a[href="/skills/3/history"]')).not.toBeNull();
 
@@ -76,7 +76,7 @@ describe('CapabilityEditor', () => {
 
     // Сокращения — отдельный вид: заголовок создания и ссылка на историю
     // ведут на /shortcuts, а не на скиллы.
-    expect(text).toContain('Новое сокращение');
+    expect(text).toContain('config.newShortcut');
     expect(text).toContain('review');
     expect(container.querySelector('a[href="/shortcuts/7/history"]')).not.toBeNull();
     clickItem(container, 'review');

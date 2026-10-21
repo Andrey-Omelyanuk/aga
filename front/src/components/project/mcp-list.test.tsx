@@ -24,12 +24,12 @@ describe('McpList', () => {
     ] as McpServer[]);
     const text = container.textContent ?? '';
     expect(text).toContain('github');
-    expect(text).toContain('URL: http://mcp/gh');
-    expect(text).toContain('Ключ: k1');
-    expect(text).toContain('Команда: mcp-fs .');
+    expect(text).toContain('config.url http://mcp/gh');
+    expect(text).toContain('config.key k1');
+    expect(text).toContain('config.command mcp-fs .');
     // Проверить можно только http-сервер: у stdio кнопки нет.
     const checks = Array.from(container.querySelectorAll('button')).filter(
-      (b) => b.textContent === 'Проверить',
+      (b) => b.textContent === 'config.check',
     );
     expect(checks).toHaveLength(1);
     act(() => root.unmount());
@@ -37,9 +37,9 @@ describe('McpList', () => {
 
   it('form switches between url and command by transport', () => {
     const { container, root } = renderList([]);
-    expect(container.textContent).toContain('MCP-серверов пока нет');
-    const url = () => container.querySelector('input[placeholder^="URL"]');
-    const command = () => container.querySelector('input[placeholder^="Команда"]');
+    expect(container.textContent).toContain('config.noMcpServers');
+    const url = () => container.querySelector('input[placeholder="config.urlPlaceholder"]');
+    const command = () => container.querySelector('input[placeholder="config.commandPlaceholder"]');
     expect(url()).not.toBeNull();
     expect(command()).toBeNull();
     const select = container.querySelector('select') as HTMLSelectElement;

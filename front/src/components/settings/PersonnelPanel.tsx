@@ -1,4 +1,5 @@
 import { observer } from 'mobx-react-lite';
+import { useTranslation } from 'react-i18next';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/tabs';
@@ -7,11 +8,12 @@ import { User } from '@/models/core';
 import { useQuery } from '@/utils/mobx';
 
 export const PersonnelPanel = observer(() => {
+  const { t } = useTranslation();
   const [users] = useQuery(User, { autoupdate: true });
 
   return (
     <Page queries={[users]}>
-      {users.items.length === 0 && <EmptyState>Персонал пуст</EmptyState>}
+      {users.items.length === 0 && <EmptyState>{t('config.personnelEmpty')}</EmptyState>}
       {users.items.map((u) => (
         <Card key={u.id}>
           <CardTitle>
