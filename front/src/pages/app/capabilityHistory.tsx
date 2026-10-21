@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import { Card, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -11,11 +12,11 @@ import type { CapabilityHistoryEntry } from '@/models/project';
 
 type RouteKind = 'skills' | 'shortcuts';
 
-const ACTION_LABEL: Record<CapabilityHistoryEntry['action'], string> = {
-  create: 'создал',
-  update: 'изменил содержимое',
-  rename: 'переименовал',
-  delete: 'удалил',
+const ACTION_KEYS: Record<CapabilityHistoryEntry['action'], string> = {
+  create: 'actionCreate',
+  update: 'actionUpdate',
+  rename: 'actionRename',
+  delete: 'actionDelete',
 };
 
 const KIND_LABEL: Record<RouteKind, string> = {
@@ -33,6 +34,7 @@ function EntryDiff({ history, index }: { history: CapabilityHistoryEntry[]; inde
 }
 
 const CapabilityHistoryPage = observer(() => {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   // Вид записи — из пути (/skills/:id/history, /shortcuts/:id/history).
   const kind = useLocation().pathname.split('/')[1] as RouteKind;
@@ -55,13 +57,13 @@ const CapabilityHistoryPage = observer(() => {
         ← {KIND_LABEL[kind] ?? kind}
       </Link>
       <Card>
-        <CardTitle>История изменений</CardTitle>
+        <CardTitle>{t('agentSets.historyTitle')}</CardTitle>
         {error ? (
-          <EmptyState>История не найдена</EmptyState>
+          <EmptyState>{t('agentSets.historyNotFound')}</EmptyState>
         ) : history === null ? (
-          <EmptyState>Загрузка…</EmptyState>
+          <EmptyState>{t('agentSets.historyLoading')}</EmptyState>
         ) : history.length === 0 ? (
-          <EmptyState>Изменений пока нет</EmptyState>
+          <EmptyState>{t('agentSets.noChangesYet')}</EmptyState>
         ) : (
           <div className="space-y-2">
             {history.map((entry, index) => (
@@ -71,7 +73,7 @@ const CapabilityHistoryPage = observer(() => {
                 className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-600"
               >
                 <div className="flex items-center gap-2">
-                  <Badge variant="info">{ACTION_LABEL[entry.action]}</Badge>
+                  <Badge variant="info">{t(`agentSets.${ACTION_KEYS[entry.action]}`)}</Badge>
                   <span className="font-semibold text-slate-700">{entry.actor_name}</span>
                   <span className="text-slate-400">
                     {formatTime(entry.created_at)}

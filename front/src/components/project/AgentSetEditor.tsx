@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card, CardMeta } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -42,6 +43,7 @@ const emptyAgent = (name: string): Agent => ({
  * по имени (без версии), инструменты, MCP-серверы, выбранное подключение к LLM.
  * Сохраняется целиком (PATCH). */
 export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
+  const { t } = useTranslation();
   const { setId, skills, connections, users, onSaved } = props;
   const mcpServers = props.mcpServers ?? [];
   const [name, setName] = useState(props.name);
@@ -128,10 +130,10 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
         mcp: a.mcp ?? [],
       }));
       await http.patch(`/agent-sets/${setId}`, { name, agents: payloadAgents });
-      toaster.show({ message: 'Набор сохранён', intent: 'success' });
+      toaster.show({ message: t('agentSets.saved'), intent: 'success' });
       onSaved();
     } catch {
-      toaster.show({ message: 'Не удалось сохранить набор', intent: 'danger' });
+      toaster.show({ message: t('agentSets.saveFailed'), intent: 'danger' });
     } finally {
       setSaving(false);
     }
@@ -140,7 +142,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
   // Скиллы каталога у одного агента: отмеченные — данные ему.
   const skillBlock = (ai: number, items: CatalogItem[], label: string) => {
     if (items.length === 0) {
-      return <div className="text-xs text-slate-400">Каталог «{label}» пуст</div>;
+      return <div className="text-xs text-slate-400">{t('agentSets.catalogEmpty', { label })}</div>;
     }
     return (
       <div className="space-y-1">
@@ -165,12 +167,12 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
   // MCP-серверы каталога у одного агента.
   const mcpBlock = (ai: number) => {
     if (mcpServers.length === 0) {
-      return <div className="text-xs text-slate-400">Каталог MCP-серверов пуст</div>;
+      return <div className="text-xs text-slate-400">{t('agentSets.mcpCatalogEmpty')}</div>;
     }
     const given = agents[ai].mcp ?? [];
     return (
       <div className="space-y-1">
-        <div className="text-xs font-medium text-slate-500">MCP-серверы</div>
+        <div className="text-xs font-medium text-slate-500">{t('agentSets.mcpServers')}</div>
         {mcpServers.map((server) => (
           <label key={server.id} className="flex items-center gap-2 text-xs">
             <input
@@ -192,7 +194,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
       <div className="flex items-center gap-2">
         <Input value={name} onChange={(e) => setName(e.target.value)} className="max-w-xs" />
         <Button onClick={save} disabled={saving}>
-          Сохранить набор
+          {t('agentSets.saveSet')}
         </Button>
       </div>
 
@@ -207,14 +209,14 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                 className="max-w-52"
                 value={agent.name}
                 onChange={(e) => patchAgent(i, { name: e.target.value })}
-                placeholder="папка агента (путь в проекте)"
+                placeholder={t('agentSets.agentFolderPlaceholder')}
               />
               <Select
                 className="max-w-44"
                 value={agent.parent ?? ''}
                 onChange={(e) => patchAgent(i, { parent: e.target.value || null })}
               >
-                <option value="">— нет родителя —</option>
+                <option value="">{t('agentSets.noParent')}</option>
                 {parentOptions.map((n) => (
                   <option key={n} value={n}>
                     {n}
@@ -227,9 +229,9 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                 onChange={(e) =>
                   patchAgent(i, { llm_id: e.target.value ? Number(e.target.value) : null })
                 }
-                title="Подключение к LLM"
+                title={t('agentSets.llmConnection')}
               >
-                <option value="">— дефолтная LLM —</option>
+                <option value="">{t('agentSets.defaultLlm')}</option>
                 {connections.map((c) => (
                   <option key={c.id} value={String(c.id)}>
                     {c.name}
@@ -244,9 +246,9 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                     listen_user_id: e.target.value ? Number(e.target.value) : null,
                   })
                 }
-                title="Пользователь чата: слушать его сообщения и отвечать от его имени"
+                title={t('agentSets.chatUserTooltip')}
               >
-                <option value="">— слушает: нет —</option>
+                <option value="">{t('agentSets.noListener')}</option>
                 {users
                   .filter((u) => u.kind === 'human')
                   .map((u) => (
@@ -256,13 +258,13 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                   ))}
               </Select>
               <Button variant="ghost" size="sm" onClick={() => removeAgent(i)}>
-                Удалить агента
+                {t('agentSets.deleteAgent')}
               </Button>
             </div>
-            <CardMeta>Территория: {agent.territory.folder || '(корень)'}</CardMeta>
+            <CardMeta>{t('agentSets.territory')} {agent.territory.folder || t('agentSets.root')}</CardMeta>
             {agent.territory.excludes.length > 0 && (
               <CardMeta>
-                кроме:{' '}
+                {t('agentSets.except')}{' '}
                 {agent.territory.excludes.map((e) => (
                   <Badge key={e} variant="warn">
                     {e}
@@ -273,17 +275,17 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
             <div className="mt-2">
               <textarea
                 className="min-h-[44px] w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-500"
-                placeholder="Правила агента"
+                placeholder={t('agentSets.agentRulesPlaceholder')}
                 value={agent.description}
                 onChange={(e) => patchAgent(i, { description: e.target.value })}
               />
             </div>
             <div className="mt-2">
               <div className="mb-1 flex items-center gap-2">
-                <span className="text-xs font-medium text-slate-500">Инструменты</span>
+                <span className="text-xs font-medium text-slate-500">{t('agentSets.tools')}</span>
                 <Input
                   className="h-7 max-w-60 text-xs"
-                  placeholder="имя инструмента"
+                  placeholder={t('agentSets.toolNamePlaceholder')}
                   value={toolDraft}
                   onChange={(e) => setToolDraft(e.target.value)}
                   onKeyDown={(e) => {
@@ -296,11 +298,11 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                   onClick={() => addTool(i)}
                   disabled={!toolDraft.trim()}
                 >
-                  Добавить
+                  {t('agentSets.add')}
                 </Button>
               </div>
               {agent.tools.length === 0 ? (
-                <div className="text-xs text-slate-400">Инструментов нет</div>
+                <div className="text-xs text-slate-400">{t('agentSets.noTools')}</div>
               ) : (
                 <div className="flex flex-wrap gap-1.5">
                   {agent.tools.map((tool) => (
@@ -311,7 +313,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                       {tool}
                       <button
                         className="text-slate-400 hover:text-red-600"
-                        title="Удалить инструмент"
+                        title={t('agentSets.deleteTool')}
                         onClick={() => removeTool(i, tool)}
                       >
                         ×
@@ -322,7 +324,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
               )}
             </div>
             <div className="mt-2 grid grid-cols-2 gap-4">
-              {skillBlock(i, skills, 'Скиллы')}
+              {skillBlock(i, skills, t('agentSets.skills'))}
               {mcpBlock(i)}
             </div>
           </Card>
@@ -330,7 +332,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
       })}
 
       <Button variant="outline" onClick={addAgent}>
-        + Агент
+        {t('agentSets.addAgent')}
       </Button>
     </div>
   );

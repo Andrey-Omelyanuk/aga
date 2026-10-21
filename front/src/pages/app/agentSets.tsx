@@ -1,5 +1,6 @@
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Page } from '@/components/core/Page';
 import { AgentSetList } from '@/components/project/AgentSetList';
 import { AgentSetEditor } from '@/components/project/AgentSetEditor';
@@ -8,6 +9,7 @@ import { User } from '@/models/core';
 import { useQuery } from '@/utils/mobx';
 
 const AgentSetsPage = observer(() => {
+  const { t } = useTranslation();
   const [agentSets] = useQuery(AgentSet, { autoupdate: true });
   const [skills] = useQuery(Skill, { autoupdate: true });
   const [connections] = useQuery(Llm, { autoupdate: true });
@@ -49,7 +51,7 @@ const AgentSetsPage = observer(() => {
             />
           ) : (
             <div className="p-10 text-slate-400">
-              Выберите набор слева, чтобы посмотреть и отредактировать его состав
+              {t('agentSets.selectSet')}
             </div>
           )}
         </div>
