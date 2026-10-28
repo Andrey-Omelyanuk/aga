@@ -48,7 +48,16 @@ src/
 ├── llm.rs        # LlmClient — OpenAI-compatible HTTP-клиент: сообщения с ролями, нативные tools/tool_calls
 ├── agent.rs      # Agent — цикл LLM → действия (tool_calls или блоки ```bash) → exec → trace; инструменты shell/ask_human; проверка списка инструментов по командам скрипта; итог AgentOutcome (Answer|Question); наблюдатель шагов; Executor (Sh / KubectlExec / DockerExec)
 ├── trace.rs      # TraceStore — SQLite: tasks, trace_entries, human_requests, projects, agent_sets, agents (с listen_user_id)
-├── chat.rs       # ChatStore — модель чата: chat_users, chats, sessions, participants, messages (origin, kind, tool_call), artifacts, workstations; лимиты нитей; разбор @упоминаний
+├── chat/         # ChatStore — модель чата, разбита по доменам (impl в разных файлах модуля)
+│   ├── mod.rs    #   ChatStore, схема БД и миграции старых БД, clear_all
+│   ├── types.rs  #   ChatUser/Chat/Message/Artifact/Workstation/SessionError, лимиты нитей, KIND_*
+│   ├── users.rs  #   пользователи чата (вход, поиск, суперпользователь)
+│   ├── chats.rs  #   чаты, участники, закрытие чата/сессии
+│   ├── messages.rs#  сообщения, нити, шаринг, артефакты, лимит сообщений нити
+│   ├── sessions.rs#  воркстейшны и сессии (открытие/закрытие/продолжение)
+│   ├── rows.rs   #   мапперы строк SQL → типы
+│   ├── commands.rs#  разбор #команд и @упоминаний, имена сокращений
+│   └── tests.rs  #   unit-тесты модели чата
 ├── context.rs    # Контекст агента из чата: свои сообщения — assistant (шаги — tool_calls), чужие — user с именем; шапка нити; бюджет символов
 ├── cluster.rs    # Cluster — воркстейшн: рендер манифеста пода (k8s) / docker-run (dev), wait_ready, delete
 ├── workstation.rs# executor_for_workstation: воркстейшн → kubectl exec / docker exec
