@@ -28,6 +28,9 @@ infra/k8s/local-proxy/run/
 .vscode/
 .idea/
 
+# Local review notes (not part of the repo)
+/review-findings.md
+
 # Coverage
 coverage/
 htmlcov/
