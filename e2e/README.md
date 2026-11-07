@@ -53,7 +53,7 @@ e2e/
 | `make k8s-verify` | minikube | то, что есть только в k8s: поды, PVC, изоляция | ~10 мин |
 
 ```bash
-make init        # один раз: .env и main/config/roles.yaml
+make init        # .env, main/config/roles.yaml и секреты стенда в .env (повтор безопасен)
 make dev-up      # поднять dev-стенд
 make dev-verify  # стенд жив
 make dev-e2e     # пересобрать core/agent/ws-1/ws-2 и прогнать e2e
@@ -73,11 +73,16 @@ make dev-e2e     # пересобрать core/agent/ws-1/ws-2 и прогнат
 думает минуты, поэтому по умолчанию этот тест пропущен.
 
 Что делает `run.sh`:
-1. Ждёт ядро (`401` на `/users`), иначе просит `make dev-up`.
-2. Сбрасывает БД сидом, перезапускает `aga agent`, перечитывает прокси (после
+1. Ждёт ядро (`401` на `/users`, `127.0.0.1:${PORT}` — порты стенда только на
+   loopback), иначе просит `make dev-up`.
+2. Сбрасывает БД сидом (`aga seed --yes`), перезапускает `aga agent`, перечитывает прокси (после
    пересоздания контейнеров nginx держит старые IP).
 3. Запускает mock-LLM — контейнер `node:22` в сети агент-рантайма.
-4. Гоняет Playwright в образе `mcr.microsoft.com/playwright:v1.63.0-noble` с
+4. Берёт секрет клиента `aga` из env контейнера Keycloak (в репо его нет —
+   генерирует `make init`) и передаёт в Playwright как `E2E_KC_CLIENT_SECRET`
+   вместе с `E2E_CORE`/`E2E_KEYCLOAK` (`127.0.0.1`): парольный grant в
+   `tests/lib/stand.ts`.
+5. Гоняет Playwright в образе `mcr.microsoft.com/playwright:v1.63.0-noble` с
    `--network host`. На хосте нужны только docker и curl: браузер и
    зависимости — в образе, `node_modules` ставятся в `e2e/` при первом запуске.
    В контейнер проброшены docker-сокет и статический docker CLI
@@ -87,14 +92,15 @@ make dev-e2e     # пересобрать core/agent/ws-1/ws-2 и прогнат
 Браузер открывает `http://dev.localhost` — тот же адрес, что у человека;
 Chromium сам резолвит `*.localhost` в loopback, где слушает прокси стенда.
 
-Нужно: `AGA_SSH_PRIVATE_KEY` в `.env` с доступом к
+Нужно: `make init` (секреты стенда в `.env`), `AGA_SSH_PRIVATE_KEY` в `.env` с доступом к
 `git@github.com:Andrey-Omelyanuk/mobx-model-ui.git`; для `k8s-verify` —
 kubectl на кластер (minikube) и jq.
 
 ## Начальные данные
 Два слоя данных.
 
-**Базовый сид** — `aga seed` (`main/src/seed.rs`). Он очищает БД ядра и
+**Базовый сид** — `aga seed --yes` (`main/src/seed.rs`; без `--yes` ядро
+отказывается — команда стирает всю БД). Он очищает БД ядра и
 создаёт детерминированный набор. Код живёт в ядре, потому что встроен в
 бинарь и нужен ещё для демо (`make dev-seed`, `make k8s-seed`). `run.sh`
 вызывает его перед каждым прогоном. Что использует e2e:
@@ -247,7 +253,11 @@ websocket браузера. Здесь нашлись две ошибки ран
 - В `ws-1`/`ws-2` есть git-репозиторий `/work/project`.
 - В ollama загружена `qwen3:0.6b`.
 - Фронт отвечает на `${AGA_FRONT_PORT:-8081}`; прокси раздаёт
-  `dev.localhost`, `api.localhost`, `auth.localhost`.
+  `dev.localhost`, `api.localhost`, `auth.localhost` (порт —
+  `AGA_PROXY_PORT`, по умолчанию 80).
+- Keycloak принимает redirect_uri, который строит ядро
+  (`http://api.localhost/auth/callback`), и отвергает чужой (`400`).
+- Все опубликованные порты контейнеров стенда — на `127.0.0.1`.
 
 ## k8s-verify: только то, что есть в кластере
 Скрипт — `e2e/k8s.sh`, без браузера: проверяется инфраструктура, а не путь
@@ -263,6 +273,15 @@ Keycloak (18081) и фронта (18082). После проверки стенд
   веткой; у пода нет доступа к API кластера.
 - Команды агента идут из пода ядра в под станции (`kubectl exec`).
 - Удаление станции удаляет под; данные ядра переживают рестарт (PVC).
+- Образы собираются с тегом по git sha (`infra/image-tag.sh`) — деплой
+  подменяет `:latest` в манифестах.
+- Keycloak пускает только redirect_uri ядра (`AGA_K8S_API_URL`/auth/callback),
+  чужой — `400`; токены получаются секретом клиента из Secret `aga-stand`.
+- Агент-рантайм под своим SA `aga-agent`: `kubectl exec` в станцию работает,
+  `create pods` — нет.
+- NetworkPolicy `aga-workstation` есть в кластере; дотягивается ли станция до
+  ядра — зависит от CNI: при CNI без NetworkPolicy (minikube по умолчанию)
+  скрипт пишет `WARN`, а не падает.
 
 ## Что e2e сознательно не проверяет
 - **Бизнес-правила чата, наборов, LLM-подключений, скиллов и сокращений** —

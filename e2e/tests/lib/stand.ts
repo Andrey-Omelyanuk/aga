@@ -25,7 +25,8 @@ async function token(user: UserName): Promise<string> {
     body: new URLSearchParams({
       grant_type: 'password',
       client_id: 'aga',
-      client_secret: 'aga-secret',
+      // Секрет клиента генерирует make init (.env); run.sh берёт его из aga-keycloak.
+      client_secret: process.env.E2E_KC_CLIENT_SECRET ?? '',
       username: login,
       password,
     }),

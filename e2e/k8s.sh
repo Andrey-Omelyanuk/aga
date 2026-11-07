@@ -13,7 +13,8 @@
 #   2. ядро в кластере по git-URL создаёт воркстейшн — под ws-<id> готов
 #   3. команды агента воркстейшна выполняются внутри его пода (из пода ядра)
 #   4. данные ядра переживают перезапуск пода (PVC)
-#   5. на стенде поднят Keycloak; у воркстейшна нет доступа к кластеру
+#   5. на стенде поднят Keycloak; у воркстейшна нет доступа к кластеру;
+#      агент-рантайм может только exec (свой SA); сеть станции — NetworkPolicy
 #   6. недействительный токен отклоняется, действительный работает под участником
 #   7. веб-клиент (front) и страница входа Keycloak отвечают извне
 #   8. ядро работает в кластере, а не на хосте
@@ -29,7 +30,12 @@ FRONT_PORT="${FRONT_PORT:-18082}"
 SERVER="http://localhost:${CORE_PORT}"
 KC_SERVER="http://localhost:${KC_PORT}"
 FRONT_SERVER="http://localhost:${FRONT_PORT}"
+# Публичный адрес ядра — из него redirect_uri SSO (как в core/deploy.sh).
+API_URL="${AGA_K8S_API_URL:-http://api.localhost}"
 EXT_IP="localhost"
+# Тег образов — git sha (infra/image-tag.sh), deploy.sh подставляет его в манифесты.
+TAG="${AGA_IMAGE_TAG:-$(bash infra/image-tag.sh)}"
+export AGA_IMAGE_TAG="$TAG"
 PF_PIDS=""
 
 cleanup() {
@@ -43,13 +49,13 @@ trap cleanup EXIT
 echo "==> kubectl: cluster check"
 $KUBECTL cluster-info >/dev/null
 
-echo "==> build & load core + front + workstation images"
-docker build -q -t aga-core:latest -f main/Dockerfile main >/dev/null
-docker build -q -t aga-front:latest -f front/Dockerfile front >/dev/null
-docker build -q -t aga-workstation:latest \
+echo "==> build & load core + front + workstation images (tag $TAG)"
+docker build -q -t "aga-core:$TAG" -f main/Dockerfile main >/dev/null
+docker build -q -t "aga-front:$TAG" -f front/Dockerfile front >/dev/null
+docker build -q -t "aga-workstation:$TAG" \
   -f infra/k8s/workstation-image/Dockerfile infra/k8s/workstation-image >/dev/null
 if command -v minikube >/dev/null 2>&1; then
-  minikube image load aga-core:latest aga-front:latest aga-workstation:latest
+  minikube image load "aga-core:$TAG" "aga-front:$TAG" "aga-workstation:$TAG"
   EXT_IP=$(minikube ip)
 fi
 
@@ -102,14 +108,19 @@ for _ in $(seq 1 60); do
 done
 curl -sf "$FRONT_SERVER/" | grep -q '<main'
 KC_EXT="$EXT_IP:30081"
+# authorize <redirect_uri> — код ответа страницы входа Keycloak.
+authorize() {
+  curl -s -o /dev/null -w '%{http_code}' -G \
+    "http://${KC_EXT}/realms/aga/protocol/openid-connect/auth" \
+    -d client_id=aga -d response_type=code -d scope=openid --data-urlencode "redirect_uri=$1"
+}
 for _ in $(seq 1 60); do
-  if curl -sf -o /dev/null \
-      "http://${KC_EXT}/realms/aga/protocol/openid-connect/auth?client_id=aga&response_type=code&redirect_uri=${SERVER}/auth/callback&scope=openid"; then
-    break
-  fi
+  [ "$(authorize "$API_URL/auth/callback")" = "200" ] && break
   sleep 2
 done
-curl -sf "http://${KC_EXT}/realms/aga/protocol/openid-connect/auth?client_id=aga&response_type=code&redirect_uri=${SERVER}/auth/callback&scope=openid" >/dev/null
+[ "$(authorize "$API_URL/auth/callback")" = "200" ]
+# redirectUris realm — только callback ядра: чужой адрес Keycloak отвергает.
+[ "$(authorize "http://evil.example/auth/callback")" = "400" ]
 # /auth/login ядра редиректит в Keycloak (вход через него).
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Origin: $SERVER" "$SERVER/auth/login")" = "307" ]
 
@@ -121,11 +132,14 @@ echo "==> CORS allows the front origin"
 curl -s -D- -o /dev/null -H "Origin: http://dev.localhost" "$SERVER/users" \
   | grep -qi '^access-control-allow-origin: http://dev.localhost'
 
+# Секрет клиента aga — из Secret стенда (deploy.sh кладёт его из .env).
+KC_CLIENT_SECRET=$($KUBECTL get secret aga-stand -n "$NS" -o jsonpath='{.data.kc-client-secret}' | base64 -d)
 get_token() {
   local user="$1" pass="$2"
-  curl -sf -X POST "$KC_SERVER/realms/aga/protocol/openid-connect/token" \
+  # Секрет — через stdin, не аргументом командной строки.
+  printf '%s' "$KC_CLIENT_SECRET" | curl -sf -X POST "$KC_SERVER/realms/aga/protocol/openid-connect/token" \
     -d grant_type=password \
-    -d client_id=aga -d client_secret=aga-secret \
+    -d client_id=aga --data-urlencode "client_secret@-" \
     -d "username=$user" -d "password=$pass" | jq -r '.access_token'
 }
 
@@ -190,6 +204,25 @@ echo "==> agent commands run in the workstation pod, from the core pod (3)"
 OUT=$($KUBECTL exec -n "$NS" deploy/aga-core -- sh -c \
   "kubectl exec -n $NS $POD -- sh -c 'echo agent-in-pod'" 2>/dev/null)
 [ "$OUT" = "agent-in-pod" ]
+
+echo "==> agent runtime: own SA, exec only (5)"
+[ "$($KUBECTL get deploy aga-agent -n "$NS" -o jsonpath='{.spec.template.spec.serviceAccountName}')" = "aga-agent" ]
+OUT=$($KUBECTL exec -n "$NS" deploy/aga-agent -- sh -c \
+  "kubectl exec $POD -- sh -c 'echo agent-sa-exec'" 2>/dev/null)
+[ "$OUT" = "agent-sa-exec" ]
+if $KUBECTL exec -n "$NS" deploy/aga-agent -- kubectl auth can-i create pods >/dev/null 2>&1; then
+  echo "FAIL: agent runtime SA can create pods" >&2
+  exit 1
+fi
+
+echo "==> workstation network: NetworkPolicy (5)"
+$KUBECTL get networkpolicy aga-workstation -n "$NS" >/dev/null
+# Применяет ли её CNI — зависит от кластера (minikube без --cni=calico — нет).
+if $KUBECTL exec -n "$NS" "$POD" -- sh -c 'nc -z -w 3 aga 8080' 2>/dev/null; then
+  echo "WARN: workstation reaches core — CNI does not enforce NetworkPolicy (see infra/k8s/AGENTS.md)" >&2
+else
+  echo "workstation -> core blocked"
+fi
 
 echo "==> second workstation gets its own pod"
 WS2_ID=$(curl -sf -H "Authorization: Bearer $BOB" -X POST "$SERVER/workstations" \

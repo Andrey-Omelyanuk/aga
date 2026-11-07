@@ -12,6 +12,14 @@
 # Проекты воркстейшнов — пустые git-репо в отдельных named volumes
 # (ws-1-data/ws-2-data, без доступа с хоста); GIT_URL не задан, entrypoint
 # инициализирует пустое репо сам. Проект агент наполняет сам в dev.
+#
+# Секреты (ключи Centrifugo, секрет клиента и пароль админа Keycloak) — из .env:
+# их генерирует make init; без них compose не стартует. Порты публикуются
+# только на loopback (127.0.0.1) — стенд не виден из LAN.
+# AGA_DEV_URL_PORT — порт в публичных адресах *.localhost: пусто при
+# AGA_PROXY_PORT=80 (браузер пишет адрес без «:80»), иначе `:<порт>`; задаёт
+# makefile. Из него собираются origin фронта, redirect_uri и KC_HOSTNAME —
+# Keycloak сверяет их строкой.
 name: aga-dev
 
 services:
@@ -25,7 +33,7 @@ services:
     # пользователем aga (uid 1000) — для dev переходим на root.
     user: "0:0"
     ports:
-      - "${PORT:-8080}:8080"
+      - "127.0.0.1:${PORT:-8080}:8080"
     volumes:
       # Конфиг ядра со включённым SSO (dev-roles.yaml), указывающим на Keycloak
       # этого compose. Генерируется из main/config/roles.yaml — make dev-roles
@@ -49,12 +57,11 @@ services:
       # ядро прокидывает его в контейнеры ws (inject_ssh_key) при подъёме.
       - AGA_SSH_PRIVATE_KEY=${AGA_SSH_PRIVATE_KEY:-}
       # Канонический адрес SPA dev-стенда — через прокси (dev.localhost),
-      # туда же возвращается токен после SSO (auth_callback). Задаём явно,
-      # а не из .env: там AGA_FRONT_URL=http://localhost:8081 (для make run),
-      # что ломает возврат токена в SSO-флоу dev-стенда.
-      # Порт прокси берётся из AGA_PROXY_PORT (из .env), чтобы redirect_uri
-      # совпадал с реальным адресом браузера (иначе Keycloak отвергает callback).
-      - AGA_FRONT_URL=http://dev.localhost:${AGA_PROXY_PORT:-80}
+      # туда же возвращается токен после SSO (auth_callback) и уводит выход
+      # (post_logout_redirect_uri). Задаём явно, а не из .env: там
+      # AGA_FRONT_URL=http://localhost:8081 (для make run), что ломает возврат
+      # токена в SSO-флоу dev-стенда. Совпадает с AGA_KC_FRONT_URL Keycloak.
+      - AGA_FRONT_URL=http://dev.localhost${AGA_DEV_URL_PORT:-}
     restart: "no"
 
   # Агент-рантайм — отдельный процесс того же образа (`aga agent`): подписан на
@@ -110,19 +117,25 @@ services:
     container_name: aga-keycloak
     command: ["start-dev", "--import-realm"]
     environment:
-      - KEYCLOAK_ADMIN=admin
-      - KEYCLOAK_ADMIN_PASSWORD=admin
+      # Админ master-realm (создаётся при первом старте; пароль — из .env).
+      - KC_BOOTSTRAP_ADMIN_USERNAME=admin
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${AGA_KC_ADMIN_PASSWORD:?run make init (stand secrets in .env)}
       - KC_HTTP_PORT=8080
       # Издатель токенов — всегда публичный адрес (браузер ходит через
       # auth.localhost), а ядро обращается по keycloak:8080. Без фиксированного
       # hostname Keycloak отклоняет refresh из ядра: «Invalid token issuer»
       # (тихое обновление токена в SPA не работало). Пойман e2e (access.spec.ts).
-      # Порт прокси берётся из AGA_PROXY_PORT, чтобы Keycloak генерировал
-      # корректные URL с портом.
-      - KC_HOSTNAME=http://auth.localhost:${AGA_PROXY_PORT}
+      - KC_HOSTNAME=http://auth.localhost${AGA_DEV_URL_PORT:-}
       - KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true
+      # Плейсхолдеры realm (keycloak-realm.json, подставляются при импорте):
+      # секрет клиента aga, адрес ядра (redirect_uri — <api>/auth/callback) и
+      # origin фронта (post_logout_redirect_uri). Без переменной Keycloak
+      # оставил бы строку `${...}` как есть — поэтому `:?`.
+      - AGA_KC_CLIENT_SECRET=${AGA_KC_CLIENT_SECRET:?run make init (stand secrets in .env)}
+      - AGA_KC_API_URL=http://api.localhost${AGA_DEV_URL_PORT:-}
+      - AGA_KC_FRONT_URL=http://dev.localhost${AGA_DEV_URL_PORT:-}
     ports:
-      - "${KEYCLOAK_PORT:-8082}:8080"
+      - "127.0.0.1:${KEYCLOAK_PORT:-8082}:8080"
     volumes:
       - ./k8s/core/keycloak-realm.json:/opt/keycloak/data/import/realm.json:ro
     restart: "no"
@@ -141,14 +154,14 @@ services:
       # Браузер открывает его на host-порту 8081 и ходит на ядро напрямую
       # (localhost:8080), как при локальном make run-front; прокси ходит на front:80.
       ports:
-        - "${AGA_FRONT_PORT:-8081}:80"
+        - "127.0.0.1:${AGA_FRONT_PORT:-8081}:80"
       restart: "no"
 
   # Centrifugo — реальное время для чата (websocket). Общий канал `common`
   # доступен только аутентифицированным: веб-клиент берёт connection-JWT у ядра
   # (/connection-jwt/, право на канал в токене), ядро публикует по HTTP API с
-  # api_key. Секреты должны совпадать с центрифуго-блоком dev-roles.yaml
-  # (генерируется из main/config/roles.yaml).
+  # api_key. Секреты — из .env (make init), те же попадают в центрифуго-блок
+  # dev-roles.yaml (make dev-roles).
   centrifugo:
     image: centrifugo/centrifugo:v6
     container_name: aga-centrifugo
@@ -157,10 +170,10 @@ services:
       # http.api_key, client.allowed_origins, uni_sse.enabled), uni-SSE по
       # умолчанию живёт на /connection/uni_sse — префикс задан тем же
       # /connection/sse, как обращается агент-рантайм (centrifuge.rs).
-      - CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY=aga-hmac-secret
-      - CENTRIFUGO_HTTP_API_KEY=aga-api-key
+      - CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY=${AGA_CENTRIFUGO_SECRET:?run make init (stand secrets in .env)}
+      - CENTRIFUGO_HTTP_API_KEY=${AGA_CENTRIFUGO_API_KEY:?run make init (stand secrets in .env)}
       # SPA живёт на dev.localhost (прокси) — это и есть Origin websocket-соединения.
-      - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=http://dev.localhost:${AGA_PROXY_PORT:-80}
+      - CENTRIFUGO_CLIENT_ALLOWED_ORIGINS=http://dev.localhost${AGA_DEV_URL_PORT:-}
       # Unidirectional SSE (/connection/sse): им пользуется агент-рантайм
       # (`aga agent`) для серверной подписки на общий канал (runtime.rs).
       - CENTRIFUGO_UNI_SSE_ENABLED=true
@@ -181,7 +194,7 @@ services:
       - core
       - front
     ports:
-      - "${AGA_PROXY_PORT:-80}:80"
+      - "127.0.0.1:${AGA_PROXY_PORT:-80}:80"
     volumes:
       - ./dev-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
     restart: "no"
@@ -194,7 +207,9 @@ services:
     # выполняет через `docker exec -u 1000`, поэтому файлы проекта в volume
     # принадлежат uid 1000. Проект в отдельном named volume (не bind-mount) —
     # на хосте файлов воркстейшнов нет. Docker-демон воркстейшна изолирован
-    # в собственном контейнере — ws-1 и ws-2 не конфликтуют.
+    # в собственном контейнере — ws-1 и ws-2 не конфликтуют. privileged —
+    # ради DinD: это не граница изоляции, контейнер с ним близок к root хоста
+    # (см. «Изоляция воркстейшна» в infra/AGENTS.md).
     privileged: true
     volumes:
       - ws-1-data:/work/project

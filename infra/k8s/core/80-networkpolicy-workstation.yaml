@@ -1,0 +1,42 @@
+# Сеть воркстейшнов (поды app=aga-workstation, шаблон workstation-pod.yaml и
+# его копия в main/src/cluster.rs): входящие запрещены полностью; исходящие —
+# только DNS кластера и интернет. Приватные сети (под/сервисы кластера: ядро,
+# Keycloak, Centrifugo; узлы и LAN), link-local (метаданные облака
+# 169.254.169.254) и CGNAT закрыты. `kubectl exec` идёт через kubelet, не по
+# сети пода — политика его не режет.
+#
+# Работает только с CNI, который применяет NetworkPolicy (Calico, Cilium…):
+# minikube по умолчанию (`minikube start` без --cni) поднимает CNI без неё —
+# манифест принимается, но ничего не ограничивает. См. infra/k8s/AGENTS.md.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aga-workstation
+  namespace: aga
+spec:
+  podSelector:
+    matchLabels:
+      app: aga-workstation
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    # DNS — CoreDNS в kube-system (после DNAT сервиса kube-dns).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Интернет: git (ssh/https), реестры образов DinD, пакеты.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16

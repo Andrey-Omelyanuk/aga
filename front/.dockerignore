@@ -1,0 +1,11 @@
+# Контекст сборки веб-клиента (front/Dockerfile): зависимости ставятся в
+# образе `npm ci` — хостовые node_modules не должны перетереть их на COPY . .;
+# сборка (dist/) делается в образе.
+node_modules/
+dist/
+storybook-static/
+coverage/
+.env
+.env.*
+*.local
+*.log

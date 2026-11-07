@@ -12,17 +12,39 @@ spec:
     metadata:
       labels:
         app: keycloak
+      annotations:
+        # Хеш realm, адресов и секретов — подставляет deploy.sh: realm
+        # импортируется при старте (H2 без тома), сменился — под пересоздаётся.
+        aga/config-hash: "__KEYCLOAK_CONFIG_HASH__"
     spec:
       containers:
         - name: keycloak
           image: quay.io/keycloak/keycloak:26.0
           imagePullPolicy: IfNotPresent
           args: ["start-dev", "--import-realm"]
+          envFrom:
+            # AGA_KC_API_URL / AGA_KC_FRONT_URL — плейсхолдеры realm
+            # (redirect_uri ядра и post-logout origin фронта), ConfigMap
+            # aga-keycloak-env создаёт deploy.sh.
+            - configMapRef:
+                name: aga-keycloak-env
           env:
-            - name: KEYCLOAK_ADMIN
+            # Админ master-realm — пароль из Secret aga-stand (deploy.sh, .env).
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
               value: admin
-            - name: KEYCLOAK_ADMIN_PASSWORD
-              value: admin
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: aga-stand
+                  key: kc-admin-password
+            # Секрет клиента aga — плейсхолдер ${AGA_KC_CLIENT_SECRET} realm.
+            # Без переменной Keycloak импортировал бы строку `${...}` как секрет —
+            # ключ обязателен (secretKeyRef не optional).
+            - name: AGA_KC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: aga-stand
+                  key: kc-client-secret
             - name: KC_HOSTNAME_STRICT
               value: "false"
             - name: KC_HTTP_PORT

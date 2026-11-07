@@ -1,12 +1,16 @@
+# Два ServiceAccount'а: ядро (HTTP-сервер) управляет воркстейшнами, агент-рантайм
+# только выполняет команды в их подах. Права — минимум в namespace aga.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: aga-core
   namespace: aga
 ---
-# Минимум для управления воркстейшн-подами: ядро создаёт/удаляет поды
-# ws-<id> и делает kubectl exec для команд агента. Secret `aga-ssh` (SSH-ключ
-# aga из env) ядро создаёт/обновляет kubectl apply.
+# Ядро (main/src/cluster.rs): `kubectl apply -f -` пода ws-<id> (get +
+# create/patch), `kubectl delete pod`, ожидание готовности (`kubectl get pod`),
+# `kubectl exec` для служебных команд в станции (клон/переключение проекта).
+# Secret `aga-ssh` (SSH-ключ aga из env) — тоже `kubectl apply`; create
+# resourceNames не ограничить, остальное — только этот Secret.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -15,13 +19,17 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "create", "delete"]
+    verbs: ["get", "list", "create", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create", "update", "delete"]
+    resourceNames: ["aga-ssh"]
+    verbs: ["get", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -35,4 +43,39 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: aga-core
+    namespace: aga
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aga-agent
+  namespace: aga
+---
+# Агент-рантайм (`aga agent`): только `kubectl exec` в поды воркстейшнов
+# (команды агентов и stdio MCP-серверы). Поды и секреты не создаёт и не удаляет.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aga-agent
+  namespace: aga
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aga-agent
+  namespace: aga
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aga-agent
+subjects:
+  - kind: ServiceAccount
+    name: aga-agent
     namespace: aga

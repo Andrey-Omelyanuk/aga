@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Локальный nginx-прокси для доступа к стенду по *.localhost без
 # `minikube tunnel` (в minikube v1.37 туннель не слушает 127.0.0.1:80).
-# Контейнер с --network host слушает 80 (IPv4+IPv6) и проксирует всё на
-# ingress-nginx по nodePort, сохраняя Host — маршрутизацию делает ingress.
+# Контейнер с --network host слушает 80 только на loopback (127.0.0.1 и ::1)
+# и проксирует всё на ingress-nginx по nodePort, сохраняя Host —
+# маршрутизацию делает ingress.
 #
 # Usage: bash infra/k8s/local-proxy.sh [start|stop]
 set -euo pipefail

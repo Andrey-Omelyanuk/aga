@@ -18,11 +18,14 @@
     {
       "clientId": "aga",
       "enabled": true,
-      "secret": "aga-secret",
+      "secret": "${AGA_KC_CLIENT_SECRET}",
       "publicClient": false,
       "directAccessGrantsEnabled": true,
-      "redirectUris": ["*"],
-      "webOrigins": ["*"]
+      "redirectUris": ["${AGA_KC_API_URL}/auth/callback"],
+      "webOrigins": ["+"],
+      "attributes": {
+        "post.logout.redirect.uris": "${AGA_KC_FRONT_URL}"
+      }
     }
   ],
   "users": [

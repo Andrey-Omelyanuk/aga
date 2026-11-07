@@ -1,0 +1,10 @@
+# Контекст сборки ядра (main/Dockerfile): нужны Cargo.toml, Cargo.lock, src/,
+# prompts/. Не тащим артефакты сборки, runtime-данные и локальный конфиг с
+# секретами (config/roles.yaml).
+target/
+data/
+config/
+.env
+.env.*
+*.log
+**/*.swp

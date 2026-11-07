@@ -2,9 +2,8 @@
 # только аутентифицированным: веб-клиент берёт connection-JWT у ядра
 # (/connection-jwt/, право на канал в токене), ядро публикует по HTTP API с api_key.
 #
-# Секреты должны совпадать с центрифуго-блоком roles.yaml ядра (из
-# main/config/roles.yaml): api_key и secret здесь и там одни (дефолты
-# config.example.yml — aga-api-key / aga-hmac-secret; при смене править оба места).
+# Секреты — из Secret aga-stand (deploy.sh берёт их из .env, генерирует
+# make init); те же значения deploy.sh пишет в центрифуго-блок roles.yaml ядра.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,6 +18,9 @@ spec:
     metadata:
       labels:
         app: centrifugo
+      annotations:
+        # Хеш секретов — подставляет deploy.sh: сменились — под пересоздаётся.
+        aga/config-hash: "__CENTRIFUGO_CONFIG_HASH__"
     spec:
       containers:
         - name: centrifugo
@@ -31,9 +33,15 @@ spec:
             # префикс задан /connection/sse, как обращается агент-рантайм
             # (main/src/centrifuge.rs).
             - name: CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY
-              value: aga-hmac-secret
+              valueFrom:
+                secretKeyRef:
+                  name: aga-stand
+                  key: centrifugo-secret
             - name: CENTRIFUGO_HTTP_API_KEY
-              value: aga-api-key
+              valueFrom:
+                secretKeyRef:
+                  name: aga-stand
+                  key: centrifugo-api-key
             # SPA живёт на dev.localhost (ingress) — это Origin websocket-соединения.
             - name: CENTRIFUGO_CLIENT_ALLOWED_ORIGINS
               value: http://dev.localhost

@@ -15,6 +15,7 @@ spec:
     spec:
       containers:
         - name: nginx
+          # Тег :latest заменяет front/deploy.sh на тег сборки (git sha).
           image: aga-front:latest
           imagePullPolicy: IfNotPresent
           ports:

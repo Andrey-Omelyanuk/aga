@@ -1,8 +1,9 @@
 # Агент-рантайм — отдельный процесс того же образа (`/app/aga agent`): подписан
 # на Centrifugo, реагирует на сообщения привязанных пользователей (runtime.rs).
 # HTTP не раздаёт — чат обслуживает aga-core. Общая БД: тот же PVC aga-data
-# (SQLite WAL; стенд — один узел minikube). Команды агентов идут в поды
-# воркстейшнов через kubectl — тот же SA и RBAC, что у ядра.
+# (SQLite WAL, RWO) — поэтому под рантайма живёт на узле ядра (podAffinity).
+# Команды агентов идут в поды воркстейшнов через kubectl exec — свой SA
+# aga-agent: только exec, без создания/удаления подов и секретов.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,6 +11,9 @@ metadata:
   namespace: aga
 spec:
   replicas: 1
+  # Один процесс рантайма на БД: старый под гасится до старта нового.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: aga-agent
@@ -17,31 +21,27 @@ spec:
     metadata:
       labels:
         app: aga-agent
+      annotations:
+        # Хеш конфигов и секретов — подставляет deploy.sh (см. 30-deployment-core).
+        aga/config-hash: "__CORE_CONFIG_HASH__"
     spec:
-      serviceAccountName: aga-core
+      serviceAccountName: aga-agent
       securityContext:
+        # Один runAsUser на под — токен SA читается uid 1000 (tokenFile).
+        runAsUser: 1000
+        runAsGroup: 65534
         fsGroup: 1000
-      initContainers:
-        # Как у ядра: рендерим kubeconfig из токена ServiceAccount'а — kubectl
-        # в поде без него не применит RBAC к воркстейшнам.
-        - name: kubectl-context
-          image: aga-core:latest
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
-          args:
-            - >
-              if [ ! -f /etc/aga/kube/kubeconfig ]; then
-                TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) &&
-                CA=$(base64 < /var/run/secrets/kubernetes.io/serviceaccount/ca.crt | tr -d '\n') &&
-                printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: incluster\n  cluster:\n    server: https://kubernetes.default.svc\n    certificate-authority-data: %s\ncontexts:\n- name: incluster\n  context:\n    cluster: incluster\n    user: sa\ncurrent-context: incluster\nusers:\n- name: sa\n  user:\n    token: %s\n' "$CA" "$TOKEN" > /etc/aga/kube/kubeconfig;
-              fi
-          securityContext:
-            runAsUser: 0
-          volumeMounts:
-            - name: kubeconfig
-              mountPath: /etc/aga/kube
+      affinity:
+        # RWO-том с SQLite монтируется на одном узле: рантайм — рядом с ядром.
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: aga-core
+              topologyKey: kubernetes.io/hostname
       containers:
         - name: agent
+          # Тег :latest заменяет deploy.sh на тег сборки (git sha).
           image: aga-core:latest
           imagePullPolicy: IfNotPresent
           command: ["/app/aga", "agent"]
@@ -60,8 +60,13 @@ spec:
               value: aga-workstation:latest
             - name: AGA_K8S_KUBECTL
               value: kubectl
+            # kubeconfig из ConfigMap aga-kubeconfig: токен SA aga-agent.
             - name: KUBECONFIG
               value: /etc/aga/kube/kubeconfig
+            # Heartbeat рантайма: mtime файла обновляется каждые 10 с, пока жив
+            # цикл; livenessProbe ниже читает тот же путь.
+            - name: AGA_HEARTBEAT_FILE
+              value: /tmp/aga-agent.alive
             - name: RUST_LOG
               valueFrom:
                 configMapKeyRef:
@@ -77,6 +82,20 @@ spec:
                 configMapKeyRef:
                   name: aga-env
                   key: AGA_MAX_THREAD_MESSAGES
+          # HTTP нет — живость по heartbeat-файлу: обновлялся не дольше 60 с назад.
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test $(( $(date +%s) - $(stat -c %Y /tmp/aga-agent.alive) )) -lt 60
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 65534
           volumeMounts:
             - name: roles
               mountPath: /etc/aga/roles.yaml
@@ -86,12 +105,15 @@ spec:
               mountPath: /var/lib/aga
             - name: kubeconfig
               mountPath: /etc/aga/kube
+              readOnly: true
       volumes:
         - name: roles
-          configMap:
-            name: aga-roles
+          secret:
+            secretName: aga-roles
+            defaultMode: 0440
         - name: data
           persistentVolumeClaim:
             claimName: aga-data
         - name: kubeconfig
-          emptyDir: {}
+          configMap:
+            name: aga-kubeconfig

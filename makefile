@@ -9,12 +9,27 @@ endif
 CARGO ?= cargo
 KUBECTL ?= kubectl
 
-# Стенд живёт в namespace aga; имена образов подхватываются из .env.
+# Стенд живёт в namespace aga. Образы k8s-стенда — с тегом по git sha
+# (infra/image-tag.sh: `<sha>` или `<sha>-dirty-<хеш правок>`); deploy.sh
+# подставляет его в манифесты (AGA_IMAGE_TAG), поды обновляются при смене тега.
 NS ?= aga
-CORE_IMAGE ?= aga-core:latest
-FRONT_IMAGE ?= aga-front:latest
-WS_IMAGE ?= aga-workstation:latest
-WAIT_TIMEOUT ?= 180
+ifeq ($(origin IMAGE_TAG),undefined)
+IMAGE_TAG := $(shell bash infra/image-tag.sh)
+endif
+export AGA_IMAGE_TAG := $(IMAGE_TAG)
+CORE_IMAGE ?= aga-core:$(IMAGE_TAG)
+FRONT_IMAGE ?= aga-front:$(IMAGE_TAG)
+WS_IMAGE ?= aga-workstation:$(IMAGE_TAG)
+WAIT_TIMEOUT ?= 300
+# Доп. аргументы minikube start, например --cni=calico (NetworkPolicy).
+MINIKUBE_START_ARGS ?=
+
+# Хост-порт прокси dev-стенда (*.localhost). При 80 браузер пишет адреса без
+# порта — в origin'ах и redirect_uri суффикса нет, иначе `:<порт>` (Keycloak
+# сравнивает redirect_uri строкой, `:80` не нормализует).
+export AGA_PROXY_PORT := $(or $(AGA_PROXY_PORT),80)
+export AGA_DEV_URL_PORT := $(if $(filter 80,$(AGA_PROXY_PORT)),,:$(AGA_PROXY_PORT))
+
 K8S_CORE = infra/k8s/core
 K8S_FRONT = infra/k8s/front
 
@@ -22,14 +37,14 @@ K8S_FRONT = infra/k8s/front
 CARGO_IN_MAIN = cd main && $(CARGO)
 
 .PHONY: help init build release test lint fmt fmt-fix run run-agent run-front \
-        front-test storybook storybook-build \
+        front-test front-lint front-typecheck storybook storybook-build \
         k8s-up k8s-down k8s-build k8s-load k8s-deploy k8s-wait \
         k8s-logs k8s-web k8s-dev k8s-dev-stop k8s-reset k8s-verify \
  dev-up dev-down dev-logs dev-ps dev-reset dev-verify dev-e2e \
         dev-roles dev-seed k8s-seed
 
 help:
-	@echo "init        - Copy example files to working config (.env, roles.yaml)"
+	@echo "init        - Copy example files to working config (.env, roles.yaml), add missing stand secrets to .env"
 	@echo "build       - Build debug binary (cargo build)"
 	@echo "release     - Build release binary (cargo build --release)"
 	@echo "test        - Run unit tests (cargo test)"
@@ -40,6 +55,8 @@ help:
 	@echo "run-agent   - Run the agent runtime locally (aga agent, needs Centrifugo)"
 	@echo "run-front   - Serve front locally (vite dev, port 8081)"
 	@echo "front-test  - Run frontend unit tests (vitest)"
+	@echo "front-lint  - Lint frontend (ESLint)"
+	@echo "front-typecheck - Typecheck frontend (tsc --noEmit)"
 	@echo "storybook   - Run Storybook dev server"
 	@echo "dev-roles   - Generate infra/dev-roles.yaml with SSO enabled (dev Keycloak)"
 	@echo "dev-up      - Start dev stand (docker compose: core + Keycloak + ws-1 + ws-2)"
@@ -51,12 +68,12 @@ help:
 	@echo "dev-e2e     - E2E via web client (Playwright) on dev stand (e2e/run.sh)"
 	@echo "dev-seed    - Restore test dataset into dev stand DB (aga seed in core)"
 	@echo "k8s-seed    - Restore test dataset into cluster DB (aga seed via kubectl exec)"
-	@echo "k8s-up      - Start local cluster (minikube)"
+	@echo "k8s-up      - Start local cluster (minikube; MINIKUBE_START_ARGS=--cni=calico for NetworkPolicy)"
 	@echo "k8s-down    - Delete local cluster (minikube delete)"
-	@echo "k8s-build   - Build core, front and workstation images"
+	@echo "k8s-build   - Build core, front and workstation images (tag: git sha)"
 	@echo "k8s-load    - Load images into minikube"
-	@echo "k8s-deploy  - Bring up the stand in the cluster (core + front + Keycloak)"
-	@echo "k8s-wait    - Wait until the core pod is ready"
+	@echo "k8s-deploy  - Bring up the stand in the cluster (core + agent + front + Keycloak) and wait for rollout"
+	@echo "k8s-wait    - Wait until core, agent and front rollouts are done"
 	@echo "k8s-logs    - Follow core logs"
 	@echo "k8s-web     - Open the web client in the browser"
 	@echo "k8s-dev     - Access the stand via dev.localhost/api.localhost/auth.localhost (nginx proxy)"
@@ -64,9 +81,13 @@ help:
 	@echo "k8s-reset   - Recreate the stand from scratch"
 	@echo "k8s-verify  - E2E checks in the cluster (e2e/k8s.sh)"
 
+# .env и roles.yaml создаются из примеров один раз; секреты стенда (Centrifugo,
+# клиент и админ Keycloak) дописываются в .env случайными, если их нет —
+# существующие строки не трогаются (infra/env-secrets.sh).
 init:
-	@if [ ! -f "./.env"                  ]; then cp ./infra/.env.example     ./.env; fi
+	@if [ ! -f "./.env"                  ]; then cp ./infra/.env.example ./.env && chmod 600 ./.env; fi
 	@if [ ! -f "./main/config/roles.yaml" ]; then mkdir -p ./main/config && cp ./main/config.example.yml ./main/config/roles.yaml; fi
+	@bash infra/env-secrets.sh .env
 	@echo "Env ready. Check .env and main/config/roles.yaml."
 
 build:
@@ -80,6 +101,12 @@ test:
 
 front-test:
 	cd front && npm test
+
+front-lint:
+	cd front && npm run lint
+
+front-typecheck:
+	cd front && npm run typecheck
 
 storybook:
 	cd front && npm run storybook
@@ -120,16 +147,13 @@ DEV_COMPOSE = infra/dev-compose.yml
 DEV_COMPOSE_CMD = docker compose --env-file .env -f $(DEV_COMPOSE)
 
 # Конфиг dev-стенда со включённым SSO: из main/config/roles.yaml (локальный,
-# sso выключен) генерируется infra/dev-roles.yaml, где sso-блок заменён на
-# dev-стендовый (Keycloak compose-стенда: jwks/token внутри сети, authorize —
-# через auth.localhost). Подход тот же, что в k8s core/deploy.sh.
+# sso выключен) генерируется infra/dev-roles.yaml (infra/stand-roles.sh, как в
+# k8s core/deploy.sh): centrifuge- и sso-блоки — стендовые, секреты — из .env
+# (make init), authorize — через auth.localhost. Файл с секретами — 0600.
 dev-roles:
-	@if [ ! -f main/config/roles.yaml ]; then echo "roles config not found: main/config/roles.yaml (run 'make init')" >&2; exit 1; fi
-	@awk '/^sso:/{exit} {print}' main/config/roles.yaml > infra/dev-roles.yaml
-	@# Центрифуго-блок: из свежего roles.yaml (make init) он уже есть до sso;
-	@# в старом — подставляем дефолты, совпадающие с сервисом centrifugo compose.
-	@grep -q '^centrifuge:' infra/dev-roles.yaml || printf 'centrifuge:\n  api_url: http://centrifugo:8000\n  api_key: aga-api-key\n  secret: aga-hmac-secret\n  channel: common\n' >> infra/dev-roles.yaml
-	@printf 'sso:\n  enabled: true\n  jwks_url: http://keycloak:8080/realms/aga/protocol/openid-connect/certs\n  authorize_url: http://auth.localhost:${AGA_PROXY_PORT}/realms/aga/protocol/openid-connect/auth\n  token_url: http://keycloak:8080/realms/aga/protocol/openid-connect/token\n  end_session_url: http://auth.localhost:${AGA_PROXY_PORT}/realms/aga/protocol/openid-connect/logout\n  client_id: aga\n  client_secret: aga-secret\n' >> infra/dev-roles.yaml
+	@umask 077 && bash infra/stand-roles.sh main/config/roles.yaml http://auth.localhost$(AGA_DEV_URL_PORT) > infra/dev-roles.yaml.tmp \
+		&& cat infra/dev-roles.yaml.tmp > infra/dev-roles.yaml && chmod 600 infra/dev-roles.yaml; \
+		rc=$$?; rm -f infra/dev-roles.yaml.tmp; exit $$rc
 	@echo "dev-roles.yaml written (SSO enabled -> dev Keycloak)"
 
 dev-up: dev-roles
@@ -159,7 +183,7 @@ dev-verify: dev-roles
 # Пересобирает образ ядра — seed-подкоманда живёт в бинаре /app/aga.
 dev-seed:
 	$(DEV_COMPOSE_CMD) up -d --build
-	docker exec aga-core /app/aga seed
+	docker exec aga-core /app/aga seed --yes
 
 # E2E через веб-клиент (Playwright) на dev-стенде: e2e/run.sh, описание —
 # e2e/README.md. Ядро и агент-рантайм — один образ: пересоздаём оба, иначе
@@ -170,11 +194,14 @@ dev-e2e: dev-roles
 
 # Восстановить тестовый набор в БД кластера (PVC). Образ ядра должен быть
 # передеплоен с поддержкой seed (make k8s-build && make k8s-load && make k8s-deploy).
+# `--yes` — сид стирает всю БД, без флага ядро отказывается.
 k8s-seed:
-	$(KUBECTL) exec deploy/aga-core -n $(NS) -- /app/aga seed
+	$(KUBECTL) exec deploy/aga-core -n $(NS) -- /app/aga seed --yes
 
+# CNI по умолчанию (minikube start без --cni) NetworkPolicy не применяет —
+# изоляция сети воркстейшнов работает с --cni=calico (MINIKUBE_START_ARGS).
 k8s-up:
-	minikube start
+	minikube start $(MINIKUBE_START_ARGS)
 
 k8s-down:
 	minikube delete
@@ -190,9 +217,13 @@ k8s-load:
 k8s-deploy:
 	bash $(K8S_CORE)/deploy.sh
 	bash $(K8S_FRONT)/deploy.sh
+	$(MAKE) k8s-wait
 
+# Тег образа сменился (новый git sha) — поды пересоздаются сами; ждём rollout.
 k8s-wait:
 	$(KUBECTL) rollout status deploy/aga-core -n $(NS) --timeout=$(WAIT_TIMEOUT)s
+	$(KUBECTL) rollout status deploy/aga-agent -n $(NS) --timeout=$(WAIT_TIMEOUT)s
+	$(KUBECTL) rollout status deploy/aga-front -n $(NS) --timeout=$(WAIT_TIMEOUT)s
 
 k8s-logs:
 	$(KUBECTL) logs deploy/aga-core -n $(NS) -f

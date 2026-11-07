@@ -8,7 +8,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PLAYWRIGHT_IMAGE="mcr.microsoft.com/playwright:v1.63.0-noble"
-CORE="http://localhost:${PORT:-8080}"
+# Порты стенда опубликованы только на 127.0.0.1 (dev-compose.yml).
+CORE="http://127.0.0.1:${PORT:-8080}"
+KEYCLOAK="http://127.0.0.1:${KEYCLOAK_PORT:-8082}"
 
 cleanup() { docker rm -f aga-llm-mock >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -22,7 +24,8 @@ done
   || { echo "FAIL: core API is not up — run 'make dev-up'" >&2; exit 1; }
 
 echo "==> seed DB, restart agent runtime, reload proxy"
-docker exec aga-core /app/aga seed >/dev/null
+# --yes: сид стирает всю БД, без флага ядро отказывается.
+docker exec aga-core /app/aga seed --yes >/dev/null
 docker restart aga-agent >/dev/null
 # Прокси держит IP пересозданных контейнеров — без reload api.localhost отдаёт 502.
 docker exec aga-proxy nginx -s reload >/dev/null 2>&1
@@ -42,12 +45,21 @@ if [ ! -x e2e/.bin/docker ]; then
   docker rm "$CLI" >/dev/null
 fi
 
+# Секрет клиента aga (парольный grant в tests/lib/stand.ts) — из env
+# Keycloak стенда: он генерируется make init и в репо не лежит.
+# В контейнер передаётся по имени (-e VAR), не значением в командной строке.
+E2E_KC_CLIENT_SECRET=$(docker inspect aga-keycloak --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | sed -n 's/^AGA_KC_CLIENT_SECRET=//p')
+[ -n "$E2E_KC_CLIENT_SECRET" ] || { echo "FAIL: AGA_KC_CLIENT_SECRET not found in aga-keycloak — run 'make init && make dev-up'" >&2; exit 1; }
+export E2E_KC_CLIENT_SECRET
+
 echo "==> playwright"
 rm -rf e2e/.auth
 docker run --rm --network host --ipc host \
   --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
   -e HOME=/tmp -e CI=1 -e PATH="/e2e/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   -e E2E_LLM_MODEL="${E2E_LLM_MODEL:-}" \
+  -e E2E_CORE="$CORE" -e E2E_KEYCLOAK="$KEYCLOAK" -e E2E_KC_CLIENT_SECRET \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD/e2e":/e2e -w /e2e "$PLAYWRIGHT_IMAGE" \
   sh -c '[ -d node_modules/@playwright/test ] || npm ci --no-audit --no-fund --loglevel=error; exec npx playwright test "$@"' \
