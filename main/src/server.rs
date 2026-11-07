@@ -102,6 +102,8 @@ pub struct LlmConnectionView {
     pub model_name: String,
     pub is_default: bool,
     pub native_tools: bool,
+    pub max_tokens: Option<i64>,
+    pub temperature: Option<f64>,
 }
 
 impl From<crate::trace::LlmConnection> for LlmConnectionView {
@@ -114,6 +116,8 @@ impl From<crate::trace::LlmConnection> for LlmConnectionView {
             model_name: c.model_name,
             is_default: c.is_default,
             native_tools: c.native_tools,
+            max_tokens: c.max_tokens,
+            temperature: c.temperature,
         }
     }
 }
@@ -183,6 +187,27 @@ pub struct LlmConnectionRequest {
     /// Нативный function calling; не задан — true (текстовый режим — запасной).
     #[serde(default = "crate::trace::default_native_tools")]
     pub native_tools: bool,
+    /// Предел токенов ответа (1..=1 000 000); не задан — дефолт клиента.
+    #[serde(default)]
+    pub max_tokens: Option<i64>,
+    /// Температура (0..=2); не задана — дефолт клиента (0.7).
+    #[serde(default)]
+    pub temperature: Option<f64>,
+}
+
+impl LlmConnectionRequest {
+    /// Параметры генерации в допустимых пределах — иначе 400.
+    fn check(&self) -> Result<(), StatusCode> {
+        let tokens_ok = self.max_tokens.is_none_or(|t| (1..=1_000_000).contains(&t));
+        let temp_ok = self
+            .temperature
+            .is_none_or(|t| t.is_finite() && (0.0..=2.0).contains(&t));
+        if tokens_ok && temp_ok {
+            Ok(())
+        } else {
+            Err(StatusCode::BAD_REQUEST)
+        }
+    }
 }
 
 /// Выбор дефолтной LLM на странице «LLM»: id подключения или null (снять выбор).
@@ -742,12 +767,15 @@ async fn create_llm_connection(
     Json(payload): Json<LlmConnectionRequest>,
 ) -> Result<Json<LlmConnectionView>, StatusCode> {
     require_admin(&state, &headers).await?;
+    payload.check()?;
     let spec = crate::trace::LlmConnectionSpec {
         name: payload.name,
         api_url: payload.api_url,
         api_key: new_secret(payload.api_key),
         model_name: payload.model_name,
         native_tools: payload.native_tools,
+        max_tokens: payload.max_tokens,
+        temperature: payload.temperature,
     };
     match state.trace_store.create_llm_connection(&spec).await {
         Ok(id) => state
@@ -798,6 +826,7 @@ async fn update_llm_connection(
     Json(payload): Json<LlmConnectionRequest>,
 ) -> Result<Json<LlmConnectionView>, StatusCode> {
     require_admin(&state, &headers).await?;
+    payload.check()?;
     let old = state
         .trace_store
         .get_llm_connection(id)
@@ -810,6 +839,8 @@ async fn update_llm_connection(
         api_key: merge_secret(payload.api_key, old.api_key),
         model_name: payload.model_name,
         native_tools: payload.native_tools,
+        max_tokens: payload.max_tokens,
+        temperature: payload.temperature,
     };
     match state.trace_store.update_llm_connection(id, &spec).await {
         Ok(true) => state
@@ -3360,6 +3391,41 @@ mod tests {
         let (status, _) =
             delete_json(&format!("/projects/{project_id}"), &admin, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
+        cleanup(&file).await;
+    }
+
+    /// Параметры генерации подключения: сохраняются и отдаются, мусор — 400.
+    #[tokio::test]
+    async fn llm_connection_generation_params_validated_and_returned() {
+        let (state, file) = test_state(true).await;
+        let admin = auth_headers("bob", &["admin"]);
+        let base = |extra: serde_json::Value| {
+            let mut v =
+                serde_json::json!({"name": "o", "api_url": "http://l/v1", "model_name": "m"});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            v
+        };
+        for bad in [
+            serde_json::json!({"max_tokens": 0}),
+            serde_json::json!({"max_tokens": 2_000_000}),
+            serde_json::json!({"temperature": 2.5}),
+            serde_json::json!({"temperature": -0.1}),
+        ] {
+            let (status, _) = post_json("/llms", &admin, state.clone(), base(bad.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let (status, body) = post_json(
+            "/llms",
+            &admin,
+            state.clone(),
+            base(serde_json::json!({"max_tokens": 8192, "temperature": 0.2})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"max_tokens\":8192"), "{body}");
+        assert!(body.contains("\"temperature\":0.2"), "{body}");
         cleanup(&file).await;
     }
 

@@ -85,7 +85,9 @@ aga/
 ## Development
 - Все команды — через `make` в корне.
 - `make init` — создаёт `.env` (из `infra/.env.example`) и `main/config/roles.yaml`
-  (из `main/config.example.yml`).
+  (из `main/config.example.yml`) и дописывает в `.env` недостающие секреты
+  стенда случайными значениями (`infra/env-secrets.sh`: ключи Centrifugo,
+  секрет клиента и пароль админа Keycloak) — в репозитории их нет.
 - Локальная разработка: `make build`, `make run` (ядро, cargo в `main/`),
   `make run-front` (vite dev, `front/`), `make test`, `make lint`,
   `make fmt`.
@@ -108,7 +110,7 @@ aga/
   доступ по `*.localhost` (dev/api/auth) — `make k8s-dev` (локальный nginx-прокси
   в Docker, без tunnel) и остановка — `make k8s-dev-stop`.
 - Тестовый набор в БД ядра (сброс + детерминированная фикстура): `make dev-seed`
-  (dev-стенд) / `make k8s-seed` (кластер); локально — `cargo run -- seed` в `main/`
+  (dev-стенд) / `make k8s-seed` (кластер); локально — `cargo run -- seed --yes` в `main/`
   (см. `main/src/seed.rs`). Участники набора — учётки Keycloak: `alice`/`alice-pass`
   (participant) и `bob`/`bob-pass` (admin) с фиксированными `sso_subject`
   (см. `infra/k8s/core/keycloak-realm.json`) — после сида вход через SSO находит

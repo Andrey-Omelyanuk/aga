@@ -177,4 +177,32 @@ describe('AgentSetEditor', () => {
     expect(boxes('MCP fs').map((b) => b.checked)).toEqual([false, true]);
     act(() => root.unmount());
   });
+
+  it('new tool draft is per agent: typing for one agent does not fill the others', () => {
+    const base = {
+      description: '',
+      tools: [],
+      max_iterations: 3,
+      llm_id: null,
+      parent_id: null,
+      skills: [],
+      mcp: [],
+    };
+    const agents: Agent[] = [
+      { ...base, id: 1, name: 'a', territory: { folder: 'a', excludes: [] } },
+      { ...base, id: 2, name: 'b', territory: { folder: 'b', excludes: [] } },
+    ];
+    const { container, root } = renderEditor(agents, []);
+    const inputs = () =>
+      Array.from(
+        container.querySelectorAll<HTMLInputElement>('input[placeholder="agentSets.toolNamePlaceholder"]'),
+      );
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    act(() => {
+      setter.call(inputs()[0], 'make');
+      inputs()[0].dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(inputs().map((i) => i.value)).toEqual(['make', '']);
+    act(() => root.unmount());
+  });
 });

@@ -163,6 +163,30 @@ impl ChatStore {
         Ok(row.get("id"))
     }
 
+    /// Сколько сообщений агентов (`origin='agent'`, без шагов) идут подряд в
+    /// чате, заканчивая `up_to` включительно, — до первой реплики человека.
+    /// Считает не больше `cap` (дальше рантайму не интересно).
+    pub async fn agent_streak(
+        &self,
+        chat_id: i64,
+        up_to: i64,
+        cap: i64,
+    ) -> Result<i64, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT origin FROM messages WHERE chat_id = ? AND id <= ? AND kind != ? ORDER BY id DESC LIMIT ?",
+        )
+        .bind(chat_id)
+        .bind(up_to)
+        .bind(KIND_STEP)
+        .bind(cap)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .take_while(|r| r.get::<String, _>("origin") == "agent")
+            .count() as i64)
+    }
+
     /// id сообщений новее `after` по возрастанию (не больше `limit`): догрузка
     /// событий, пропущенных агент-рантаймом, пока он был отключён от Centrifugo.
     pub async fn message_ids_after(&self, after: i64, limit: i64) -> Result<Vec<i64>, sqlx::Error> {

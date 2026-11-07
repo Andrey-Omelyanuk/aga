@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios, { isAxiosError } from 'axios';
 import { makeObservable, observable, runInAction } from 'mobx';
 import { waitIsTrue } from 'mobx-model-ui';
 import { API_BASE, TOKEN_KEY, setOnAuthError, setOnUnauthorized } from './http';
@@ -66,8 +66,10 @@ class Me {
       const { data } = await http.get('/users/me');
       user = data;
       anonymous = !this.isAuthenticated;
-    } catch {
-      if (this.isAuthenticated) {
+    } catch (e) {
+      // Токены выбрасываем только при 401 (недействительны и не обновились).
+      // Сеть, 5xx, рестарт ядра — не повод разлогинивать: токен ещё годен.
+      if (this.isAuthenticated && isAxiosError(e) && e.response?.status === 401) {
         localStorage.removeItem(TOKEN_KEY);
         localStorage.removeItem(REFRESH_KEY);
       }
@@ -110,11 +112,25 @@ class Me {
     return true;
   };
 
+  // Идущее обновление: одновременные 401 (старт страницы шлёт несколько
+  // запросов) ждут один запрос /auth/refresh, а не тратят refresh-токен
+  // параллельно (Keycloak с ротацией принял бы только первый).
+  private refreshing: Promise<string | null> | null = null;
+
   // Обновление токена: ядро меняет refresh-токен на свежую пару у Keycloak
   // (grant_type=refresh_token). Возвращает новый access-токен или null.
   // Кросс-сайтовые куки и silent-iframe не участвуют — браузерная блокировка
   // third-party cookies на обновление не влияет.
-  async refresh(): Promise<string | null> {
+  refresh(): Promise<string | null> {
+    if (!this.refreshing) {
+      this.refreshing = this.doRefresh().finally(() => {
+        this.refreshing = null;
+      });
+    }
+    return this.refreshing;
+  }
+
+  private async doRefresh(): Promise<string | null> {
     const refreshToken = localStorage.getItem(REFRESH_KEY);
     if (!refreshToken) return null;
     try {

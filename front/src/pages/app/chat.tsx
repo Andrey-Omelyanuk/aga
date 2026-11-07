@@ -7,12 +7,13 @@ import { Select } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/tabs';
 import { ChatList } from '@/components/chat/ChatList';
 import { MessageList } from '@/components/chat/MessageList';
-import { Chat, loadChatDetail } from '@/models/chat';
+import { Chat, collectThreadIds, loadChatDetail } from '@/models/chat';
 import { AgentSet, Shortcut } from '@/models/project';
 import { User } from '@/models/core';
 import { useQuery } from '@/utils/mobx';
 import pub_sub from '@/services/pub-sub';
 import { cn } from '@/lib/utils';
+import { toaster } from '@/utils/toaster';
 
 // Начало последнего слова в тексте: всё после последнего пробельного символа
 // (пробела или перевода строки). Сокращение подсказывается, когда текущее
@@ -41,8 +42,13 @@ const ChatPage = observer(() => {
   const [currentChat, setCurrentChat] = useState<Chat | null>(null);
   const currentChatRef = useRef<Chat | null>(null);
   currentChatRef.current = currentChat;
+  const [sending, setSending] = useState(false);
 
   const chatId = id !== undefined && /^\d+$/.test(id) ? Number(id) : null;
+  // Открытый сейчас чат: ответы запросов, начатых в другом чате, не должны
+  // подменить открытый (переключение чата во время загрузки/отправки).
+  const chatIdRef = useRef<number | null>(chatId);
+  chatIdRef.current = chatId;
 
   const [chats] = useQuery(Chat, { autoupdate: true });
   const [agentSets] = useQuery(AgentSet, { autoupdate: true });
@@ -85,13 +91,7 @@ const ChatPage = observer(() => {
       // Событие приходит и для самих нитей (их id — тоже чаты): перезагружаем
       // открытый чат, если сообщение появилось в нём или в одной из его нитей.
       const open = currentChatRef.current;
-      const threadIds: number[] = [];
-      if (open?.threads) {
-        for (const t of open.threads) {
-          threadIds.push(t.id);
-          for (const nt of t.threads) threadIds.push(nt.id);
-        }
-      }
+      const threadIds = collectThreadIds(open?.threads ?? []);
       if (data?.chat_id === chatId || threadIds.includes(data?.chat_id)) void load();
       void chats.load();
     });
@@ -105,13 +105,22 @@ const ChatPage = observer(() => {
     if (inputRef.current) inputRef.current.focus();
   }, [chatId]);
 
+  // Черновик очищается только после успешной отправки: при ошибке текст
+  // остаётся в поле (раньше пропадал). Повторный клик во время отправки — нет.
   const send = async () => {
     const body = draft.trim();
-    if (!body || chatId === null || !currentChat) return;
-    setDraft('');
-    await currentChat.action('messages', { body });
-    const c = await loadChatDetail(chatId);
-    setCurrentChat(c);
+    if (!body || chatId === null || !currentChat || sending) return;
+    setSending(true);
+    try {
+      await currentChat.action('messages', { body });
+      if (chatIdRef.current === chatId) setDraft('');
+      const c = await loadChatDetail(chatId);
+      if (chatIdRef.current === chatId) setCurrentChat(c);
+    } catch {
+      toaster.show({ message: t('chat.sendFailed'), intent: 'danger' });
+    } finally {
+      setSending(false);
+    }
   };
 
   const createNew = async () => {
@@ -121,7 +130,11 @@ const ChatPage = observer(() => {
   };
 
   const reloadDetail = () => {
-    if (chatId !== null) loadDetail(chatId, setCurrentChat);
+    if (chatId === null) return;
+    const id = chatId;
+    loadDetail(id, (c) => {
+      if (chatIdRef.current === id) setCurrentChat(c);
+    });
   };
 
   // Автодополнение при вводе: «/» — сокращения (перечень с Config → Shortcuts),
@@ -305,7 +318,9 @@ const ChatPage = observer(() => {
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onInputKeyDown}
               />
-              <Button onClick={send}>{t('chat.send')}</Button>
+              <Button onClick={send} disabled={sending}>
+                {t('chat.send')}
+              </Button>
             </div>
           </div>
         </div>

@@ -21,6 +21,9 @@ pub struct TaskTrace {
     pub task_id: String,
     pub role: String,
     pub status: String,
+    /// Токены LLM за задачу (сумма `usage` ответов; 0 — сервер их не отдал).
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
     pub entries: Vec<TraceEntry>,
 }
 
@@ -121,6 +124,10 @@ pub struct LlmConnection {
     /// Нативный function calling (`tools` в API). false — запасной текстовый
     /// режим: команды в блоках ```bash, вопрос — маркер `[ASK_HUMAN]`.
     pub native_tools: bool,
+    /// Предел токенов ответа (`max_tokens`); None — дефолт клиента.
+    pub max_tokens: Option<i64>,
+    /// Температура; None — дефолт клиента.
+    pub temperature: Option<f64>,
 }
 
 /// Спек подключения при создании/обновлении: название, url API, ключ, модель.
@@ -132,6 +139,10 @@ pub struct LlmConnectionSpec {
     pub model_name: String,
     #[serde(default = "default_native_tools")]
     pub native_tools: bool,
+    #[serde(default)]
+    pub max_tokens: Option<i64>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
 }
 
 pub(crate) fn default_native_tools() -> bool {
@@ -449,6 +460,7 @@ impl TraceStore {
         .await?;
         // Миграция старых БД: у подключения появились модель и флаг дефолта.
         migrate_llm_connection_columns(&pool).await?;
+        migrate_task_usage_columns(&pool).await?;
         // Одна дефолтная LLM: частичный уникальный индекс на is_default=1.
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_connections_default
@@ -589,6 +601,45 @@ impl TraceStore {
         Ok(())
     }
 
+    /// Прибавить токены ответа LLM к задаче.
+    pub async fn add_task_usage(
+        &self,
+        task_id: &str,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE tasks SET prompt_tokens = prompt_tokens + ?, completion_tokens = completion_tokens + ? WHERE id = ?",
+        )
+        .bind(prompt_tokens)
+        .bind(completion_tokens)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Задачи, оставшиеся `running` после падения/рестарта агент-рантайма
+    /// (единственный процесс, который их исполняет), — `interrupted`.
+    /// Возвращает число таких задач. Ждущие ответа человека не трогаются.
+    pub async fn interrupt_running_tasks(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'interrupted', completed_at = CURRENT_TIMESTAMP WHERE status = 'running'",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Статусы всех задач по порядку создания (тесты).
+    #[cfg(test)]
+    pub async fn task_statuses(&self) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query("SELECT status FROM tasks ORDER BY rowid")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get("status")).collect())
+    }
+
     pub async fn complete_task(&self, task_id: &str, status: &str) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE tasks SET status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?")
             .bind(status)
@@ -609,10 +660,12 @@ impl TraceStore {
     }
 
     pub async fn get_trace(&self, task_id: &str) -> Result<Option<TaskTrace>, sqlx::Error> {
-        let task = sqlx::query("SELECT id, role, status FROM tasks WHERE id = ?")
-            .bind(task_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let task = sqlx::query(
+            "SELECT id, role, status, prompt_tokens, completion_tokens FROM tasks WHERE id = ?",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
 
         match task {
             Some(row) => {
@@ -630,6 +683,8 @@ impl TraceStore {
                     task_id: task_id.to_string(),
                     role,
                     status,
+                    prompt_tokens: row.get("prompt_tokens"),
+                    completion_tokens: row.get("completion_tokens"),
                     entries,
                 }))
             }
@@ -1151,6 +1206,8 @@ impl TraceStore {
             model_name: r.get("model"),
             is_default: r.get::<i64, _>("is_default") != 0,
             native_tools: r.get::<i64, _>("native_tools") != 0,
+            max_tokens: r.get("max_tokens"),
+            temperature: r.get("temperature"),
         }
     }
 
@@ -1160,13 +1217,15 @@ impl TraceStore {
         spec: &LlmConnectionSpec,
     ) -> Result<i64, sqlx::Error> {
         let result = sqlx::query(
-            "INSERT INTO llm_connections (name, api_url, api_key, model, native_tools) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO llm_connections (name, api_url, api_key, model, native_tools, max_tokens, temperature) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&spec.name)
         .bind(&spec.api_url)
         .bind(&spec.api_key)
         .bind(&spec.model_name)
         .bind(spec.native_tools)
+        .bind(spec.max_tokens)
+        .bind(spec.temperature)
         .execute(&self.pool)
         .await?;
         Ok(result.last_insert_rowid())
@@ -1180,13 +1239,15 @@ impl TraceStore {
         spec: &LlmConnectionSpec,
     ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
-            "UPDATE llm_connections SET name = ?, api_url = ?, api_key = ?, model = ?, native_tools = ? WHERE id = ?",
+            "UPDATE llm_connections SET name = ?, api_url = ?, api_key = ?, model = ?, native_tools = ?, max_tokens = ?, temperature = ? WHERE id = ?",
         )
         .bind(&spec.name)
         .bind(&spec.api_url)
         .bind(&spec.api_key)
         .bind(&spec.model_name)
         .bind(spec.native_tools)
+        .bind(spec.max_tokens)
+        .bind(spec.temperature)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -1207,7 +1268,7 @@ impl TraceStore {
 
     pub async fn get_llm_connection(&self, id: i64) -> Result<Option<LlmConnection>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, name, api_url, api_key, model, is_default, native_tools
+            "SELECT id, name, api_url, api_key, model, is_default, native_tools, max_tokens, temperature
              FROM llm_connections WHERE id = ?",
         )
         .bind(id)
@@ -1218,7 +1279,7 @@ impl TraceStore {
 
     pub async fn list_llm_connections(&self) -> Result<Vec<LlmConnection>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, name, api_url, api_key, model, is_default, native_tools
+            "SELECT id, name, api_url, api_key, model, is_default, native_tools, max_tokens, temperature
              FROM llm_connections ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -1253,7 +1314,7 @@ impl TraceStore {
     /// Дефолтная LLM (одна). None — дефолт не выбран.
     pub async fn default_llm_connection(&self) -> Result<Option<LlmConnection>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT id, name, api_url, api_key, model, is_default, native_tools
+            "SELECT id, name, api_url, api_key, model, is_default, native_tools, max_tokens, temperature
              FROM llm_connections WHERE is_default = 1",
         )
         .fetch_optional(&self.pool)
@@ -1273,6 +1334,7 @@ impl TraceStore {
             api_url: None,
             api_key: None,
             native_tools: true,
+            max_tokens: None,
         };
         // Своё подключение важнее дефолта; ссылка на удалённое — как отсутствие.
         let conn = match agent.llm_id {
@@ -1285,6 +1347,10 @@ impl TraceStore {
             llm.api_url = Some(conn.api_url);
             llm.api_key = conn.api_key;
             llm.native_tools = conn.native_tools;
+            llm.max_tokens = conn.max_tokens;
+            if let Some(t) = conn.temperature {
+                llm.temperature = t as f32;
+            }
         }
         Ok(llm)
     }
@@ -1847,6 +1913,37 @@ async fn migrate_llm_connection_columns(pool: &SqlitePool) -> Result<(), sqlx::E
         .execute(pool)
         .await?;
     }
+    if !cols.iter().any(|c| c == "max_tokens") {
+        sqlx::query("ALTER TABLE llm_connections ADD COLUMN max_tokens INTEGER")
+            .execute(pool)
+            .await?;
+    }
+    if !cols.iter().any(|c| c == "temperature") {
+        sqlx::query("ALTER TABLE llm_connections ADD COLUMN temperature REAL")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Токены LLM за задачу (`tasks.prompt_tokens`/`completion_tokens`) —
+/// добавляются в старые БД.
+async fn migrate_task_usage_columns(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let cols: Vec<String> = sqlx::query("PRAGMA table_info(tasks)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>("name"))
+        .collect();
+    for col in ["prompt_tokens", "completion_tokens"] {
+        if !cols.iter().any(|c| c == col) {
+            sqlx::query(&format!(
+                "ALTER TABLE tasks ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+            ))
+            .execute(pool)
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -2227,6 +2324,8 @@ mod tests {
                 api_key: Some("key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -2279,6 +2378,8 @@ mod tests {
                 api_key: Some("old-key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -2315,6 +2416,8 @@ mod tests {
                     api_key: Some("new-key".to_string()),
                     model_name: "qwen3:1b".to_string(),
                     native_tools: true,
+                    max_tokens: None,
+                    temperature: None,
                 },
             )
             .await
@@ -2342,6 +2445,8 @@ mod tests {
                 api_key: Some("key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -2394,6 +2499,8 @@ mod tests {
                 api_key: Some("default-key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -2438,6 +2545,8 @@ mod tests {
                 api_key: None,
                 model_name: "default-model".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -2449,6 +2558,8 @@ mod tests {
                 api_key: Some("own-key".to_string()),
                 model_name: "own-model".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -2492,6 +2603,8 @@ mod tests {
                 api_key: None,
                 model_name: "a-model".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -2502,6 +2615,8 @@ mod tests {
                 api_key: None,
                 model_name: "b-model".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -2530,6 +2645,8 @@ mod tests {
                 api_key: Some("key".to_string()),
                 model_name: "qwen3:0.6b".to_string(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -3106,6 +3223,36 @@ mod tests {
         assert_eq!(req.chat_id, 3);
         let _ = std::fs::remove_file(format!("{}-wal", file.display()));
         let _ = std::fs::remove_file(format!("{}-shm", file.display()));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn running_tasks_of_previous_process_become_interrupted() {
+        let file = std::env::temp_dir().join(format!("aga_trace_int_{}.db", uuid::Uuid::new_v4()));
+        let store = TraceStore::new(&file.to_string_lossy()).await.unwrap();
+        store.create_task("t-run", "dev").await.unwrap();
+        store.create_task("t-wait", "dev").await.unwrap();
+        store.wait_human_task("t-wait").await.unwrap();
+        store.create_task("t-done", "dev").await.unwrap();
+        store.complete_task("t-done", "completed").await.unwrap();
+        assert_eq!(store.interrupt_running_tasks().await.unwrap(), 1);
+        // Ждущая ответа человека и завершённая не тронуты.
+        assert_eq!(
+            store.task_statuses().await.unwrap(),
+            vec!["interrupted", "waiting_human", "completed"]
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[tokio::test]
+    async fn task_accumulates_llm_token_usage() {
+        let file = std::env::temp_dir().join(format!("aga_trace_use_{}.db", uuid::Uuid::new_v4()));
+        let store = TraceStore::new(&file.to_string_lossy()).await.unwrap();
+        store.create_task("t", "dev").await.unwrap();
+        store.add_task_usage("t", 100, 20).await.unwrap();
+        store.add_task_usage("t", 50, 5).await.unwrap();
+        let trace = store.get_trace("t").await.unwrap().unwrap();
+        assert_eq!((trace.prompt_tokens, trace.completion_tokens), (150, 25));
         let _ = std::fs::remove_file(&file);
     }
 }

@@ -61,21 +61,25 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
     })),
   );
   const [saving, setSaving] = useState(false);
-  const [toolDraft, setToolDraft] = useState('');
+  // Черновик нового инструмента — у каждого агента свой (по индексу в списке).
+  const [toolDrafts, setToolDrafts] = useState<Record<number, string>>({});
+  const toolDraft = (index: number) => toolDrafts[index] ?? '';
+  const setToolDraft = (index: number, value: string) =>
+    setToolDrafts((prev) => ({ ...prev, [index]: value }));
 
   const patchAgent = (index: number, patch: Partial<Agent>) => {
     setAgents((prev) => prev.map((a, i) => (i === index ? { ...a, ...patch } : a)));
   };
 
   const addTool = (index: number) => {
-    const tool = toolDraft.trim();
+    const tool = toolDraft(index).trim();
     if (!tool) return;
     patchAgent(index, {
       tools: agents[index].tools.includes(tool)
         ? agents[index].tools
         : [...agents[index].tools, tool],
     });
-    setToolDraft('');
+    setToolDraft(index, '');
   };
 
   const removeTool = (index: number, tool: string) => {
@@ -286,8 +290,8 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                 <Input
                   className="h-7 max-w-60 text-xs"
                   placeholder={t('agentSets.toolNamePlaceholder')}
-                  value={toolDraft}
-                  onChange={(e) => setToolDraft(e.target.value)}
+                  value={toolDraft(i)}
+                  onChange={(e) => setToolDraft(i, e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') addTool(i);
                   }}
@@ -296,7 +300,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
                   variant="outline"
                   size="sm"
                   onClick={() => addTool(i)}
-                  disabled={!toolDraft.trim()}
+                  disabled={!toolDraft(i).trim()}
                 >
                   {t('agentSets.add')}
                 </Button>

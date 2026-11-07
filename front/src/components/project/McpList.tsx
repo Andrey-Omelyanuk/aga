@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button';
+import { ConfirmButton } from '@/components/ui/ConfirmButton';
 import { Card, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
@@ -262,9 +263,14 @@ export const McpList = observer((props: McpListProps) => {
                         >
                           {t('config.edit')}
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => void remove(s.id)}>
+                        <ConfirmButton
+                          variant="ghost"
+                          size="sm"
+                          name={s.name}
+                          onConfirm={() => remove(s.id)}
+                        >
                           {t('config.delete')}
-                        </Button>
+                        </ConfirmButton>
                       </>
                     )}
                   </div>

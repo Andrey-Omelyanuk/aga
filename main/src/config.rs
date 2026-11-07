@@ -86,6 +86,9 @@ pub struct LlmConfig {
     /// режим: команды из блоков ```bash, вопрос — `[ASK_HUMAN]`.
     #[serde(default = "crate::trace::default_native_tools")]
     pub native_tools: bool,
+    /// Предел токенов ответа из подключения; None — `llm::DEFAULT_MAX_TOKENS`.
+    #[serde(default)]
+    pub max_tokens: Option<i64>,
 }
 
 impl Config {

@@ -73,6 +73,12 @@ pub fn mode_from_args(args: &[String]) -> RunMode {
     }
 }
 
+/// `aga seed` стирает ВСЮ БД (все таблицы) — без явного `--yes` не запускается:
+/// случайный запуск в стенде с живыми данными необратим.
+pub fn seed_confirmed(args: &[String]) -> bool {
+    args.iter().skip(2).any(|a| a == "--yes")
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Инициализация логирования
@@ -88,8 +94,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     match mode_from_args(&args) {
-        // `aga seed` — восстановить тестовый набор в БД (см. seed.rs).
-        RunMode::Seed => return seed::seed(&db_path).await,
+        // `aga seed --yes` — стереть БД и восстановить тестовый набор (seed.rs).
+        RunMode::Seed => {
+            if !seed_confirmed(&args) {
+                return Err(format!(
+                    "aga seed стирает всю БД ({db_path}) и кладёт тестовый набор — \
+                     запустите `aga seed --yes`, если это и нужно"
+                )
+                .into());
+            }
+            return seed::seed(&db_path).await;
+        }
         // `aga agent` — агент-рантайм: отдельный процесс без HTTP-сервера
         // (см. runtime.rs).
         RunMode::Agent => return runtime::agent_main(&db_path).await,
@@ -241,5 +256,12 @@ mod tests {
     #[test]
     fn seed_arg_selects_seed() {
         assert_eq!(mode_from_args(&args(&["seed"])), RunMode::Seed);
+    }
+
+    #[test]
+    fn seed_requires_explicit_yes() {
+        assert!(!seed_confirmed(&args(&["seed"])));
+        assert!(!seed_confirmed(&args(&["seed", "yes"])));
+        assert!(seed_confirmed(&args(&["seed", "--yes"])));
     }
 }

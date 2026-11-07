@@ -61,6 +61,11 @@ const MAX_CONCURRENT_AGENT_RUNS: usize = 4;
 const CHANNELS_REFRESH_SECS: u64 = 30;
 /// Сколько пропущенных сообщений догружать за одно переподключение.
 const CATCH_UP_LIMIT: i64 = 500;
+/// Сколько id ниже отметки помнить для защиты от redelivery: множество
+/// принятых сообщений иначе росло бы всё время жизни процесса.
+const SEEN_WINDOW: i64 = 10_000;
+/// Как часто агент-рантайм обновляет heartbeat-файл (liveness-проба k8s).
+const HEARTBEAT_SECS: u64 = 10;
 
 /// Собрать конфиг агента из набора: промпт = правила + данные агенту скиллы
 /// (единственное содержимое каталога), инструменты — отдельный список
@@ -122,10 +127,18 @@ impl RuntimeState {
     }
 
     /// true — сообщение принято впервые; false — redelivery, пропустить.
+    /// Помнятся только id не старше `SEEN_WINDOW` от отметки: старее Centrifugo
+    /// не передоставляет, а догрузка берёт только новее отметки.
     fn mark_seen(&self, message_id: i64) -> bool {
         let mut watermark = self.watermark.lock().unwrap();
         *watermark = (*watermark).max(message_id);
-        self.seen.lock().unwrap().insert(message_id)
+        let mut seen = self.seen.lock().unwrap();
+        let fresh = seen.insert(message_id);
+        if seen.len() as i64 > 2 * SEEN_WINDOW {
+            let floor = *watermark - SEEN_WINDOW;
+            seen.retain(|id| *id > floor);
+        }
+        fresh
     }
 
     fn watermark(&self) -> i64 {
@@ -173,6 +186,13 @@ impl AgentRuntime {
             state: Arc::new(RuntimeState::default()),
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_AGENT_RUNS)),
         }
+    }
+
+    /// Другой предел одновременных запусков (тесты).
+    #[cfg(test)]
+    fn with_max_concurrent_runs(mut self, runs: usize) -> Self {
+        self.permits = Arc::new(Semaphore::new(runs));
+        self
     }
 
     /// Каналы для подписки: общий канал (туда публикуется каждое сообщение
@@ -300,23 +320,26 @@ impl AgentRuntime {
         }
     }
 
-    /// Путь события из Centrifugo: лимит общего параллелизма, далее — handle_message.
+    /// Путь события из Centrifugo.
     async fn dispatch(&self, message_id: i64) {
-        let Ok(_permit) = self.permits.acquire().await else {
-            return;
-        };
         self.handle_message(message_id).await;
     }
 
     /// Обработка события сообщения: найти агентов, которых оно вызывает, и
     /// запустить их параллельно; один агент на станции сериализуется
-    /// мьютексом пары «станция+агент». Возвращает true, если хоть один агент
-    /// отработал (ответ записан).
+    /// мьютексом пары «станция+агент», общий параллелизм — семафором.
+    /// Порядок важен: сначала очередь агента, потом слот семафора — запуск,
+    /// ждущий занятого агента, слот не держит (иначе несколько сообщений
+    /// одному занятому агенту заняли бы все слоты и остановили остальных).
+    /// Возвращает true, если хоть один агент отработал (ответ записан).
     pub async fn handle_message(&self, message_id: i64) -> bool {
         let jobs = self.route(message_id).await;
         let runs = jobs.iter().map(|job| async move {
             let lock = self.state.agent_lock((job.ws_id, job.agent_name.clone()));
             let _serial = lock.lock().await;
+            let Ok(_permit) = self.permits.acquire().await else {
+                return false;
+            };
             self.run_job(job).await
         });
         futures_util::future::join_all(runs)
@@ -338,6 +361,26 @@ impl AgentRuntime {
         };
         if msg.kind == KIND_STEP {
             return Vec::new(); // шаги работы — лог, а не реплики
+        }
+        // Предохранитель от бесконечного пинг-понга агентов (и в корневом
+        // чате, где лимитов нитей нет): после `AGA_MAX_AGENT_CHAIN` сообщений
+        // агентов подряд следующее агентское никого не вызывает — нужен человек.
+        if msg.origin == "agent" {
+            let limit = crate::chat::max_agent_chain();
+            let streak = self
+                .chat_store
+                .agent_streak(msg.chat_id, msg.id, limit + 1)
+                .await
+                .unwrap_or(0);
+            if streak > limit {
+                tracing::warn!(
+                    "runtime: в чате {} {streak} сообщений агентов подряд (предел {limit}) — \
+                     сообщение {} агентов не вызывает",
+                    msg.chat_id,
+                    msg.id
+                );
+                return Vec::new();
+            }
         }
         let Ok(Some(project_id)) = self.chat_store.project_id_for_chat(msg.chat_id).await else {
             return Vec::new(); // чат не сессия проекта — набору агентов неоткуда взяться
@@ -551,6 +594,8 @@ impl AgentRuntime {
             Ok(AgentOutcome::Answer(text)) => text,
             Err(e) => {
                 tracing::error!("runtime: агент {name} упал: {e}", name = job.agent_name);
+                // Задача не должна остаться `running` навсегда.
+                let _ = self.trace_store.complete_task(&task_id, "failed").await;
                 format!("Ошибка: {e}")
             }
         };
@@ -617,16 +662,13 @@ impl AgentRuntime {
 /// Скрытая часть сообщения-шага: длинный вывод команды обрезается с
 /// сохранением начала и конца — человеку достаточно обзора, полная трасса в БД.
 fn truncate_output(output: &str) -> String {
-    const MAX_CHARS: usize = 3000;
-    const HEAD: usize = 2000;
-    const TAIL: usize = 1000;
-    let count = output.chars().count();
-    if count <= MAX_CHARS {
-        return output.to_string();
-    }
-    let head: String = output.chars().take(HEAD).collect();
-    let tail: String = output.chars().skip(count - TAIL).collect();
-    format!("{head}\n…(вывод обрезан, полное — в трассе задачи)…\n{tail}")
+    crate::agent::truncate_middle(
+        output,
+        3000,
+        2000,
+        1000,
+        "…(вывод обрезан, полное — в трассе задачи)…",
+    )
 }
 
 /// Точка входа режима `aga agent`: конфиг, БД, подписка. SSO/JWKS не нужны —
@@ -646,6 +688,14 @@ pub async fn agent_main(db_path: &str) -> Result<(), Box<dyn std::error::Error>>
     let trace_store = TraceStore::new(db_path).await?;
     let chat_store = ChatStore::new(db_path).await?;
     let cluster = Cluster::from_env();
+    // Прогоны прошлого процесса (падение, рестарт пода) не продолжатся —
+    // отмечаем их прерванными, а не `running` навсегда.
+    match trace_store.interrupt_running_tasks().await {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!("aga agent: {n} задач прошлого запуска отмечены interrupted"),
+        Err(e) => tracing::warn!("aga agent: не удалось отметить прерванные задачи: {e}"),
+    }
+    tokio::spawn(heartbeat_loop(heartbeat_path()));
     let runtime = AgentRuntime::new(
         LlmClient::new(),
         trace_store,
@@ -656,6 +706,28 @@ pub async fn agent_main(db_path: &str) -> Result<(), Box<dyn std::error::Error>>
     tracing::info!("aga agent: рантайм запущен, HTTP-сервер не поднят");
     runtime.run().await;
     Ok(())
+}
+
+/// Heartbeat-файл агент-рантайма: env `AGA_HEARTBEAT_FILE`
+/// (`/tmp/aga-agent.alive` по умолчанию).
+fn heartbeat_path() -> std::path::PathBuf {
+    std::env::var("AGA_HEARTBEAT_FILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "/tmp/aga-agent.alive".to_string())
+        .into()
+}
+
+/// HTTP у рантайма нет — liveness-проба k8s смотрит на свежесть mtime
+/// heartbeat-файла, который процесс переписывает каждые `HEARTBEAT_SECS`.
+async fn heartbeat_loop(path: std::path::PathBuf) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_SECS));
+    loop {
+        ticker.tick().await;
+        if let Err(e) = tokio::fs::write(&path, chrono::Utc::now().to_rfc3339()).await {
+            tracing::warn!("aga agent: heartbeat {} не записан: {e}", path.display());
+        }
+    }
 }
 
 /// Позиция разделителя кадров SSE (пустая строка `\n\n`), либо None.
@@ -780,6 +852,8 @@ mod tests {
                 api_key: None,
                 model_name: "m".into(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -1301,6 +1375,8 @@ mod tests {
                 api_key: Some("key-a".into()),
                 model_name: "qwen3:0.6b".into(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -1311,6 +1387,8 @@ mod tests {
                 api_key: None,
                 model_name: "qwen3:1b".into(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -1393,6 +1471,8 @@ mod tests {
                 api_key: Some("default-key".into()),
                 model_name: "qwen3:0.6b".into(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -1519,8 +1599,25 @@ mod tests {
         tokio::task::JoinHandle<()>,
         Arc<AtomicUsize>,
     ) {
+        parallel_fixture_with_delay(agents, 150).await
+    }
+
+    /// То же с заданной задержкой ответа LLM (мс).
+    #[allow(clippy::type_complexity)]
+    async fn parallel_fixture_with_delay(
+        agents: &[(&str, &str)],
+        delay_ms: u64,
+    ) -> (
+        AgentRuntime,
+        HashMap<String, i64>,
+        i64,
+        ChatStore,
+        std::path::PathBuf,
+        tokio::task::JoinHandle<()>,
+        Arc<AtomicUsize>,
+    ) {
         let (trace, chat, file) = temp_stores().await;
-        let (api_url, max, llm_server) = mock_llm_slow("Готово", 150).await;
+        let (api_url, max, llm_server) = mock_llm_slow("Готово", delay_ms).await;
         let conn = trace
             .create_llm_connection(&crate::trace::LlmConnectionSpec {
                 name: "mock".into(),
@@ -1528,6 +1625,8 @@ mod tests {
                 api_key: None,
                 model_name: "m".into(),
                 native_tools: true,
+                max_tokens: None,
+                temperature: None,
             })
             .await
             .unwrap();
@@ -1615,6 +1714,107 @@ mod tests {
         assert_eq!(chat.list_messages(chat_id).await.unwrap().len(), 4);
         llm.abort();
         cleanup(&file).await;
+    }
+
+    /// Сообщения занятому агенту ждут его очереди, не занимая слоты общего
+    /// параллелизма: другой агент стартует сразу, а не после очереди первого.
+    #[tokio::test]
+    async fn queued_runs_of_busy_agent_do_not_block_other_agents() {
+        let (runtime, _users, chat_id, chat, file, llm, _max) =
+            parallel_fixture_with_delay(&[("dev", "alice"), ("docs", "bob")], 400).await;
+        let runtime = runtime.with_max_concurrent_runs(2);
+        let carol = chat
+            .insert_user("carol", "human", false, None, None)
+            .await
+            .unwrap();
+        let m1 = say(&chat, chat_id, carol, "@alice первое").await;
+        let m2 = say(&chat, chat_id, carol, "@alice второе").await;
+        let m3 = say(&chat, chat_id, carol, "@bob третье").await;
+        let started = std::time::Instant::now();
+        let (a, b, (c, docs_done)) = tokio::join!(
+            runtime.handle_message(m1.id),
+            runtime.handle_message(m2.id),
+            async {
+                let ok = runtime.handle_message(m3.id).await;
+                (ok, started.elapsed())
+            },
+        );
+        assert!(a && b && c);
+        // docs отработал за один прогон (~400 мс), не дожидаясь двух прогонов dev.
+        assert!(
+            docs_done < std::time::Duration::from_millis(750),
+            "{docs_done:?}"
+        );
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    /// Пинг-понг агентов без человека ограничен: после `AGA_MAX_AGENT_CHAIN`
+    /// агентских сообщений подряд следующее никого не вызывает; реплика
+    /// человека сбрасывает счёт.
+    #[tokio::test]
+    async fn long_agent_chain_without_human_stops_triggering() {
+        let (runtime, _alice, chat_id, _trace, chat, file, llm) = fixture("Готово").await;
+        let bob = user_id(&chat, "bob").await;
+        say(&chat, chat_id, bob, "начинаем").await;
+        let limit = crate::chat::max_agent_chain();
+        let mut ids = Vec::new();
+        for i in 0..=limit {
+            let m = chat
+                .send_message_with_origin(
+                    chat_id,
+                    bob,
+                    &format!("@alice шаг {i}"),
+                    "",
+                    None,
+                    None,
+                    "agent",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            ids.push(m.id);
+        }
+        // limit-е подряд ещё вызывает, limit+1-е — уже нет.
+        assert_eq!(runtime.route(ids[limit as usize - 1]).await.len(), 1);
+        assert!(runtime.route(ids[limit as usize]).await.is_empty());
+        // Человек вмешался — агентские сообщения снова вызывают.
+        say(&chat, chat_id, bob, "продолжайте").await;
+        let next = chat
+            .send_message_with_origin(chat_id, bob, "@alice снова", "", None, None, "agent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.route(next.id).await.len(), 1);
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    /// Упавший прогон (LLM не настроена) отвечает ошибкой в чат и закрывает
+    /// задачу статусом `failed`, а не оставляет её `running` навсегда.
+    #[tokio::test]
+    async fn failed_run_marks_task_failed() {
+        let (runtime, _alice, chat_id, trace, chat, file, llm) = fixture("Готово").await;
+        trace.clear_default_llm().await.unwrap();
+        let bob = user_id(&chat, "bob").await;
+        let msg = say(&chat, chat_id, bob, "@alice сделай").await;
+        assert!(runtime.handle_message(msg.id).await);
+        assert_eq!(trace.task_statuses().await.unwrap(), vec!["failed"]);
+        let last = chat.list_messages(chat_id).await.unwrap().pop().unwrap();
+        assert!(last.body.starts_with("Ошибка"), "{}", last.body);
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    #[test]
+    fn seen_set_forgets_ids_far_below_watermark() {
+        let state = RuntimeState::default();
+        for id in 1..=(2 * SEEN_WINDOW + 1) {
+            assert!(state.mark_seen(id));
+        }
+        // Память ограничена окном, свежий id — по-прежнему дубль.
+        assert!(state.seen.lock().unwrap().len() as i64 <= SEEN_WINDOW + 1);
+        assert!(!state.mark_seen(2 * SEEN_WINDOW + 1));
     }
 
     #[tokio::test]

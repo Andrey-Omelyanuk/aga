@@ -34,6 +34,11 @@ vi.mock('@/services/http', () => ({
   default: { get: vi.fn(), post: vi.fn() },
 }));
 
+// Текущий пользователь — alice (id 1): её сообщения справа.
+vi.mock('@/services/me', () => ({
+  default: { user: { id: 1, name: 'alice', kind: 'human', is_super_user: false } },
+}));
+
 vi.mock('@/models/chat', () => ({
   Chat: class Chat {
     id = 0;
@@ -47,7 +52,12 @@ vi.mock('@/models/chat', () => ({
     participantName = (id: number) => this.participants.find((p: any) => p.id === id)?.name ?? `#${id}`;
   },
   loadChatDetail: vi.fn(),
+  collectThreadIds: (threads: any[]): number[] => {
+    const walk = (ts: any[]): number[] => ts.flatMap((t) => [t.id, ...walk(t.threads ?? [])]);
+    return walk(threads);
+  },
 }));
+vi.mock('@/utils/toaster', () => ({ toaster: { show: vi.fn() } }));
 
 vi.mock('@/utils/mobx', () => ({
   useQuery: (model: any) => {
@@ -239,6 +249,67 @@ describe('ChatPage', () => {
     await act(async () => {});
     expect(loadChatDetail).toHaveBeenCalledWith(42);
 
+    act(() => root.unmount());
+  });
+
+  it('сообщение во вложенной нити третьего уровня тоже перезагружает открытый чат', async () => {
+    const deep = threadChat();
+    deep.threads[0].threads = [
+      { id: 10, start_message_id: 20, participants: [], messages: [], threads: [
+        { id: 11, start_message_id: 30, participants: [], messages: [], threads: [] },
+      ] },
+    ];
+    vi.mocked(loadChatDetail).mockResolvedValue(deep);
+    const { root } = await renderChat('42');
+    await act(async () => {});
+    vi.mocked(loadChatDetail).mockClear();
+    act(() => messageHandler!({ type: 'message', chat_id: 11, message_id: 31 }));
+    await act(async () => {});
+    expect(loadChatDetail).toHaveBeenCalledWith(42);
+    act(() => root.unmount());
+  });
+
+  it('при ошибке отправки текст остаётся в поле ввода', async () => {
+    const chat = makeChat(openChat());
+    chat.action = vi.fn().mockRejectedValue(new Error('500'));
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    setInput(chatInput(container), 'важный текст');
+    const send = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'chat.send',
+    )!;
+    await act(async () => {
+      send.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(chat.action).toHaveBeenCalledWith('messages', { body: 'важный текст' });
+    expect(chatInput(container).value).toBe('важный текст');
+    act(() => root.unmount());
+  });
+
+  it('своё сообщение справа, чужое слева — по текущему пользователю, а не по id чата', async () => {
+    const chat = makeChat({
+      ...openChat(),
+      id: 2,
+      participants: [
+        { id: 1, name: 'alice' },
+        { id: 2, name: 'bob' },
+      ],
+      messages: [
+        { id: 7, body: 'моё', author_id: 1, created_at: '2026-09-06T10:00:00Z', share_of_id: null },
+        { id: 8, body: 'чужое', author_id: 2, created_at: '2026-09-06T10:00:01Z', share_of_id: null },
+      ],
+    });
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('2');
+    await act(async () => {});
+    const row = (text: string) =>
+      Array.from(container.querySelectorAll('div.flex')).find(
+        (d) => d.className.includes('justify-') && d.textContent?.includes(text),
+      )!;
+    expect(row('моё').className).toContain('justify-end');
+    // Автор bob (id 2) совпадает с id чата — раньше это сообщение уезжало вправо.
+    expect(row('чужое').className).toContain('justify-start');
     act(() => root.unmount());
   });
 

@@ -12,7 +12,9 @@
     "success": "Успешно",
     "objectDeleted": "Объект удалён",
     "failedToDelete": "Не удалось удалить объект",
-    "select": "Выберите…"
+    "select": "Выберите…",
+    "confirmDeleteTitle": "Удалить?",
+    "confirmDeleteMessage": "«{{name}}» будет удалено без возможности восстановления."
   },
   "navigation": {
     "projects": "Проекты",
@@ -76,7 +78,8 @@
     "selectSession": "Выберите сессию",
     "changes": "Изменения",
     "selectOrNewSession": "Выберите сессию или откройте новую",
-    "messagePlaceholder": "Введите сообщение..."
+    "messagePlaceholder": "Введите сообщение...",
+    "sendFailed": "Сообщение не отправлено — текст остался в поле ввода"
   },
   "sessions": {
     "selectProject": "Выберите проект",
@@ -88,10 +91,10 @@
     "openSession": "Открыть сессию",
     "noFreeWorkstations": "Нет готовых свободных воркстейшнов",
     "noSessions": "Сессий пока нет",
-    "workstationCreated": "Воркстейшн #",
     "createdBy": " · создана #",
     "openInChat": "Открыть в чате",
-    "close": "Закрыть"
+    "close": "Закрыть",
+    "workstationNumber": "Воркстейшн #"
   },
   "files": {
     "selectWorkstation": "Выберите воркстейшн...",

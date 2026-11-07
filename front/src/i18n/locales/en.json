@@ -12,7 +12,9 @@
     "success": "Success",
     "objectDeleted": "Object deleted",
     "failedToDelete": "Failed to delete object",
-    "select": "Select..."
+    "select": "Select...",
+    "confirmDeleteTitle": "Delete?",
+    "confirmDeleteMessage": "“{{name}}” will be deleted permanently."
   },
   "navigation": {
     "projects": "Projects",
@@ -64,7 +66,8 @@
     "selectSession": "Select a session",
     "changes": "Changes",
     "selectOrNewSession": "Select a session or open a new one",
-    "messagePlaceholder": "Enter a message..."
+    "messagePlaceholder": "Enter a message...",
+    "sendFailed": "Message was not sent — the text is kept in the input"
   },
   "sessions": {
     "selectProject": "Select a project",
@@ -76,10 +79,10 @@
     "openSession": "Open session",
     "noFreeWorkstations": "No ready free workstations available",
     "noSessions": "No sessions yet",
-    "workstationCreated": "Workstation #",
     "createdBy": " · created by #",
     "openInChat": "Open in chat",
-    "close": "Close"
+    "close": "Close",
+    "workstationNumber": "Workstation #"
   },
   "files": {
     "selectWorkstation": "Select a workstation...",

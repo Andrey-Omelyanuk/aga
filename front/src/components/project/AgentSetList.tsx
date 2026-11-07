@@ -2,6 +2,7 @@ import { observer } from 'mobx-react-lite';
 import { useTranslation } from 'react-i18next';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { ConfirmButton } from '@/components/ui/ConfirmButton';
 import { Card, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
@@ -35,8 +36,7 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
     }
   };
 
-  const remove = async (e: React.MouseEvent, set: AgentSet) => {
-    e.stopPropagation();
+  const remove = async (set: AgentSet) => {
     try {
       await http.delete(`/agent-sets/${set.id}`);
       toaster.show({ message: t('agentSets.deleted'), intent: 'success' });
@@ -86,9 +86,14 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
               <Button variant="outline" size="sm" onClick={() => onSelect(set.id)}>
                 {t('common.edit')}
               </Button>
-              <Button variant="ghost" size="sm" onClick={(e) => void remove(e, set)}>
+              <ConfirmButton
+                variant="ghost"
+                size="sm"
+                name={set.name}
+                onConfirm={() => remove(set)}
+              >
                 {t('common.delete')}
-              </Button>
+              </ConfirmButton>
             </div>
           </Card>
         ))

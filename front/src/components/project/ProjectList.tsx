@@ -38,7 +38,7 @@ export const ProjectList = observer((props: ProjectListProps) => {
           )}
           {canDelete && (
             <div className="mt-2">
-              <DeleteObjectButton obj={p} onDeleted={onDeleted} />
+              <DeleteObjectButton obj={p} name={p.git_url} onDeleted={onDeleted} />
             </div>
           )}
         </Card>

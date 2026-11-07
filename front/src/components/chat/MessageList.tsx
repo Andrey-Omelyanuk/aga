@@ -6,6 +6,7 @@ import { formatTime } from '@/utils/dates';
 import { Artifacts } from './Artifacts';
 import { Button } from '@/components/ui/button';
 import http from '@/services/http';
+import me from '@/services/me';
 
 export interface MessageListProps {
   chat: Chat;
@@ -70,7 +71,6 @@ export const MessageList = observer((props: MessageListProps) => {
         {chat.messages.map((msg) => (
           <div key={msg.id} id={`msg-${msg.id}`}>
             <MessageRow
-              scopeId={chat.id}
               participants={chat.participants}
               message={msg}
               onStart={() => setStartFor(startFor === msg.id ? null : msg.id)}
@@ -113,7 +113,6 @@ export const MessageList = observer((props: MessageListProps) => {
 });
 
 interface MessageRowProps {
-  scopeId: number;
   participants: ChatParticipant[];
   message: ChatMessage;
   onStart: () => void;
@@ -126,9 +125,11 @@ interface MessageRowProps {
 }
 
 const MessageRow = observer(
-  ({ scopeId, participants, message, onStart, onReply, onToParent, onOpenThread }: MessageRowProps) => {
+  ({ participants, message, onStart, onReply, onToParent, onOpenThread }: MessageRowProps) => {
     const { t } = useTranslation();
-    const isUser = message.author_id === scopeId;
+    // Своё сообщение — справа: сравниваем автора с текущим пользователем
+    // (раньше сравнивалось с id чата — сторона выбиралась случайно).
+    const isUser = me.user != null && message.author_id === me.user.id;
     const users = useContext(UsersContext);
     const author =
       participants.find((p) => p.id === message.author_id)?.name ??
@@ -409,7 +410,6 @@ const ThreadBody = observer(({ thread, onChanged }: ThreadBodyProps) => {
       {thread.messages.map((m) => (
         <div key={m.id} id={`msg-${m.id}`}>
           <MessageRow
-            scopeId={thread.id}
             participants={thread.participants}
             message={m}
             onStart={() => setStartFor(startFor === m.id ? null : m.id)}

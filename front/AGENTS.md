@@ -121,8 +121,16 @@ front/
   `window.API_ENDPOINT` (старт контейнера) или fallback по hostname
   (`api.localhost` / `localhost:8080`); request-interceptor добавляет
   `Authorization: Bearer <token>` из `localStorage[aga_token]`; на 401 —
-  `me.refresh()` молча обновляет токен по refresh-токену (`/auth/refresh` ядра),
-  при неудаче — `me.show_login = true`.
+  `me.refresh()` молча обновляет токен по refresh-токену (`/auth/refresh` ядра;
+  одновременные 401 ждут один общий запрос обновления — refresh-токен не
+  тратится параллельно), при неудаче — `me.show_login = true`. `me.init()`
+  выбрасывает токены только на 401 от `/users/me`: сеть/5xx/рестарт ядра не
+  разлогинивают. `me.is_admin` (realm-роль admin или локальный режим) —
+  показывать ли правку LLM/MCP и удаление проектов (ядро и так отвечает 403).
+- **Разрушающие действия — через подтверждение:** удаление проекта, набора
+  агентов, подключения к LLM и MCP-сервера — `ConfirmButton`
+  (`components/ui/ConfirmButton.tsx`, попап `ConfirmDialog`); действие только
+  после «Удалить».
 - **Вход (гейт):** `me.init()` читает токены из фрагмента URL
   (`#token=...&refresh=...`), сохраняет в localStorage и пробует `GET /users/me`
   — это и проба доступа, и данные
@@ -220,15 +228,22 @@ front/
 - **API детали чата — обёртка:** `GET /chats/:id` → `{chat, messages,
   participants}`, список → плоские строки. Модель совпадает со списком;
   деталь разворачивает `loadChatDetail` (`models/chat/Chat.ts`).
-- **API_ENDPOINT в runtime:** index.html содержит `window.API_ENDPOINT =
-  '<API_ENDPOINT>'`; Dockerfile/`replace-env.sh` подставляют значение при
-  старте контейнера (k8s: `env: API_ENDPOINT` в deployment). В dev — fallback.
+- **API_ENDPOINT / PUBSUB_ENDPOINT в runtime:** index.html содержит
+  `window.API_ENDPOINT = '<API_ENDPOINT>'` и `window.PUBSUB_ENDPOINT =
+  '<PUBSUB_ENDPOINT>'`; Dockerfile/`replace-env.sh` подставляют значения при
+  старте контейнера (экранируя для JS-строки и sed; k8s: `env` в deployment).
+  Пусто — fallback по hostname.
 - **Действия воркстейшнов/сессий** — `model.action(name, kwargs)` →
   `POST endpoint/{id}/{name}/`. После действия страница перезагружает Query
   (`shadowLoad()`), т.к. ядро не всегда возвращает обновлённый объект.
 - **`WS` pub-sub:** клиент centrifuge (`services/pub-sub.ts`) подключается к
-  центрифуго на `ws://pub-sub.localhost` (dev-compose и k8s). `pub_sub.init()`
-  зовётся в layout после входа; один общий канал `common` для всех
+  центрифуго по `pubSubUrl()`: `PUBSUB_ENDPOINT` или fallback
+  `ws(s)://pub-sub.localhost[:порт страницы]` (dev-compose и k8s; `wss` на
+  https). `pub_sub.init()` зовётся в layout вместе с `me.init()`, но
+  подключение держит реакция на вход: только вошедшему (или локальному режиму
+  без SSO), при выходе — отключение; 401/404 на `/connection-jwt/` —
+  `UnauthorizedError`, без бесконечных переподключений на экране входа. Событие
+  из нити любой глубины перезагружает открытый чат (`collectThreadIds`). Один общий канал `common` для всех
   аутентифицированных — connection-JWT ядро выдаёт на `/connection-jwt/` (право
   на канал в токене). Подключение деградирует молча: центрифуго недоступен —
   чат открывается, но без автообновления (polling'а нет). Токен для pub-sub

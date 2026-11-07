@@ -8,7 +8,7 @@ const ConfigEnvPage = () => {
   const [info, loading] = useObject(getSshKey);
 
   if (loading) {
-    return <div className="p-10 text-slate-400">{t('config.loading')}</div>;
+    return <div className="p-10 text-slate-400">{t('common.loading')}</div>;
   }
 
   return (

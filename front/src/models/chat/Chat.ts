@@ -47,6 +47,12 @@ export interface ChatThread {
   threads: ChatThread[];
 }
 
+/** id всех нитей на любой глубине: событие из нити любого уровня
+ *  перезагружает открытый чат (раньше смотрели только два уровня). */
+export function collectThreadIds(threads: ChatThread[]): number[] {
+  return threads.flatMap((t) => [t.id, ...collectThreadIds(t.threads ?? [])]);
+}
+
 function flattenThread(raw: any): ChatThread {
   return {
     ...raw.chat,

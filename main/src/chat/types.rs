@@ -12,6 +12,10 @@ pub const DEFAULT_MAX_CHAT_LEVEL: i32 = 10;
 /// `AGA_MAX_THREAD_MESSAGES`. Вместе с глубиной — предохранитель от
 /// бесконечных переписок участников в нитях.
 pub const DEFAULT_MAX_THREAD_MESSAGES: i64 = 100;
+/// Сколько сообщений агентов подряд (без реплики человека) ещё вызывают
+/// других агентов; env `AGA_MAX_AGENT_CHAIN`. Предохранитель от бесконечного
+/// пинг-понга агентов — в том числе в корневом чате, где лимитов нитей нет.
+pub const DEFAULT_MAX_AGENT_CHAIN: i64 = 20;
 
 /// Положительное число из env-значения, иначе — дефолт (нет, пусто, мусор, ≤0).
 pub(super) fn limit_from(value: Option<&str>, default: i64) -> i64 {
@@ -36,6 +40,16 @@ pub fn max_thread_messages() -> i64 {
     *MESSAGES.get_or_init(|| {
         let v = std::env::var("AGA_MAX_THREAD_MESSAGES").ok();
         limit_from(v.as_deref(), DEFAULT_MAX_THREAD_MESSAGES)
+    })
+}
+
+/// Предел цепочки сообщений агентов без человека (`AGA_MAX_AGENT_CHAIN`,
+/// читается один раз).
+pub fn max_agent_chain() -> i64 {
+    static CHAIN: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *CHAIN.get_or_init(|| {
+        let v = std::env::var("AGA_MAX_AGENT_CHAIN").ok();
+        limit_from(v.as_deref(), DEFAULT_MAX_AGENT_CHAIN)
     })
 }
 

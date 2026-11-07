@@ -2,9 +2,55 @@ use crate::config::RoleConfig;
 use crate::llm::{LlmClient, Message};
 use crate::mcp::{self, McpClient};
 use crate::scope;
+use crate::shell::quote;
 use crate::trace::TraceStore;
 use regex::Regex;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
+
+/// Сколько символов вывода команды/инструмента уходит модели: начало и конец,
+/// середина опускается (полный вывод — в трассе). Без предела один `cat`
+/// большого файла переполнял бы контекст и счёт за LLM.
+const MODEL_OUTPUT_MAX_CHARS: usize = 16_000;
+const MODEL_OUTPUT_HEAD: usize = 10_000;
+const MODEL_OUTPUT_TAIL: usize = 6_000;
+
+/// Предел времени команды агента: env `AGA_COMMAND_TIMEOUT_SECS` (600 по
+/// умолчанию). Зависшая команда (сервер, `watch`, ожидание ввода) иначе
+/// держала бы прогон и очередь агента бесконечно.
+pub fn command_timeout() -> Duration {
+    static SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    Duration::from_secs(*SECS.get_or_init(|| {
+        std::env::var("AGA_COMMAND_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(600)
+    }))
+}
+
+/// Длинный текст: первые `head` и последние `tail` символов с пометкой `note`
+/// между ними; короче `max` — как есть.
+pub fn truncate_middle(text: &str, max: usize, head: usize, tail: usize, note: &str) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let first: String = text.chars().take(head).collect();
+    let last: String = text.chars().skip(count - tail).collect();
+    format!("{first}\n{note}\n{last}")
+}
+
+/// Вывод для модели: длинный обрезается посередине.
+fn for_model(output: &str) -> String {
+    truncate_middle(
+        output,
+        MODEL_OUTPUT_MAX_CHARS,
+        MODEL_OUTPUT_HEAD,
+        MODEL_OUTPUT_TAIL,
+        "…(середина вывода опущена; полный вывод — в трассе задачи; сужай вывод: head/tail/grep)…",
+    )
+}
 
 /// Общая инструкция агентам и протокол инструментов по режиму LLM-подключения.
 const COMMON_PROMPT: &str = include_str!("../prompts/all-agents.md");
@@ -583,6 +629,8 @@ pub struct Agent {
     project_root: String,
     /// Инструмент `start_thread` (только при заданном — в чате рантайма).
     thread_starter: Option<ThreadStarter>,
+    /// Предел времени одной команды (`command_timeout`; тесты укорачивают).
+    command_timeout: Duration,
 }
 
 /// Итог прогона агента: финальный ответ или вопрос человеку (задача ставится
@@ -662,7 +710,15 @@ impl Agent {
             scope,
             project_root: scope::PROJECT_ROOT.to_string(),
             thread_starter: None,
+            command_timeout: command_timeout(),
         }
+    }
+
+    /// Другой предел времени команды (тесты).
+    #[cfg(test)]
+    pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
+        self.command_timeout = timeout;
+        self
     }
 
     /// Дать агенту инструмент `start_thread`.
@@ -741,10 +797,25 @@ impl Agent {
         let mut answer: Option<String> = None;
 
         for step in 1..=max_steps {
-            let mut reply = self
+            let llm_reply = self
                 .llm_client
                 .chat(&self.role_config.llm, &messages, &tools)
                 .await?;
+            if let Some(usage) = llm_reply.usage {
+                self.trace_store
+                    .add_task_usage(task_id, usage.prompt_tokens, usage.completion_tokens)
+                    .await?;
+                self.trace_store
+                    .add_entry(
+                        task_id,
+                        step,
+                        "llm_usage",
+                        &serde_json::to_string(&usage).unwrap_or_default(),
+                        None,
+                    )
+                    .await?;
+            }
+            let mut reply = llm_reply.message;
             // id вызова обязателен для ответа на него; часть серверов его не даёт.
             for (i, call) in reply.tool_calls.iter_mut().enumerate() {
                 if call.id.is_empty() {
@@ -963,7 +1034,7 @@ impl Agent {
         if let Some(tx) = steps {
             let _ = tx.send(Step::call(label, output.clone(), &llm_name, arguments));
         }
-        Ok(output)
+        Ok(for_model(&output))
     }
 
     /// Действия текстового режима и пояснение (текст ответа без блоков команд).
@@ -1054,7 +1125,7 @@ impl Agent {
                 serde_json::json!({"command": command}),
             ));
         }
-        Ok(output)
+        Ok(for_model(&output))
     }
 
     /// Процесс команды агента: в воркстейшне — в песочнице владения (запись
@@ -1072,12 +1143,40 @@ impl Agent {
         }
     }
 
-    /// Исполнить команду агента и вернуть вывод для модели.
+    /// Исполнить команду агента и вернуть её вывод. Время ограничено
+    /// `command_timeout`: в воркстейшне команду дополнительно оборачивает
+    /// `timeout -s KILL` внутри станции — убийство локального `kubectl exec`/
+    /// `docker exec` процесс в контейнере не останавливает (дочерние процессы,
+    /// ушедшие в фон, `timeout` не добивает). Локальный клиент убивается при
+    /// выходе за предел с запасом (`kill_on_drop`), модель получает пометку.
     async fn execute_command(
         &self,
         command: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(format_output(&self.process(command, false).output().await?))
+        let secs = self.command_timeout.as_secs().max(1);
+        let command = match self.scope {
+            Some(_) => format!("exec timeout -s KILL {secs} sh -c {}", quote(command)),
+            None => command.to_string(),
+        };
+        let mut process = self.process(&command, false);
+        process.kill_on_drop(true);
+        let started = Instant::now();
+        let grace = Duration::from_secs(5);
+        let note = format!(
+            "[команда прервана: дольше {secs} с. Долгие процессы (серверы, watch) \
+             запускай в фоне с выводом в файл]"
+        );
+        match tokio::time::timeout(self.command_timeout + grace, process.output()).await {
+            Ok(output) => {
+                let mut text = format_output(&output?);
+                if started.elapsed() >= self.command_timeout {
+                    text.push('\n');
+                    text.push_str(&note);
+                }
+                Ok(text)
+            }
+            Err(_) => Ok(note),
+        }
     }
 }
 
@@ -1100,6 +1199,7 @@ mod tests {
                 api_url,
                 api_key: None,
                 native_tools: native,
+                max_tokens: None,
             },
             mcp_servers: vec![],
         }
@@ -1269,6 +1369,99 @@ mod tests {
         assert_eq!(last["content"], "hi\n");
         llm.abort();
         cleanup(&file).await;
+    }
+
+    /// Зависшая команда не держит прогон: по пределу времени процесс
+    /// убивается, модель получает пометку и продолжает.
+    #[tokio::test]
+    async fn hanging_command_is_cut_by_timeout_and_reported_to_model() {
+        let (url, llm, bodies) = mock_llm_seq(vec![
+            shell_call("c1", "sleep 30"),
+            serde_json::json!("Готово"),
+        ])
+        .await;
+        let (store, file) = store().await;
+        let agent = Agent::with_executor(
+            role(&["sleep"], Some(url), true),
+            LlmClient::new(),
+            store,
+            Executor::Sh,
+            None,
+        )
+        .with_command_timeout(Duration::from_millis(300));
+        let started = Instant::now();
+        let outcome = agent.run("t-timeout", task(), None).await.unwrap();
+        // Предел + запас на завершение, но не 30 с сна.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(matches!(outcome, AgentOutcome::Answer(_)));
+        let bodies = bodies.lock().unwrap().clone();
+        let last = bodies[1]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert!(
+            last["content"]
+                .as_str()
+                .unwrap()
+                .contains("команда прервана"),
+            "{last}"
+        );
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    /// Огромный вывод модели уходит обрезанным посередине, в трассе — целиком.
+    #[tokio::test]
+    async fn long_output_is_truncated_for_model_but_kept_in_trace() {
+        let (url, llm, bodies) = mock_llm_seq(vec![
+            shell_call("c1", "seq 1 20000"),
+            serde_json::json!("Готово"),
+        ])
+        .await;
+        let (store, file) = store().await;
+        let agent = Agent::with_executor(
+            role(&["seq"], Some(url), true),
+            LlmClient::new(),
+            store.clone(),
+            Executor::Sh,
+            None,
+        );
+        agent.run("t-long", task(), None).await.unwrap();
+        let bodies = bodies.lock().unwrap().clone();
+        let last = bodies[1]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        let content = last["content"].as_str().unwrap();
+        assert!(content.chars().count() < MODEL_OUTPUT_MAX_CHARS + 200);
+        assert!(content.starts_with("1\n2\n"));
+        assert!(content.ends_with("20000\n"));
+        assert!(content.contains("середина вывода опущена"));
+        let trace = store.get_trace("t-long").await.unwrap().unwrap();
+        let full = trace
+            .entries
+            .iter()
+            .find(|e| e.entry_type == "command_output")
+            .unwrap();
+        assert!(full.content.contains("\n10000\n"));
+        llm.abort();
+        cleanup(&file).await;
+    }
+
+    #[test]
+    fn truncate_middle_keeps_head_and_tail() {
+        assert_eq!(truncate_middle("abc", 5, 2, 1, "…"), "abc");
+        assert_eq!(truncate_middle("abcdefgh", 5, 2, 1, "…"), "ab\n…\nh");
+        // Символы, а не байты.
+        assert_eq!(truncate_middle("ёжикиии", 3, 1, 1, "…"), "ё\n…\nи");
     }
 
     #[tokio::test]

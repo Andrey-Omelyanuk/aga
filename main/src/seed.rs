@@ -108,6 +108,8 @@ pub async fn seed(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             api_key: None,
             model_name: "qwen3:0.6b".into(),
             native_tools: true,
+            max_tokens: None,
+            temperature: None,
         })
         .await?;
     trace.set_default_llm(ollama).await?;
