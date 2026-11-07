@@ -13,12 +13,17 @@ import { useTranslation } from 'react-i18next';
 export interface LlmListProps {
   connections: Llm[];
   onChanged: () => void;
+  /** Создание, правка, удаление и выбор дефолтной LLM — только админу. */
+  canEdit?: boolean;
 }
 
 interface LlmDraft {
   name: string;
   api_url: string;
+  /** Новый ключ. Текущий ключ ядро не отдаёт: пусто — оставить как есть. */
   api_key: string;
+  /** Удалить заданный ключ (при правке). */
+  clear_key: boolean;
   model_name: string;
   native_tools: boolean;
 }
@@ -27,16 +32,25 @@ const emptyDraft = (): LlmDraft => ({
   name: '',
   api_url: '',
   api_key: '',
+  clear_key: false,
   model_name: '',
   native_tools: true,
 });
 const fromLlm = (c: Llm): LlmDraft => ({
   name: c.name,
   api_url: c.api_url,
-  api_key: c.api_key ?? '',
+  api_key: '',
+  clear_key: false,
   model_name: c.model_name,
   native_tools: c.native_tools,
 });
+
+/** Ключ в запросе правки: нет поля — оставить, '' — удалить, иначе — новый. */
+export const keyPatch = (d: { api_key: string; clear_key: boolean }) => {
+  if (d.clear_key) return { api_key: '' };
+  const key = d.api_key.trim();
+  return key ? { api_key: key } : {};
+};
 
 /** Флажок режима инструментов: нативный function calling или запасной
  *  текстовый (модель пишет команды блоками ```bash). */
@@ -59,10 +73,11 @@ const NativeToolsToggle = (props: { checked: boolean; onChange: (v: boolean) => 
 
 /** Подключения к LLM: создание, правка (имя/url/ключ/модель/режим), удаление и
  *  выбор дефолтной LLM (одно из подключений; к нему ходят агенты без своего).
- *  Ключ показывается как есть, маскировки нет. */
+ *  Ключ write-only: показывается только признак «задан»; менять настройки
+ *  может только админ (`canEdit`), остальные видят список. */
 export const LlmList = observer((props: LlmListProps) => {
   const { t } = useTranslation();
-  const { connections, onChanged } = props;
+  const { connections, onChanged, canEdit = false } = props;
   const [draft, setDraft] = useState<LlmDraft>(emptyDraft());
   const [editingId, setEditingId] = useState<number | null>(null);
   const [edit, setEdit] = useState<LlmDraft>(emptyDraft());
@@ -93,7 +108,7 @@ export const LlmList = observer((props: LlmListProps) => {
       await http.patch(`/llms/${id}`, {
         name: edit.name.trim(),
         api_url: edit.api_url.trim(),
-        api_key: edit.api_key.trim() || null,
+        ...keyPatch(edit),
         model_name: edit.model_name.trim(),
         native_tools: edit.native_tools,
       });
@@ -127,6 +142,8 @@ export const LlmList = observer((props: LlmListProps) => {
 
   return (
     <div>
+      {!canEdit && <p className="mb-4 text-sm text-slate-500">{t('config.adminOnly')}</p>}
+      {canEdit && (
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Input
           placeholder={t('config.name')}
@@ -141,6 +158,8 @@ export const LlmList = observer((props: LlmListProps) => {
           className="max-w-64"
         />
         <Input
+          type="password"
+          autoComplete="off"
           placeholder={t('config.accessKey')}
           value={draft.api_key}
           onChange={(e) => setDraft((d) => ({ ...d, api_key: e.target.value }))}
@@ -160,11 +179,13 @@ export const LlmList = observer((props: LlmListProps) => {
           {t('config.createConnection')}
         </Button>
       </div>
+      )}
 
       <div className="mb-4 flex items-center gap-2">
         <span className="text-sm text-slate-500">{t('config.defaultLlm')}</span>
         <Select
           className="max-w-56"
+          disabled={!canEdit}
           value={defaultId != null ? String(defaultId) : ''}
           onChange={(e) => void setDefault(e.target.value ? Number(e.target.value) : null)}
           title={t('config.defaultLlmTooltip')}
@@ -196,10 +217,24 @@ export const LlmList = observer((props: LlmListProps) => {
                   className="max-w-64"
                 />
                 <Input
+                  type="password"
+                  autoComplete="off"
+                  placeholder={c.has_api_key ? t('config.keyKeepPlaceholder') : t('config.accessKey')}
                   value={edit.api_key}
+                  disabled={edit.clear_key}
                   onChange={(e) => setEdit((d) => ({ ...d, api_key: e.target.value }))}
                   className="max-w-56"
                 />
+                {c.has_api_key && (
+                  <label className="flex items-center gap-1 text-xs text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={edit.clear_key}
+                      onChange={(e) => setEdit((d) => ({ ...d, clear_key: e.target.checked }))}
+                    />
+                    {t('config.clearKey')}
+                  </label>
+                )}
                 <Input
                   value={edit.model_name}
                   onChange={(e) => setEdit((d) => ({ ...d, model_name: e.target.value }))}
@@ -225,28 +260,32 @@ export const LlmList = observer((props: LlmListProps) => {
                   )}
                 </CardTitle>
                 <div className="text-xs text-slate-500">{t('config.url')} {c.api_url}</div>
-                {c.api_key != null && c.api_key !== '' && (
-                  <div className="text-xs text-slate-500">{t('config.key')} {c.api_key}</div>
+                {c.has_api_key && (
+                  <div className="text-xs text-slate-500">
+                    {t('config.key')} {t('config.keySet')}
+                  </div>
                 )}
                 <div className="text-xs text-slate-500">{t('config.modelLabel')} {c.model_name}</div>
                 <div className="text-xs text-slate-500">
                   {t('config.tools')} {c.native_tools ? t('config.toolCalling') : t('config.textMode')}
                 </div>
-                <div className="mt-2 flex gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setEditingId(c.id);
-                      setEdit(fromLlm(c));
-                    }}
-                  >
-                    {t('config.edit')}
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => void remove(c.id)}>
-                    {t('config.delete')}
-                  </Button>
-                </div>
+                {canEdit && (
+                  <div className="mt-2 flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setEditingId(c.id);
+                        setEdit(fromLlm(c));
+                      }}
+                    >
+                      {t('config.edit')}
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => void remove(c.id)}>
+                      {t('config.delete')}
+                    </Button>
+                  </div>
+                )}
               </>
             )}
           </Card>

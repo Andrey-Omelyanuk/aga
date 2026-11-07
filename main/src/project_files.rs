@@ -1,4 +1,5 @@
 use crate::agent::{execute_via_executor, Executor};
+use crate::shell::quote;
 use base64::Engine;
 use serde::Serialize;
 
@@ -80,8 +81,14 @@ pub fn sanitize_rel(path: &str) -> Result<String, FileError> {
 fn listing_commands(root: &str, rel: &str) -> [String; 2] {
     let target = join_root(root, rel);
     [
-        format!("find '{}' -maxdepth 1 -mindepth 1 -type d -print", target),
-        format!("find '{}' -maxdepth 1 -mindepth 1 -type f -print", target),
+        format!(
+            "find {} -maxdepth 1 -mindepth 1 -type d -print",
+            quote(&target)
+        ),
+        format!(
+            "find {} -maxdepth 1 -mindepth 1 -type f -print",
+            quote(&target)
+        ),
     ]
 }
 
@@ -89,7 +96,7 @@ fn listing_commands(root: &str, rel: &str) -> [String; 2] {
 /// декод делает ядро.
 fn read_command(root: &str, rel: &str) -> String {
     let target = join_root(root, rel);
-    format!("base64 '{}'", target)
+    format!("base64 {}", quote(&target))
 }
 
 fn join_root(root: &str, rel: &str) -> String {

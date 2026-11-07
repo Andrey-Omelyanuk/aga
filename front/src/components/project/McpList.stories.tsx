@@ -9,7 +9,7 @@ const servers: McpServer[] = [
     transport: 'http',
     url: 'https://api.githubcopilot.com/mcp/',
     command: '',
-    api_key: 'ghp-secret',
+    has_api_key: true,
   },
   {
     id: 2,
@@ -17,7 +17,7 @@ const servers: McpServer[] = [
     transport: 'stdio',
     url: '',
     command: 'npx -y @modelcontextprotocol/server-filesystem .',
-    api_key: null,
+    has_api_key: false,
   },
 ] as McpServer[];
 
@@ -27,6 +27,7 @@ const meta = {
   args: {
     servers,
     onChanged: () => {},
+    canEdit: true,
   },
 } satisfies Meta<typeof McpList>;
 
@@ -34,3 +35,6 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Servers: Story = {};
+
+/** Участник (не админ): только просмотр и проверка http-сервера. */
+export const ReadOnly: Story = { args: { canEdit: false } };

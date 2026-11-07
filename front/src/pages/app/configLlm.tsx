@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Page } from '@/components/core/Page';
 import { LlmList } from '@/components/project/LlmList';
 import { Llm } from '@/models/project';
+import me from '@/services/me';
 import { useQuery } from '@/utils/mobx';
 
 const ConfigLlmPage = observer(() => {
@@ -16,7 +17,11 @@ const ConfigLlmPage = observer(() => {
         <p className="mb-4 text-sm text-slate-500">
           {t('config.llmDescription')}
         </p>
-        <LlmList connections={connections.items} onChanged={() => connections.shadowLoad()} />
+        <LlmList
+          connections={connections.items}
+          onChanged={() => connections.shadowLoad()}
+          canEdit={me.is_admin}
+        />
       </div>
     </Page>
   );

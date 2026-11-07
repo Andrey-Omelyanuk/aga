@@ -42,7 +42,7 @@ const connections: Llm[] = [
     id: 1,
     name: 'ollama-local',
     api_url: 'http://llm:11434/v1',
-    api_key: 'secret',
+    has_api_key: true,
     model_name: 'qwen3:0.6b',
     is_default: true,
   },

@@ -35,6 +35,12 @@ class Me {
     setOnAuthError(this.authError);
   }
 
+  // Админ платформы: realm-роль admin (суперпользователь) или локальный режим
+  // без SSO (аноним-супер). Только ему ядро даёт менять LLM/MCP и удалять проекты.
+  get is_admin(): boolean {
+    return this.anonymous || Boolean(this.user?.is_super_user);
+  }
+
   get isAuthenticated(): boolean {
     return Boolean(localStorage.getItem(TOKEN_KEY));
   }

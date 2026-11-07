@@ -57,6 +57,99 @@ async fn current_actor(state: &AppState, headers: &HeaderMap) -> Result<(i64, St
     Ok((id, name))
 }
 
+/// Текущий пользователь-админ: realm-роль `admin` (суперпользователь чата);
+/// без SSO — аноним-суперпользователь. Не админ — 403. Настройки платформы
+/// (подключения к LLM, каталог MCP, удаление проектов) меняет только админ:
+/// подменой url LLM участник мог бы уводить контекст всех агентов.
+async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<i64, StatusCode> {
+    let id = current_user(state, headers).await?;
+    let is_admin = state
+        .chat_store
+        .is_super_user(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if is_admin {
+        Ok(id)
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+/// Ключ из запроса правки: не задан (`null`/нет поля) — оставить прежний,
+/// пустая строка — удалить, иначе — новый. Ключи наружу не отдаются, поэтому
+/// форма правки их не знает и не должна затирать.
+fn merge_secret(new: Option<String>, old: Option<String>) -> Option<String> {
+    match new {
+        None => old,
+        Some(k) if k.trim().is_empty() => None,
+        Some(k) => Some(k),
+    }
+}
+
+/// Ключ из запроса создания: пустая строка — ключа нет.
+fn new_secret(key: Option<String>) -> Option<String> {
+    key.filter(|k| !k.trim().is_empty())
+}
+
+/// Подключение к LLM наружу: ключ доступа не отдаётся (только признак
+/// `has_api_key`) — список подключений видят все участники.
+#[derive(Serialize)]
+pub struct LlmConnectionView {
+    pub id: i64,
+    pub name: String,
+    pub api_url: String,
+    pub has_api_key: bool,
+    pub model_name: String,
+    pub is_default: bool,
+    pub native_tools: bool,
+}
+
+impl From<crate::trace::LlmConnection> for LlmConnectionView {
+    fn from(c: crate::trace::LlmConnection) -> Self {
+        Self {
+            id: c.id,
+            name: c.name,
+            api_url: c.api_url,
+            has_api_key: c.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            model_name: c.model_name,
+            is_default: c.is_default,
+            native_tools: c.native_tools,
+        }
+    }
+}
+
+/// MCP-сервер наружу: ключ Bearer не отдаётся (только `has_api_key`).
+#[derive(Serialize)]
+pub struct McpServerView {
+    pub id: i64,
+    pub name: String,
+    pub transport: String,
+    pub url: String,
+    pub command: String,
+    pub has_api_key: bool,
+}
+
+impl From<crate::trace::McpServer> for McpServerView {
+    fn from(s: crate::trace::McpServer) -> Self {
+        Self {
+            id: s.id,
+            name: s.name,
+            transport: s.transport,
+            url: s.url,
+            command: s.command,
+            has_api_key: s.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+        }
+    }
+}
+
+/// Имена агентов набора — пути папок проекта (`scope::validate_agent_name`).
+fn check_agent_names(agents: &[crate::trace::AgentSpec]) -> Result<(), StatusCode> {
+    for agent in agents {
+        crate::scope::validate_agent_name(&agent.name).map_err(|_| StatusCode::BAD_REQUEST)?;
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct ProjectInfo {
     pub id: i64,
@@ -132,7 +225,16 @@ pub fn create_router(state: AppState) -> Router {
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         .allow_headers([CONTENT_TYPE, AUTHORIZATION]);
-    Router::new()
+    // Публичные роуты: вход через SSO и проба живости. Всё остальное — за
+    // гейтом `require_token` (route_layer: неизвестный путь — 404, не 401).
+    let public = Router::new()
+        .route("/healthz", get(healthz))
+        // === SSO (Keycloak): вход веб-клиента ===
+        .route("/auth/login", get(auth_login))
+        .route("/auth/callback", get(auth_callback))
+        .route("/auth/refresh", post(auth_refresh))
+        .route("/auth/logout", get(auth_logout));
+    let protected = Router::new()
         .route("/trace/:task_id", get(get_trace))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/:id", get(get_project).delete(delete_project))
@@ -199,11 +301,6 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(delete_shortcut),
         )
         .route("/shortcuts/:id/history", get(capability_history))
-        // === SSO (Keycloak): вход веб-клиента ===
-        .route("/auth/login", get(auth_login))
-        .route("/auth/callback", get(auth_callback))
-        .route("/auth/refresh", post(auth_refresh))
-        .route("/auth/logout", get(auth_logout))
         // === Модель чата ===
         .route("/users", get(list_users))
         .route("/users/me", get(me))
@@ -245,14 +342,40 @@ pub fn create_router(state: AppState) -> Router {
         .route("/workstations/:id/changes", get(workstation_changes))
         // === Настройки: публичный SSH-ключ aga ===
         .route("/settings/ssh-key", get(get_ssh_key))
-        .layer(cors)
-        .with_state(state)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_token,
+        ));
+    public.merge(protected).layer(cors).with_state(state)
+}
+
+/// Гейт аутентификации всех непубличных роутов: при включённом SSO запрос
+/// без действительного токена получает 401 ещё до хендлера. Хендлеры всё равно
+/// берут пользователя через `current_user` (и роли — через `require_admin`);
+/// гейт лишь не даёт новому роуту остаться открытым по забывчивости.
+async fn require_token(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<Response, StatusCode> {
+    {
+        let verifier = state.sso_verifier.read().await;
+        auth::check_token(request.headers(), verifier.as_ref())?;
+    }
+    Ok(next.run(request).await)
+}
+
+/// Проба живости HTTP-сервера (k8s readiness/liveness): без авторизации и БД.
+async fn healthz() -> &'static str {
+    "ok"
 }
 
 async fn get_trace(
     Path(task_id): Path<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    current_user(&state, &headers).await?;
     match state.trace_store.get_trace(&task_id).await {
         Ok(Some(trace)) => Ok(Json(serde_json::to_value(trace).unwrap())),
         Ok(None) => Err(StatusCode::NOT_FOUND),
@@ -295,7 +418,10 @@ async fn create_project(
     Json(payload): Json<CreateProjectRequest>,
 ) -> Result<Json<ProjectInfo>, StatusCode> {
     current_user(&state, &headers).await?;
-    match state.trace_store.upsert_project(&payload.git_url).await {
+    // git_url уходит в git clone на воркстейшне — мусор отсекаем на входе.
+    let git_url = payload.git_url.trim().to_string();
+    crate::ws_ops::validate_git_url(&git_url).map_err(|_| StatusCode::BAD_REQUEST)?;
+    match state.trace_store.upsert_project(&git_url).await {
         Ok(project_id) => {
             let agent_set = state
                 .trace_store
@@ -304,7 +430,7 @@ async fn create_project(
                 .unwrap_or(None);
             Ok(Json(ProjectInfo {
                 id: project_id,
-                git_url: payload.git_url,
+                git_url,
                 agent_set,
             }))
         }
@@ -341,7 +467,7 @@ async fn delete_project(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    current_user(&state, &headers).await?;
+    require_admin(&state, &headers).await?;
     match state.trace_store.delete_project(id).await {
         Ok(true) => Ok(StatusCode::OK),
         Ok(false) => Err(StatusCode::NOT_FOUND),
@@ -370,6 +496,7 @@ async fn create_agent_set(
     Json(payload): Json<CreateAgentSetRequest>,
 ) -> Result<Json<crate::trace::AgentSet>, StatusCode> {
     current_user(&state, &headers).await?;
+    check_agent_names(&payload.agents)?;
     match state
         .trace_store
         .create_agent_set(&payload.name, &payload.agents)
@@ -423,6 +550,7 @@ async fn update_agent_set(
     Json(payload): Json<CreateAgentSetRequest>,
 ) -> Result<Json<crate::trace::AgentSet>, StatusCode> {
     current_user(&state, &headers).await?;
+    check_agent_names(&payload.agents)?;
     match state
         .trace_store
         .update_agent_set(id, &payload.name, &payload.agents)
@@ -445,13 +573,13 @@ async fn update_agent_set(
 async fn list_mcp_servers(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<crate::trace::McpServer>>, StatusCode> {
+) -> Result<Json<Vec<McpServerView>>, StatusCode> {
     current_user(&state, &headers).await?;
     state
         .trace_store
         .list_mcp_servers()
         .await
-        .map(Json)
+        .map(|list| Json(list.into_iter().map(McpServerView::from).collect()))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -459,7 +587,7 @@ async fn get_mcp_server(
     Path(id): Path<i64>,
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<crate::trace::McpServer>, StatusCode> {
+) -> Result<Json<McpServerView>, StatusCode> {
     current_user(&state, &headers).await?;
     state
         .trace_store
@@ -467,7 +595,7 @@ async fn get_mcp_server(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)
-        .map(Json)
+        .map(|s| Json(s.into()))
 }
 
 /// Проверка спека: заполнение (400) и уникальность имени (409).
@@ -491,10 +619,11 @@ async fn check_mcp_spec(
 async fn create_mcp_server(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(spec): Json<crate::trace::McpServerSpec>,
-) -> Result<Json<crate::trace::McpServer>, StatusCode> {
-    current_user(&state, &headers).await?;
+    Json(mut spec): Json<crate::trace::McpServerSpec>,
+) -> Result<Json<McpServerView>, StatusCode> {
+    require_admin(&state, &headers).await?;
     check_mcp_spec(&state, &spec, 0).await?;
+    spec.api_key = new_secret(spec.api_key.take());
     let id = state
         .trace_store
         .create_mcp_server(&spec)
@@ -506,17 +635,24 @@ async fn create_mcp_server(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
-        .map(Json)
+        .map(|s| Json(s.into()))
 }
 
 async fn update_mcp_server(
     Path(id): Path<i64>,
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(spec): Json<crate::trace::McpServerSpec>,
-) -> Result<Json<crate::trace::McpServer>, StatusCode> {
-    current_user(&state, &headers).await?;
+    Json(mut spec): Json<crate::trace::McpServerSpec>,
+) -> Result<Json<McpServerView>, StatusCode> {
+    require_admin(&state, &headers).await?;
     check_mcp_spec(&state, &spec, id).await?;
+    let old = state
+        .trace_store
+        .get_mcp_server(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    spec.api_key = merge_secret(spec.api_key.take(), old.api_key);
     match state.trace_store.update_mcp_server(id, &spec).await {
         Ok(true) => state
             .trace_store
@@ -524,7 +660,7 @@ async fn update_mcp_server(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::NOT_FOUND)
-            .map(Json),
+            .map(|s| Json(s.into())),
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -535,7 +671,7 @@ async fn delete_mcp_server(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    current_user(&state, &headers).await?;
+    require_admin(&state, &headers).await?;
     match state.trace_store.delete_mcp_server(id).await {
         Ok(true) => Ok(StatusCode::OK),
         Ok(false) => Err(StatusCode::NOT_FOUND),
@@ -590,13 +726,13 @@ async fn mcp_server_tools(
 async fn list_llm_connections(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<crate::trace::LlmConnection>>, StatusCode> {
+) -> Result<Json<Vec<LlmConnectionView>>, StatusCode> {
     current_user(&state, &headers).await?;
     state
         .trace_store
         .list_llm_connections()
         .await
-        .map(Json)
+        .map(|list| Json(list.into_iter().map(LlmConnectionView::from).collect()))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
@@ -604,12 +740,12 @@ async fn create_llm_connection(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<LlmConnectionRequest>,
-) -> Result<Json<crate::trace::LlmConnection>, StatusCode> {
-    current_user(&state, &headers).await?;
+) -> Result<Json<LlmConnectionView>, StatusCode> {
+    require_admin(&state, &headers).await?;
     let spec = crate::trace::LlmConnectionSpec {
         name: payload.name,
         api_url: payload.api_url,
-        api_key: payload.api_key,
+        api_key: new_secret(payload.api_key),
         model_name: payload.model_name,
         native_tools: payload.native_tools,
     };
@@ -620,7 +756,7 @@ async fn create_llm_connection(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
-            .map(Json),
+            .map(|c| Json(c.into())),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -629,7 +765,7 @@ async fn get_llm_connection(
     Path(id): Path<i64>,
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<crate::trace::LlmConnection>, StatusCode> {
+) -> Result<Json<LlmConnectionView>, StatusCode> {
     current_user(&state, &headers).await?;
     state
         .trace_store
@@ -637,7 +773,7 @@ async fn get_llm_connection(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)
-        .map(Json)
+        .map(|c| Json(c.into()))
 }
 
 async fn delete_llm_connection(
@@ -645,7 +781,7 @@ async fn delete_llm_connection(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, StatusCode> {
-    current_user(&state, &headers).await?;
+    require_admin(&state, &headers).await?;
     match state.trace_store.delete_llm_connection(id).await {
         Ok(true) => Ok(StatusCode::OK),
         Ok(false) => Err(StatusCode::NOT_FOUND),
@@ -660,12 +796,18 @@ async fn update_llm_connection(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<LlmConnectionRequest>,
-) -> Result<Json<crate::trace::LlmConnection>, StatusCode> {
-    current_user(&state, &headers).await?;
+) -> Result<Json<LlmConnectionView>, StatusCode> {
+    require_admin(&state, &headers).await?;
+    let old = state
+        .trace_store
+        .get_llm_connection(id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
     let spec = crate::trace::LlmConnectionSpec {
         name: payload.name,
         api_url: payload.api_url,
-        api_key: payload.api_key,
+        api_key: merge_secret(payload.api_key, old.api_key),
         model_name: payload.model_name,
         native_tools: payload.native_tools,
     };
@@ -676,7 +818,7 @@ async fn update_llm_connection(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::NOT_FOUND)
-            .map(Json),
+            .map(|c| Json(c.into())),
         Ok(false) => Err(StatusCode::NOT_FOUND),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
@@ -689,8 +831,8 @@ async fn set_llm_default(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<SetLlmDefaultRequest>,
-) -> Result<Json<Option<crate::trace::LlmConnection>>, StatusCode> {
-    current_user(&state, &headers).await?;
+) -> Result<Json<Option<LlmConnectionView>>, StatusCode> {
+    require_admin(&state, &headers).await?;
     match payload.llm_id {
         Some(id) => match state.trace_store.set_default_llm(id).await {
             Ok(true) => state
@@ -698,7 +840,7 @@ async fn set_llm_default(
                 .get_llm_connection(id)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .map(|c| Json(Some(c)))
+                .map(|c| Json(Some(c.into())))
                 .ok_or(StatusCode::NOT_FOUND),
             Ok(false) => Err(StatusCode::NOT_FOUND),
             Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1102,18 +1244,48 @@ fn sso_redirect_uri(headers: &HeaderMap) -> Option<String> {
     Some(format!("{scheme}://{host}/auth/callback"))
 }
 
-/// Начать вход: редирект на authorize-эндпоинт Keycloak. Токен после входа
+/// Cookie с `state` и PKCE-верификатором между `/auth/login` и
+/// `/auth/callback`: HttpOnly, только для пути колбэка, живёт 10 минут.
+const OAUTH_COOKIE: &str = "aga_oauth";
+const OAUTH_COOKIE_TTL_SECS: u64 = 600;
+
+/// Атрибут `Secure` для кук, когда ядро снаружи доступно по https (прокси
+/// передаёт `X-Forwarded-Proto`): по http-стенду браузер такую куку не вернёт.
+fn cookie_secure_attr(redirect_uri: &str) -> &'static str {
+    if redirect_uri.starts_with("https://") {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
+/// PKCE S256: `code_challenge = BASE64URL(SHA256(code_verifier))` без паддинга.
+fn pkce_challenge(verifier: &str) -> String {
+    use base64::Engine;
+    use sha2::Digest;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(verifier.as_bytes()))
+}
+
+/// `state` и PKCE-верификатор, которые `/auth/login` положил в cookie.
+fn oauth_cookie(headers: &HeaderMap) -> Option<(String, String)> {
+    let cookie = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    let value = cookie
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix(&format!("{OAUTH_COOKIE}=")))?;
+    let (state, verifier) = value.split_once('.')?;
+    (!state.is_empty() && !verifier.is_empty()).then(|| (state.to_string(), verifier.to_string()))
+}
+
+/// Начать вход: редирект на authorize-эндпоинт Keycloak (authorization code +
+/// PKCE S256). Случайный `state` и верификатор PKCE уходят в HttpOnly-cookie
+/// `aga_oauth` — колбэк сверяет `state` (защита от login-CSRF: чужой code не
+/// подсунуть) и отдаёт верификатор Keycloak при обмене кода. Токен после входа
 /// возвращается веб-клиенту (front_url/#token=...) — см. auth_callback.
-///
-/// Параметры `prompt=none` и `silent=1` — silent-флоу обновления токена из
-/// скрытого iframe: `prompt=none` заставляет Keycloak вернуть код (или ошибку)
-/// без формы входа, а `silent` echo-ится в redirect_uri, чтобы колбэк ответил
-/// страницей postMessage, а не редиректом на фронт.
 async fn auth_login(
     State(state): State<AppState>,
     headers: HeaderMap,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<axum::response::Redirect, StatusCode> {
+) -> Result<Response, StatusCode> {
     let sso = state
         .config
         .sso
@@ -1123,29 +1295,43 @@ async fn auth_login(
     let authorize_url = sso.authorize_url.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let client_id = sso.client_id.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     // Куда Keycloak вернёт после входа — абсолютный адрес из заголовка Host
-    // (Origin при обычной навигации браузер не шлёт).
+    // (Origin при обычной навигации браузер не шлёт). Список допустимых
+    // адресов держит Keycloak (redirectUris клиента в realm).
     let redirect_uri = sso_redirect_uri(&headers).ok_or(StatusCode::NOT_FOUND)?;
-    let redirect_uri = if params.contains_key("silent") {
-        format!("{redirect_uri}?silent=1")
-    } else {
-        redirect_uri
-    };
+    let oauth_state = uuid::Uuid::new_v4().simple().to_string();
+    // 64 символа [0-9a-f] — в пределах 43..128 из RFC 7636.
+    let verifier = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
     let mut url = url::Url::parse(authorize_url).map_err(|_| StatusCode::NOT_FOUND)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", &redirect_uri)
-        .append_pair("scope", "openid");
-    if params.get("prompt").map(String::as_str) == Some("none") {
-        url.query_pairs_mut().append_pair("prompt", "none");
-    }
-    Ok(axum::response::Redirect::temporary(url.as_str()))
+        .append_pair("scope", "openid")
+        .append_pair("state", &oauth_state)
+        .append_pair("code_challenge", &pkce_challenge(&verifier))
+        .append_pair("code_challenge_method", "S256");
+    let cookie = format!(
+        "{OAUTH_COOKIE}={oauth_state}.{verifier}; Path=/auth/callback; HttpOnly; SameSite=Lax; Max-Age={OAUTH_COOKIE_TTL_SECS}{}",
+        cookie_secure_attr(&redirect_uri)
+    );
+    let mut resp = axum::response::Redirect::temporary(url.as_str()).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        cookie
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    Ok(resp)
 }
 
-/// Обработчик возврата из Keycloak: обменять code на токен и вернуть его
-/// веб-клиенту (redirect на front_url с токеном в фрагменте URL). В silent-флоу
-/// (параметр `silent=1`) вместо редиректа отвечает HTML-страницей, которая
-/// передаёт токен родителю через postMessage (см. silent_auth_response).
+/// Обработчик возврата из Keycloak: сверить `state` с cookie `aga_oauth`,
+/// обменять code на токен (с PKCE-верификатором) и вернуть его веб-клиенту
+/// (redirect на front_url с токеном во фрагменте URL). Нет cookie или `state`
+/// не совпал — 400: вход начинался не в этом браузере.
 async fn auth_callback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1157,27 +1343,21 @@ async fn auth_callback(
         .as_ref()
         .filter(|s| s.enabled)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let silent = params.contains_key("silent");
-    // prompt=none без активной SSO-сессии: Keycloak возвращает error
-    // (login_required) вместо кода — в silent-флоу сообщаем родителю, в
-    // обычном — 400.
+    // Keycloak вернул ошибку вместо кода (отказ, отменённый вход).
     if params.contains_key("error") {
-        if silent {
-            return Ok(silent_auth_response(&state, None).into_response());
-        }
         return Err(StatusCode::BAD_REQUEST);
     }
     let code = params.get("code").ok_or(StatusCode::BAD_REQUEST)?;
+    let (expected_state, verifier) = oauth_cookie(&headers).ok_or(StatusCode::BAD_REQUEST)?;
+    if params.get("state") != Some(&expected_state) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let token_url = sso.token_url.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let client_id = sso.client_id.as_deref().ok_or(StatusCode::NOT_FOUND)?;
     let client_secret = sso.client_secret.as_deref().ok_or(StatusCode::NOT_FOUND)?;
-    // Keycloak не эхоит redirect_uri в колбэке — вычисляем из Host, чтобы обмен
-    // code→token прошёл с тем же значением, что и на authorize-шаге.
-    let redirect_uri = params
-        .get("redirect_uri")
-        .cloned()
-        .or_else(|| sso_redirect_uri(&headers))
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    // Keycloak не эхоит redirect_uri в колбэке — вычисляем из Host так же,
+    // как на authorize-шаге (значения должны совпасть).
+    let redirect_uri = sso_redirect_uri(&headers).ok_or(StatusCode::BAD_REQUEST)?;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -1188,31 +1368,23 @@ async fn auth_callback(
             ("redirect_uri", &redirect_uri),
             ("client_id", client_id),
             ("client_secret", client_secret),
+            ("code_verifier", &verifier),
         ])
         .send()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    if !resp.status().is_success() {
+        // invalid_grant: код уже использован, истёк или не сошёлся PKCE.
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let json: serde_json::Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
     let token = json
         .get("access_token")
         .and_then(|v| v.as_str())
         .ok_or(StatusCode::BAD_GATEWAY)?;
     // Refresh-токен живёт дольше access-токена: веб-клиент обновляет им токен
-    // молча (`/auth/refresh`), не завися от SSO-куки Keycloak в iframe.
+    // молча (`/auth/refresh`), не завися от SSO-куки Keycloak.
     let refresh_token = json.get("refresh_token").and_then(|v| v.as_str());
-
-    // Cookie ставим в обоих случаях — прямые api.localhost-клиенты тоже свежие.
-    let cookie = format!("aga_token={token}; Path=/; HttpOnly; SameSite=Lax");
-    if silent {
-        let mut resp = silent_auth_response(&state, Some(token)).into_response();
-        resp.headers_mut().insert(
-            axum::http::header::SET_COOKIE,
-            cookie
-                .parse()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        );
-        return Ok(resp);
-    }
 
     // Веб-клиент (front/) получает токены фрагментом URL — фрагмент не уходит
     // на сервер и не остаётся в логах. Refresh-токен — вторым параметром,
@@ -1221,36 +1393,23 @@ async fn auth_callback(
         Some(rt) => format!("#token={token}&refresh={rt}"),
         None => format!("#token={token}"),
     };
+    let secure = cookie_secure_attr(&redirect_uri);
     let mut resp = axum::response::Redirect::temporary(&format!("{}{fragment}", state.front_url))
         .into_response();
-    resp.headers_mut().insert(
-        axum::http::header::SET_COOKIE,
-        cookie
-            .parse()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    );
+    // Cookie aga_token — для прямых клиентов api.localhost; cookie флоу входа
+    // одноразовая — стираем.
+    for cookie in [
+        format!("aga_token={token}; Path=/; HttpOnly; SameSite=Lax{secure}"),
+        format!("{OAUTH_COOKIE}=; Path=/auth/callback; HttpOnly; SameSite=Lax; Max-Age=0{secure}"),
+    ] {
+        resp.headers_mut().append(
+            axum::http::header::SET_COOKIE,
+            cookie
+                .parse()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        );
+    }
     Ok(resp)
-}
-
-/// HTML-ответ для silent-обновления токена: еслиrame (наш же веб-клиент)
-/// получает токен и передаёт его родителю через postMessage. Ошибка (нет
-/// активной SSO-сессии) — сообщение `aga_sso_error` без токена.
-fn silent_auth_response(state: &AppState, token: Option<&str>) -> axum::response::Response {
-    let payload = match token {
-        Some(t) => serde_json::json!({ "type": "aga_sso_token", "token": t }),
-        None => serde_json::json!({ "type": "aga_sso_error" }),
-    };
-    let html = format!(
-        "<!DOCTYPE html><html><body><script>window.parent.postMessage({payload}, {origin});</script></body></html>",
-        payload = serde_json::to_string(&payload).unwrap(),
-        origin = serde_json::to_string(&state.front_url).unwrap(),
-    );
-    let mut resp = axum::response::Response::new(axum::body::Body::from(html));
-    resp.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::header::HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    resp
 }
 
 /// Выход: сбрасываем cookie `aga_token` (HttpOnly — JS его сам не удалит) и,
@@ -1870,7 +2029,9 @@ async fn share_message(
 async fn message_artifacts(
     Path(id): Path<i64>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<crate::chat::Artifact>>, StatusCode> {
+    current_user(&state, &headers).await?;
     state
         .chat_store
         .list_artifacts(id)
@@ -2809,10 +2970,8 @@ mod tests {
         cleanup(&file).await;
     }
 
-    #[tokio::test]
-    async fn login_silent_echoes_silent_into_redirect_uri_and_prompt_none() {
-        let (mut state, file) = test_state(false).await;
-        state.config.sso = Some(crate::config::SsoConfig {
+    fn sso_for_login() -> crate::config::SsoConfig {
+        crate::config::SsoConfig {
             enabled: true,
             jwks_url: None,
             authorize_url: Some(
@@ -2821,83 +2980,198 @@ mod tests {
             token_url: None,
             end_session_url: None,
             client_id: Some("aga".into()),
-            client_secret: None,
-        });
-        let router = create_router(state);
-        let resp = router
+            client_secret: Some("aga-secret".into()),
+        }
+    }
+
+    /// Вход уносит в Keycloak случайный state и PKCE-challenge (S256); state и
+    /// верификатор остаются в HttpOnly-cookie только для пути колбэка.
+    #[tokio::test]
+    async fn login_sends_state_and_pkce_challenge_and_keeps_them_in_cookie() {
+        let (mut state, file) = test_state(false).await;
+        state.config.sso = Some(sso_for_login());
+        let resp = create_router(state)
             .oneshot(
                 Request::builder()
-                    .method("GET")
-                    .uri("/auth/login?prompt=none&silent=1")
-                    .header("Host", "dev.localhost")
+                    .uri("/auth/login")
+                    .header("Host", "api.localhost")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
-        let location = resp
-            .headers()
-            .get(axum::http::header::LOCATION)
-            .unwrap()
+        let location = resp.headers()[axum::http::header::LOCATION]
             .to_str()
             .unwrap();
-        let url = url::Url::parse(location).unwrap();
-        let pairs: Vec<(String, String)> = url
+        let pairs: std::collections::HashMap<String, String> = url::Url::parse(location)
+            .unwrap()
             .query_pairs()
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
-        // redirect_uri эхоит silent=1, чтобы колбэк ответил postMessage-страницей.
-        assert!(pairs.contains(&(
-            "redirect_uri".into(),
-            "http://dev.localhost/auth/callback?silent=1".into()
-        )));
-        // prompt=none: Keycloak без формы входа.
-        assert!(pairs.contains(&("prompt".into(), "none".into())));
-        cleanup(&file).await;
-    }
-
-    #[tokio::test]
-    async fn callback_silent_error_returns_post_message_page() {
-        let (mut state, file) = test_state(false).await;
-        state.config.sso = Some(crate::config::SsoConfig {
-            enabled: true,
-            jwks_url: None,
-            authorize_url: None,
-            token_url: None,
-            end_session_url: None,
-            client_id: Some("aga".into()),
-            client_secret: None,
-        });
-        let router = create_router(state);
-        let resp = router
+        let cookie = resp.headers()[axum::http::header::SET_COOKIE]
+            .to_str()
+            .unwrap();
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+        assert!(cookie.contains("Path=/auth/callback"), "{cookie}");
+        assert!(!cookie.contains("Secure"), "http-стенд: {cookie}");
+        let value = cookie
+            .strip_prefix("aga_oauth=")
+            .and_then(|v| v.split(';').next())
+            .unwrap();
+        let (cookie_state, verifier) = value.split_once('.').unwrap();
+        assert_eq!(pairs["state"], cookie_state);
+        assert_eq!(pairs["code_challenge_method"], "S256");
+        assert_eq!(pairs["code_challenge"], pkce_challenge(verifier));
+        assert!(verifier.len() >= 43 && verifier.len() <= 128);
+        // Каждый вход — новый state.
+        let (mut state2, file2) = test_state(false).await;
+        state2.config.sso = Some(sso_for_login());
+        let resp2 = create_router(state2)
             .oneshot(
                 Request::builder()
-                    .method("GET")
-                    .uri("/auth/callback?silent=1&error=login_required")
+                    .uri("/auth/login")
+                    .header("Host", "api.localhost")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let content_type = resp
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .unwrap()
+        let cookie2 = resp2.headers()[axum::http::header::SET_COOKIE]
             .to_str()
             .unwrap();
-        assert!(content_type.starts_with("text/html"));
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        assert_ne!(cookie, cookie2);
+        cleanup(&file).await;
+        cleanup(&file2).await;
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_example() {
+        // RFC 7636, приложение B.
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn cookies_are_secure_behind_https() {
+        assert_eq!(
+            cookie_secure_attr("https://api.example.com/auth/callback"),
+            "; Secure"
+        );
+        assert_eq!(cookie_secure_attr("http://api.localhost/auth/callback"), "");
+    }
+
+    /// Мок token-эндпоинта, который запоминает тело запроса обмена кода.
+    async fn recording_token_server() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<String>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let rec = seen.clone();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move |body: String| {
+                let rec = rec.clone();
+                async move {
+                    *rec.lock().unwrap() = body;
+                    axum::Json(serde_json::json!({
+                        "access_token": "fresh.access.token",
+                        "refresh_token": "fresh.refresh.token",
+                    }))
+                }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/token"), seen, handle)
+    }
+
+    async fn callback(state: AppState, query: &str, cookie: Option<&str>) -> Response {
+        let mut req = Request::builder()
+            .uri(format!("/auth/callback?{query}"))
+            .header("Host", "api.localhost");
+        if let Some(c) = cookie {
+            req = req.header("cookie", c);
+        }
+        create_router(state)
+            .oneshot(req.body(Body::empty()).unwrap())
             .await
+            .unwrap()
+    }
+
+    /// Колбэк без cookie флоу или с чужим state — 400: code, подсунутый
+    /// чужой ссылкой (login-CSRF), не обменивается.
+    #[tokio::test]
+    async fn callback_rejects_missing_or_foreign_state() {
+        let (mut state, file) = test_state(false).await;
+        let (token_url, seen, _server) = recording_token_server().await;
+        let mut sso = sso_for_login();
+        sso.token_url = Some(token_url);
+        state.config.sso = Some(sso);
+        let resp = callback(state.clone(), "code=c1&state=s1", None).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = callback(state.clone(), "code=c1&state=evil", Some("aga_oauth=s1.v1")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = callback(state.clone(), "code=c1", Some("aga_oauth=s1.v1")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // До Keycloak такие запросы не доходят.
+        assert!(seen.lock().unwrap().is_empty());
+        cleanup(&file).await;
+    }
+
+    /// Совпавший state: код меняется на токен вместе с PKCE-верификатором,
+    /// токены — фрагментом на фронт, cookie флоу стирается.
+    #[tokio::test]
+    async fn callback_with_matching_state_exchanges_code_with_verifier() {
+        let (mut state, file) = test_state(false).await;
+        let (token_url, seen, _server) = recording_token_server().await;
+        let mut sso = sso_for_login();
+        sso.token_url = Some(token_url);
+        state.config.sso = Some(sso);
+        let resp = callback(
+            state,
+            "code=c1&state=s1",
+            Some("other=1; aga_oauth=s1.verifier-123"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        let body = seen.lock().unwrap().clone();
+        assert!(body.contains("code=c1"), "{body}");
+        assert!(body.contains("code_verifier=verifier-123"), "{body}");
+        assert!(
+            body.contains("redirect_uri=http%3A%2F%2Fapi.localhost%2Fauth%2Fcallback"),
+            "{body}"
+        );
+        let location = resp.headers()[axum::http::header::LOCATION]
+            .to_str()
             .unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("aga_sso_error"), "html: {html}");
+        assert_eq!(
+            location,
+            "http://dev.localhost#token=fresh.access.token&refresh=fresh.refresh.token"
+        );
+        let cookies: Vec<&str> = resp
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert!(cookies
+            .iter()
+            .any(|c| c.starts_with("aga_token=fresh.access.token")));
+        assert!(cookies
+            .iter()
+            .any(|c| c.starts_with("aga_oauth=;") && c.contains("Max-Age=0")));
         cleanup(&file).await;
     }
 
     #[tokio::test]
-    async fn callback_with_error_returns_bad_request_outside_silent_flow() {
+    async fn callback_with_error_returns_bad_request() {
         let (mut state, file) = test_state(false).await;
         state.config.sso = Some(crate::config::SsoConfig {
             enabled: true,
@@ -3002,6 +3276,193 @@ mod tests {
             "post_logout_redirect_uri".into(),
             "http://dev.localhost".into()
         )));
+        cleanup(&file).await;
+    }
+
+    /// Настройки платформы меняет только админ: участник читает список
+    /// подключений и MCP-серверов, но не создаёт, не правит и не удаляет их,
+    /// не меняет дефолтную LLM и не удаляет проекты.
+    #[tokio::test]
+    async fn participant_cannot_change_platform_settings() {
+        let (state, file) = test_state(true).await;
+        let admin = auth_headers("bob", &["admin"]);
+        let alice = auth_headers("alice", &["participant"]);
+        let llm = serde_json::json!({
+            "name": "ollama", "api_url": "http://llm/v1", "api_key": "k", "model_name": "m"
+        });
+        let mcp = serde_json::json!({"name": "gh", "transport": "http", "url": "http://mcp"});
+        let (_, body) = post_json("/llms", &admin, state.clone(), llm.clone()).await;
+        let llm_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (_, body) = post_json("/mcp-servers", &admin, state.clone(), mcp.clone()).await;
+        let mcp_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let project_id = state
+            .trace_store
+            .upsert_project("https://example.com/a.git")
+            .await
+            .unwrap();
+
+        let forbidden = [
+            post_json("/llms", &alice, state.clone(), llm.clone())
+                .await
+                .0,
+            patch_json(
+                &format!("/llms/{llm_id}"),
+                &alice,
+                state.clone(),
+                llm.clone(),
+            )
+            .await
+            .0,
+            delete_json(&format!("/llms/{llm_id}"), &alice, state.clone())
+                .await
+                .0,
+            post_json(
+                "/settings/llm-default",
+                &alice,
+                state.clone(),
+                serde_json::json!({"llm_id": llm_id}),
+            )
+            .await
+            .0,
+            post_json("/mcp-servers", &alice, state.clone(), mcp.clone())
+                .await
+                .0,
+            patch_json(
+                &format!("/mcp-servers/{mcp_id}"),
+                &alice,
+                state.clone(),
+                mcp.clone(),
+            )
+            .await
+            .0,
+            delete_json(&format!("/mcp-servers/{mcp_id}"), &alice, state.clone())
+                .await
+                .0,
+            delete_json(&format!("/projects/{project_id}"), &alice, state.clone())
+                .await
+                .0,
+        ];
+        assert!(
+            forbidden.iter().all(|s| *s == StatusCode::FORBIDDEN),
+            "{forbidden:?}"
+        );
+        // Читать участнику можно — без ключей.
+        let (status, body) = get("/mcp-servers", &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"has_api_key\":false"), "{body}");
+        let (status, _) = get("/llms", &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        // Админ удаляет проект.
+        let (status, _) =
+            delete_json(&format!("/projects/{project_id}"), &admin, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        cleanup(&file).await;
+    }
+
+    /// Гейт роутера: без токена при включённом SSO закрыто всё, кроме входа и
+    /// пробы живости; неизвестный путь — 404, а не 401.
+    #[tokio::test]
+    async fn every_route_except_auth_and_healthz_requires_token() {
+        let (state, file) = test_state(true).await;
+        let none = HeaderMap::new();
+        for uri in [
+            "/trace/some-task",
+            "/messages/1/artifacts",
+            "/projects",
+            "/llms",
+            "/mcp-servers",
+            "/workstations",
+            "/settings/ssh-key",
+        ] {
+            let (status, _) = get(uri, &none, state.clone()).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+        }
+        let (status, body) = get("/healthz", &none, state.clone()).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "ok"));
+        let (status, _) = get("/no-such-route", &none, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // С токеном трасса и артефакты доступны (здесь — 404: их нет).
+        let alice = auth_headers("alice", &["participant"]);
+        let (status, _) = get("/trace/some-task", &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get("/messages/1/artifacts", &alice, state.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        cleanup(&file).await;
+    }
+
+    /// git_url уходит в git clone на станции: мусор и попытки инъекции — 400.
+    #[tokio::test]
+    async fn project_with_hostile_git_url_rejected() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        for bad in [
+            "x'; touch /tmp/pwned; echo '",
+            "--upload-pack=touch /tmp/pwned",
+            "not a url",
+        ] {
+            let (status, _) = post_json(
+                "/projects",
+                &alice,
+                state.clone(),
+                serde_json::json!({ "git_url": bad }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let (status, body) = post_json(
+            "/projects",
+            &alice,
+            state.clone(),
+            serde_json::json!({ "git_url": " git@github.com:a/b.git " }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("\"git_url\":\"git@github.com:a/b.git\""),
+            "{body}"
+        );
+        cleanup(&file).await;
+    }
+
+    /// Имя агента — путь папки: `..` и абсолютные пути песочница превратила бы
+    /// в выход за проект — набор с такими именами не сохраняется.
+    #[tokio::test]
+    async fn agent_set_with_traversal_agent_name_rejected() {
+        let (state, file) = test_state(true).await;
+        let alice = auth_headers("alice", &["participant"]);
+        for bad in ["..", "src/../..", "/etc"] {
+            let (status, _) = post_json(
+                "/agent-sets",
+                &alice,
+                state.clone(),
+                serde_json::json!({ "name": "ops", "agents": [agent_json(bad)] }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let (status, body) = post_json(
+            "/agent-sets",
+            &alice,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [agent_json("dev")] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let (status, _) = patch_json(
+            &format!("/agent-sets/{id}"),
+            &alice,
+            state.clone(),
+            serde_json::json!({ "name": "ops", "agents": [agent_json("../x")] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         cleanup(&file).await;
     }
 
@@ -3205,7 +3666,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_servers_catalog_and_agent_links_via_api() {
         let (state, file) = test_state(true).await;
-        let headers = auth_headers("alice", &["participant"]);
+        let headers = auth_headers("bob", &["admin"]);
         let (status, body) = post_json(
             "/mcp-servers",
             &headers,
@@ -3278,7 +3739,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_http_server_tools_checked_via_api() {
         let (state, file) = test_state(true).await;
-        let headers = auth_headers("alice", &["participant"]);
+        let headers = auth_headers("bob", &["admin"]);
         let (url, server, _) = crate::mcp::tests::http_server().await;
         let (_, body) = post_json(
             "/mcp-servers",
@@ -3329,7 +3790,7 @@ mod tests {
     #[tokio::test]
     async fn created_llm_connection_listed_via_api() {
         let (state, file) = test_state(true).await;
-        let headers = auth_headers("alice", &["participant"]);
+        let headers = auth_headers("bob", &["admin"]);
         let (status, body) = post_json(
             "/llms",
             &headers,
@@ -3345,22 +3806,30 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("ollama"));
         assert!(body.contains("http://llm:11434/v1"));
-        assert!(body.contains("secret-key"));
         assert!(body.contains("qwen3:0.6b"));
-        // Созданное подключение видно в списке: название, url, ключ и модель.
-        let (status, body) = get("/llms", &headers, state.clone()).await;
+        // Ключ наружу не отдаётся — только признак, что он задан.
+        assert!(!body.contains("secret-key"), "{body}");
+        assert!(body.contains("\"has_api_key\":true"), "{body}");
+        // Созданное подключение видно в списке любому участнику: название,
+        // url и модель, но не ключ.
+        let alice = auth_headers("alice", &["participant"]);
+        let (status, body) = get("/llms", &alice, state.clone()).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("ollama"));
         assert!(body.contains("http://llm:11434/v1"));
-        assert!(body.contains("secret-key"));
         assert!(body.contains("qwen3:0.6b"));
+        assert!(!body.contains("secret-key"), "{body}");
+        assert!(!body.contains("\"api_key\""), "{body}");
+        // Сам ключ сохранён — агенты ходят с ним.
+        let stored = state.trace_store.list_llm_connections().await.unwrap();
+        assert_eq!(stored[0].api_key.as_deref(), Some("secret-key"));
         cleanup(&file).await;
     }
 
     #[tokio::test]
     async fn updated_llm_connection_changes_url_and_key_via_api() {
         let (state, file) = test_state(true).await;
-        let headers = auth_headers("alice", &["participant"]);
+        let headers = auth_headers("bob", &["admin"]);
         let (status, body) = post_json(
             "/llms",
             &headers,
@@ -3391,16 +3860,56 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("http://new/v1"));
-        assert!(body.contains("new-key"));
+        assert!(!body.contains("new-key"), "{body}");
         assert!(body.contains("qwen3:1b"));
         assert!(!body.contains("http://old/v1"));
+        let key = |state: AppState| async move {
+            state
+                .trace_store
+                .get_llm_connection(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .api_key
+        };
+        assert_eq!(key(state.clone()).await.as_deref(), Some("new-key"));
+        // Форма правки ключа не знает: без поля (или null) ключ остаётся.
+        let (status, _) = patch_json(
+            &format!("/llms/{id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ollama2",
+                "api_url": "http://new/v1",
+                "model_name": "qwen3:1b"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(key(state.clone()).await.as_deref(), Some("new-key"));
+        // Пустая строка — удалить ключ.
+        let (status, body) = patch_json(
+            &format!("/llms/{id}"),
+            &headers,
+            state.clone(),
+            serde_json::json!({
+                "name": "ollama2",
+                "api_url": "http://new/v1",
+                "api_key": "",
+                "model_name": "qwen3:1b"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"has_api_key\":false"), "{body}");
+        assert_eq!(key(state.clone()).await, None);
         cleanup(&file).await;
     }
 
     #[tokio::test]
     async fn deleted_llm_connection_disappears_from_list_via_api() {
         let (state, file) = test_state(true).await;
-        let headers = auth_headers("alice", &["participant"]);
+        let headers = auth_headers("bob", &["admin"]);
         let (status, body) = post_json(
             "/llms",
             &headers,
@@ -3452,7 +3961,7 @@ mod tests {
     #[tokio::test]
     async fn default_llm_set_and_cleared_via_api() {
         let (state, file) = test_state(true).await;
-        let headers = auth_headers("alice", &["participant"]);
+        let headers = auth_headers("bob", &["admin"]);
         let (status, body) = post_json(
             "/llms",
             &headers,

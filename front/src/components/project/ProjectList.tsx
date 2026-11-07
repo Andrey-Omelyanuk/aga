@@ -9,11 +9,13 @@ import { Project } from '@/models/project';
 export interface ProjectListProps {
   projects: Project[];
   onDeleted?: () => void;
+  /** Удалять проекты может только админ. */
+  canDelete?: boolean;
 }
 
 export const ProjectList = observer((props: ProjectListProps) => {
   const { t } = useTranslation();
-  const { projects, onDeleted } = props;
+  const { projects, onDeleted, canDelete = false } = props;
 
   if (projects.length === 0) {
     return <EmptyState>{t('projects.empty')}</EmptyState>;
@@ -34,9 +36,11 @@ export const ProjectList = observer((props: ProjectListProps) => {
               ))}
             </div>
           )}
-          <div className="mt-2">
-            <DeleteObjectButton obj={p} onDeleted={onDeleted} />
-          </div>
+          {canDelete && (
+            <div className="mt-2">
+              <DeleteObjectButton obj={p} onDeleted={onDeleted} />
+            </div>
+          )}
         </Card>
       ))}
     </div>

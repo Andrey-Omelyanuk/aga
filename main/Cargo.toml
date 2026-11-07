@@ -30,6 +30,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 regex = "1"
 base64 = "0.21"
+# PKCE (S256) во входе через SSO.
+sha2 = "0.10"
 # Парсинг ssh-приватного ключа (OpenSSH) и вывод публичного (RustCrypto).
 ssh-key = "0.6.5"
 jsonwebtoken = "9"

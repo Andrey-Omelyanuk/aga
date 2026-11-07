@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/ui/tabs';
 import type { McpServer } from '@/models/project';
 import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
+import { keyPatch } from './LlmList';
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,6 +14,8 @@ import { useTranslation } from 'react-i18next';
 export interface McpListProps {
   servers: McpServer[];
   onChanged: () => void;
+  /** Создание, правка и удаление серверов — только админу. */
+  canEdit?: boolean;
 }
 
 interface McpDraft {
@@ -20,7 +23,12 @@ interface McpDraft {
   transport: 'http' | 'stdio';
   url: string;
   command: string;
+  /** Новый ключ. Текущий ключ ядро не отдаёт: пусто — оставить как есть. */
   api_key: string;
+  /** Удалить заданный ключ (при правке). */
+  clear_key: boolean;
+  /** У сервера уже есть ключ (подсказка в поле и флажок удаления). */
+  has_key: boolean;
 }
 
 interface McpToolInfo {
@@ -34,24 +42,29 @@ const emptyDraft = (): McpDraft => ({
   url: '',
   command: '',
   api_key: '',
+  clear_key: false,
+  has_key: false,
 });
 const fromServer = (s: McpServer): McpDraft => ({
   name: s.name,
   transport: s.transport === 'stdio' ? 'stdio' : 'http',
   url: s.url,
   command: s.command,
-  api_key: s.api_key ?? '',
+  api_key: '',
+  clear_key: false,
+  has_key: s.has_api_key,
 });
 
 const isComplete = (d: McpDraft) =>
   d.name.trim() !== '' && (d.transport === 'http' ? d.url.trim() !== '' : d.command.trim() !== '');
 
+// Ключ — только у http: при смене на stdio заданный ключ удаляется.
 const payload = (d: McpDraft) => ({
   name: d.name.trim(),
   transport: d.transport,
   url: d.transport === 'http' ? d.url.trim() : '',
   command: d.transport === 'stdio' ? d.command.trim() : '',
-  api_key: d.transport === 'http' ? d.api_key.trim() || null : null,
+  ...(d.transport === 'http' ? keyPatch(d) : d.has_key ? { api_key: '' } : {}),
 });
 
 /** Поля сервера: имя, транспорт и его адрес (url или команда), ключ — у http. */
@@ -84,11 +97,24 @@ const DraftFields = (props: { draft: McpDraft; onChange: (d: McpDraft) => void }
             className="max-w-64"
           />
           <Input
-            placeholder={t('config.accessKeyBearer')}
+            type="password"
+            autoComplete="off"
+            placeholder={draft.has_key ? t('config.keyKeepPlaceholder') : t('config.accessKeyBearer')}
             value={draft.api_key}
+            disabled={draft.clear_key}
             onChange={(e) => onChange({ ...draft, api_key: e.target.value })}
             className="max-w-56"
           />
+          {draft.has_key && (
+            <label className="flex items-center gap-1 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                checked={draft.clear_key}
+                onChange={(e) => onChange({ ...draft, clear_key: e.target.checked })}
+              />
+              {t('config.clearKey')}
+            </label>
+          )}
         </>
       ) : (
         <Input
@@ -104,10 +130,11 @@ const DraftFields = (props: { draft: McpDraft; onChange: (d: McpDraft) => void }
 
 /** Каталог MCP-серверов: создание, правка, удаление и проверка http-сервера
  *  (подключение и список его инструментов). stdio-сервер запускается только в
- *  воркстейшне агента — отсюда не проверяется. */
+ *  воркстейшне агента — отсюда не проверяется. Ключ write-only (видно только
+ *  «задан»); менять каталог может только админ (`canEdit`). */
 export const McpList = observer((props: McpListProps) => {
   const { t } = useTranslation();
-  const { servers, onChanged } = props;
+  const { servers, onChanged, canEdit = false } = props;
   const [draft, setDraft] = useState<McpDraft>(emptyDraft());
   const [editingId, setEditingId] = useState<number | null>(null);
   const [edit, setEdit] = useState<McpDraft>(emptyDraft());
@@ -162,12 +189,16 @@ export const McpList = observer((props: McpListProps) => {
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <DraftFields draft={draft} onChange={setDraft} />
-        <Button variant="secondary" onClick={create} disabled={!isComplete(draft)}>
-          {t('config.addServer')}
-        </Button>
-      </div>
+      {canEdit ? (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <DraftFields draft={draft} onChange={setDraft} />
+          <Button variant="secondary" onClick={create} disabled={!isComplete(draft)}>
+            {t('config.addServer')}
+          </Button>
+        </div>
+      ) : (
+        <p className="mb-4 text-sm text-slate-500">{t('config.adminOnly')}</p>
+      )}
 
       {servers.length === 0 ? (
         <EmptyState>{t('config.noMcpServers')}</EmptyState>
@@ -195,8 +226,10 @@ export const McpList = observer((props: McpListProps) => {
                   ) : (
                     <div className="text-xs text-slate-500">{t('config.url')} {s.url}</div>
                   )}
-                  {s.api_key != null && s.api_key !== '' && (
-                    <div className="text-xs text-slate-500">{t('config.key')} {s.api_key}</div>
+                  {s.has_api_key && (
+                    <div className="text-xs text-slate-500">
+                      {t('config.key')} {t('config.keySet')}
+                    </div>
                   )}
                   {typeof result === 'string' && (
                     <div className="mt-1 text-xs text-red-600">{t('config.error')} {result}</div>
@@ -217,19 +250,23 @@ export const McpList = observer((props: McpListProps) => {
                         {t('config.check')}
                       </Button>
                     )}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setEditingId(s.id);
-                        setEdit(fromServer(s));
-                      }}
-                    >
-                      {t('config.edit')}
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={() => void remove(s.id)}>
-                      {t('config.delete')}
-                    </Button>
+                    {canEdit && (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            setEditingId(s.id);
+                            setEdit(fromServer(s));
+                          }}
+                        >
+                          {t('config.edit')}
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => void remove(s.id)}>
+                          {t('config.delete')}
+                        </Button>
+                      </>
+                    )}
                   </div>
                 </>
               )}

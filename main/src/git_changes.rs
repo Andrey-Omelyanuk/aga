@@ -1,4 +1,5 @@
 use crate::agent::{execute_via_executor, Executor};
+use crate::shell::quote as sh_quote;
 use base64::Engine;
 use serde::Serialize;
 
@@ -38,21 +39,17 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for ChangesError {
 /// Корень (`/work/project`) — константа без спецсимволов, поэтому собирается
 /// в команду напрямую (как фиксированные find/base64 в project_files.rs).
 async fn run(executor: &Executor, root: &str, args: &str) -> Result<String, ChangesError> {
-    let command = format!("git -C {root} {args}");
+    let command = format!("git -C {} {args}", sh_quote(root));
     execute_via_executor(executor, &command)
         .await
         .map_err(ChangesError::from)
-}
-
-/// Обернуть строку в одинарные кавычки sh с экранированием внутренних кавычек.
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Определить базу диффа — дефолтную ветку репозитория. Ни один кандидат не
 /// существует (пустой `git init`, агент наполняет проект с нуля) — базы нет.
 async fn resolve_base(executor: &Executor, root: &str) -> Result<Option<String>, ChangesError> {
     let candidates = DEFAULT_BRANCH_CANDIDATES.join(" ");
+    let root = sh_quote(root);
     let command = format!(
         "for r in {candidates}; do if git -C {root} rev-parse --verify --quiet \"$r\" >/dev/null 2>&1; then echo \"$r\"; exit 0; fi; done; exit 1"
     );
@@ -344,12 +341,5 @@ mod tests {
         assert_eq!(s.base.as_deref(), Some("origin/HEAD"));
         assert!(!s.changed);
         assert!(s.diff.trim().is_empty());
-    }
-
-    #[test]
-    fn sh_quote_escapes_inner_quotes() {
-        assert_eq!(sh_quote("plain"), "'plain'");
-        assert_eq!(sh_quote("it's"), "'it'\\''s'");
-        assert_eq!(sh_quote("a b"), "'a b'");
     }
 }

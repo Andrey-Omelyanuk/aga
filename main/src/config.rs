@@ -94,6 +94,19 @@ impl Config {
         let config: Config = serde_yaml::from_str(&content)?;
         Ok(config)
     }
+
+    /// JWKS включённого SSO. SSO выключен — `Ok(None)`: все запросы идут под
+    /// аноним-суперпользователем (локальный режим). Включён без `jwks_url` —
+    /// ошибка запуска: молча открыть анонимный доступ вместо SSO нельзя.
+    pub fn sso_jwks_url(&self) -> Result<Option<&str>, String> {
+        match self.sso.as_ref().filter(|s| s.enabled) {
+            None => Ok(None),
+            Some(sso) => match sso.jwks_url.as_deref().map(str::trim) {
+                Some(url) if !url.is_empty() => Ok(Some(url)),
+                _ => Err("SSO включён, но sso.jwks_url не задан — запуск без проверки токенов недопустим".into()),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +138,37 @@ sso:
         let config = Config::load(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
         assert!(config.sso.is_some());
+    }
+
+    fn sso(enabled: bool, jwks_url: Option<&str>) -> Config {
+        Config {
+            sso: Some(SsoConfig {
+                enabled,
+                jwks_url: jwks_url.map(str::to_string),
+                authorize_url: None,
+                token_url: None,
+                end_session_url: None,
+                client_id: None,
+                client_secret: None,
+            }),
+            centrifuge: None,
+        }
+    }
+
+    #[test]
+    fn enabled_sso_without_jwks_fails_closed() {
+        assert!(sso(true, None).sso_jwks_url().is_err());
+        assert!(sso(true, Some("  ")).sso_jwks_url().is_err());
+        assert_eq!(
+            sso(true, Some("http://kc/certs")).sso_jwks_url(),
+            Ok(Some("http://kc/certs"))
+        );
+        // Выключенный или отсутствующий SSO — локальный режим без токенов.
+        assert_eq!(sso(false, None).sso_jwks_url(), Ok(None));
+        let none = Config {
+            sso: None,
+            centrifuge: None,
+        };
+        assert_eq!(none.sso_jwks_url(), Ok(None));
     }
 }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::shell::quote as shell_quote;
 use crate::trace::{AgentDef, AgentSet};
 
 /// Корень проекта в воркстейшне: относительно него живут папки агентов.
@@ -75,6 +76,43 @@ fn is_descendant(folder: &str, other: &str) -> bool {
     folder.is_empty() || other.starts_with(&format!("{}/", folder))
 }
 
+/// Имя агента — путь его папки в проекте (у корня дерева — метка слоя):
+/// относительный, сегменты непустые и не `.`/`..`, без `\\` и управляющих
+/// символов. Иначе bind-mount песочницы ушёл бы за пределы проекта (имя `..`
+/// у наследника перемонтировало бы на запись `/work` поверх проекта).
+pub fn validate_agent_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("имя агента пустое".into());
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        return Err(format!(
+            "имя агента `{name}`: путь не должен начинаться или заканчиваться `/`"
+        ));
+    }
+    if name.chars().any(|c| c == '\\' || c.is_control()) {
+        return Err(format!("имя агента `{name}`: недопустимые символы"));
+    }
+    if name
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return Err(format!(
+            "имя агента `{name}`: пустой сегмент, `.` или `..` в пути"
+        ));
+    }
+    Ok(())
+}
+
+/// Границы территории валидны (папка и папки наследников — допустимые пути).
+/// Старые БД могли сохранить имя вроде `..` до появления проверки — такой
+/// агент не запускается.
+pub fn territory_valid(territory: &Territory) -> bool {
+    std::iter::once(&territory.folder)
+        .filter(|f| !f.is_empty())
+        .chain(territory.excludes.iter())
+        .all(|p| validate_agent_name(p).is_ok())
+}
+
 /// Обёртка команды: cwd агента — его папка внутри проекта воркстейшна,
 /// чтобы относительные записи ложились в его территорию.
 pub fn wrap_command_in(root: &str, folder: &str, command: &str) -> String {
@@ -143,11 +181,6 @@ pub fn sandbox_command(root: &str, territory: &Territory, command: &str) -> Stri
         shell_quote(&steps.join("\n")),
         shell_quote(&wrap_command_in(root, &territory.folder, command))
     )
-}
-
-/// Строка в одинарных кавычках для sh.
-pub fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -229,6 +262,44 @@ mod tests {
         assert!(script.contains("remount,ro,bind '\\''/work/project/ui'\\'' "));
         assert!(!script.contains("remount,rw"));
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn agent_name_is_a_safe_relative_path() {
+        for ok in ["ui", "src", "src/backend", "web-app/ui_kit", "docs.v2"] {
+            assert!(validate_agent_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            " ",
+            "..",
+            ".",
+            "../x",
+            "src/../..",
+            "/etc",
+            "src/",
+            "a//b",
+            "a\\b",
+            "a\nb",
+        ] {
+            assert!(validate_agent_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn territory_with_traversal_is_invalid() {
+        assert!(territory_valid(&terr()));
+        assert!(territory_valid(&Territory::default()));
+        let escaped = Territory {
+            folder: "..".into(),
+            excludes: vec![],
+        };
+        assert!(!territory_valid(&escaped));
+        let bad_exclude = Territory {
+            folder: String::new(),
+            excludes: vec!["src/..".into()],
+        };
+        assert!(!territory_valid(&bad_exclude));
     }
 
     /// Живая проверка песочницы в образе воркстейшна (нужны docker и образ

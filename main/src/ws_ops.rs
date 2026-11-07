@@ -1,5 +1,6 @@
 use crate::agent::{execute_via_executor, Executor};
 use crate::project_files::PROJECT_ROOT;
+use crate::shell::quote;
 
 /// Перезаписать каталог проекта воркстейшна кодом указанного (другого)
 /// проекта. Выполняется в уже работающем ws (`kubectl exec`/`docker exec`),
@@ -10,26 +11,59 @@ use crate::project_files::PROJECT_ROOT;
 /// ws не дерутся за общий `.new`. Каталог как таковой не удаляем (в dev
 /// `/work/project` — точка монтирования named volume), только его содержимое —
 /// так команда работает и в поде, и в контейнере.
+///
+/// `git_url` приходит из API (проект регистрирует участник) — подставляется
+/// только экранированным и после `--`, чтобы значение не стало ни командой
+/// sh, ни опцией git (`--upload-pack=...`).
 pub fn switch_project_command(git_url: &str, branch: &str) -> String {
     // Временный каталог — `/work/project.new.<pid>`: `$$` вне кавычек, иначе
     // шелл его не раскроет. PID у каждого `sh -c` свой — параллельные switch
     // одного ws не дерутся за общий `.new`.
+    let root = quote(PROJECT_ROOT);
+    let tmp = format!("{}$$", quote(&format!("{PROJECT_ROOT}.new.")));
+    let root_dir = quote(&format!("{PROJECT_ROOT}/"));
+    let url = quote(git_url);
+    let branch = quote(branch);
     format!(
-        "rm -rf '{root}.new.'$$ && git clone '{url}' '{root}.new.'$$ && git -C '{root}.new.'$$ checkout -B '{branch}' && find '{root}' -mindepth 1 -delete && cp -a '{root}.new.'$$/. '{root}/' && rm -rf '{root}.new.'$$",
-        root = PROJECT_ROOT,
-        url = git_url,
-        branch = branch
+        "rm -rf {tmp} && git clone -- {url} {tmp} && git -C {tmp} checkout -B {branch} && find {root} -mindepth 1 -delete && cp -a {tmp}/. {root_dir} && rm -rf {tmp}"
     )
+}
+
+/// Проверка git-URL проекта при регистрации: `https://`, `http://`,
+/// `ssh://`, `git://`, `file://`, scp-форма `user@host:path` или абсолютный
+/// путь (локальный репозиторий в dev). Без пробелов и управляющих символов и не
+/// с `-` (иначе git прочтёт значение как опцию). Экранирование в
+/// [`switch_project_command`] защищает и без проверки — она отсекает мусор на входе.
+pub fn validate_git_url(url: &str) -> Result<(), String> {
+    if url.is_empty() || url.len() > 2048 {
+        return Err("git_url пустой или длиннее 2048 символов".into());
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("git_url содержит пробелы или управляющие символы".into());
+    }
+    if url.starts_with('-') {
+        return Err("git_url не может начинаться с `-`".into());
+    }
+    const SCHEMES: &[&str] = &["https://", "http://", "ssh://", "git://", "file://"];
+    let scheme_ok = SCHEMES
+        .iter()
+        .any(|s| url.len() > s.len() && url[..s.len()].eq_ignore_ascii_case(s));
+    let scp_ok = regex::Regex::new(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^/\\].*$")
+        .map(|re| re.is_match(url))
+        .unwrap_or(false);
+    if scheme_ok || scp_ok || url.starts_with('/') {
+        Ok(())
+    } else {
+        Err("git_url: ожидается https://, ssh://, git://, file://, user@host:path или абсолютный путь".into())
+    }
 }
 
 /// Восстановить файлы проекта из ветки прерванной сессии (`ws-<id>` упавшей
 /// станции) на текущем воркстейшне.
 pub fn restore_branch_command(branch: &str) -> String {
-    format!(
-        "cd '{root}' && git fetch origin '{branch}' && git checkout '{branch}'",
-        root = PROJECT_ROOT,
-        branch = branch
-    )
+    let root = quote(PROJECT_ROOT);
+    let branch = quote(branch);
+    format!("cd {root} && git fetch origin {branch} && git checkout {branch}")
 }
 
 /// Переключить проект воркстейшна: переписать `/work/project` кодом нового
@@ -48,10 +82,8 @@ pub async fn replace_project(
 /// клонирует свой проект заново). Удаляем только содержимое — в dev
 /// `/work/project` это точка монтирования named volume, её саму удалить нельзя.
 pub fn release_workspace_command() -> String {
-    format!(
-        "find '{root}' -mindepth 1 -delete && git -C '{root}' init -q",
-        root = PROJECT_ROOT
-    )
+    let root = quote(PROJECT_ROOT);
+    format!("find {root} -mindepth 1 -delete && git -C {root} init -q")
 }
 
 /// Восстановить на воркстейшне файлы проекта из ветки прерванной сессии.
@@ -80,7 +112,7 @@ mod tests {
         let cmd = switch_project_command("https://example.com/new.git", "ws-5");
         // Директория проекта перезаписывается кодом нового проекта через
         // git (exec в работающий ws), а не через пересоздание пода.
-        assert!(cmd.contains("git clone 'https://example.com/new.git'"));
+        assert!(cmd.contains("git clone -- 'https://example.com/new.git'"));
         assert!(cmd.contains("checkout -B 'ws-5'"));
         // Клонирование идёт во временный каталог, содержимое текущего проекта
         // очищается только после успешного clone — сбой не оставляет ws без
@@ -97,6 +129,41 @@ mod tests {
             "cp -a '{PROJECT_ROOT}.new.'$$/. '{PROJECT_ROOT}/'"
         )));
         assert!(cmd.contains(&format!("rm -rf '{PROJECT_ROOT}.new.'$$")));
+    }
+
+    /// git_url из API не может ни выполнить команду sh, ни стать опцией git.
+    #[test]
+    fn switch_command_quotes_hostile_git_url() {
+        let evil = "x'; touch /tmp/pwned; echo '";
+        let cmd = switch_project_command(evil, "ws-5");
+        assert!(cmd.contains(&format!("git clone -- {}", quote(evil))));
+        assert!(!cmd.contains("git clone 'x'; touch"));
+        let opt = switch_project_command("--upload-pack=touch /tmp/pwned", "ws-5");
+        assert!(opt.contains("git clone -- '--upload-pack=touch /tmp/pwned'"));
+    }
+
+    #[test]
+    fn git_url_validation_accepts_repos_and_rejects_garbage() {
+        for ok in [
+            "https://github.com/a/b.git",
+            "git@github.com:Andrey-Omelyanuk/mobx-model-ui.git",
+            "ssh://git@host:22/a/b.git",
+            "file:///srv/repo",
+            "/srv/repo",
+        ] {
+            assert!(validate_git_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "--upload-pack=touch /tmp/x",
+            "https://x/a b",
+            "x'; touch /tmp/pwned; echo '",
+            "relative/path",
+            "https://",
+            "https://x/\nid",
+        ] {
+            assert!(validate_git_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

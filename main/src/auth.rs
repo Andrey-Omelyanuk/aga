@@ -114,6 +114,25 @@ pub async fn resolve_user(
     }
 }
 
+/// Проверка токена без обращения к БД — гейт роутера (`server::require_token`):
+/// без SSO пропускает всё (аноним-суперпользователь), с SSO нужен
+/// действительный токен, иначе 401.
+pub fn check_token(
+    headers: &HeaderMap,
+    sso_verifier: Option<&JwtVerifier>,
+) -> Result<(), StatusCode> {
+    match sso_verifier {
+        None => Ok(()),
+        Some(verifier) => {
+            let token = token_from(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+            verifier
+                .verify(&token)
+                .map(|_| ())
+                .map_err(|_| StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
 /// Извлечь Bearer-токен из заголовка Authorization.
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let auth = headers

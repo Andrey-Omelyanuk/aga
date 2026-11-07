@@ -91,7 +91,7 @@ describe('AgentSetEditor', () => {
         id: 7,
         name: 'ollama-local',
         api_url: 'http://llm:11434/v1',
-        api_key: 'secret',
+        has_api_key: true,
         model_name: 'qwen3:0.6b',
         is_default: true,
       },
@@ -160,8 +160,8 @@ describe('AgentSetEditor', () => {
     ];
     const skills: CatalogItem[] = [{ id: 1, name: 'review', content: '', deleted: false }];
     const servers = [
-      { id: 1, name: 'github', transport: 'http', url: 'http://x', command: '', api_key: null },
-      { id: 2, name: 'fs', transport: 'stdio', url: '', command: 'fs', api_key: null },
+      { id: 1, name: 'github', transport: 'http', url: 'http://x', command: '', has_api_key: false },
+      { id: 2, name: 'fs', transport: 'stdio', url: '', command: 'fs', has_api_key: false },
     ] as McpServer[];
     const { container, root } = renderEditor(agents, skills, [], [], servers);
     // Чекбоксы скиллов и MCP — по одному набору на агента, со своими отметками.

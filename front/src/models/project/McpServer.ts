@@ -1,9 +1,10 @@
-import { Model, model, field, id, NUMBER, STRING } from 'mobx-model-ui';
+import { Model, model, field, id, BOOLEAN, NUMBER, STRING } from 'mobx-model-ui';
 import { api } from '@/services/http-adapter';
 
 /** MCP-сервер из каталога: агенты набора получают его инструменты по имени.
  *  transport `http` — Streamable HTTP по url (ключ — Bearer); `stdio` —
- *  команда, запускаемая в воркстейшне агента (cwd — папка агента). */
+ *  команда, запускаемая в воркстейшне агента (cwd — папка агента). Ключ наружу
+ *  не отдаётся — только признак has_api_key. */
 @api('mcp-servers')
 @model
 export class McpServer extends Model {
@@ -12,5 +13,5 @@ export class McpServer extends Model {
   @field(STRING()) transport!: string;
   @field(STRING()) url!: string;
   @field(STRING()) command!: string;
-  @field(STRING()) api_key?: string | null;
+  @field(BOOLEAN()) has_api_key!: boolean;
 }

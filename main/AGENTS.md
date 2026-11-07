@@ -65,7 +65,8 @@ src/
 ├── centrifuge.rs # CentrifugeClient: connection-JWT (веб) + subscriber_jwt (рантайм) + publish в каналы chat:/user:/common + SSE-поток
 ├── seed.rs       # Тестовый набор (aga seed): очистка БД + детерминированная фикстура
 ├── auth.rs       # JwtVerifier (JWKS, RS256) + resolve_user: участник/админ из Keycloak или аноним-супер
-└── server.rs     # Axum Router + хендлеры API + /auth/login, /auth/callback, /auth/refresh, /auth/logout, /users/me, /connection-jwt/; события в Centrifugo
+├── shell.rs      # quote — единственный способ подставить значение в команду `sh -c` (пути, ветки, git-URL)
+└── server.rs     # Axum Router (гейт токена на всех роутах, кроме /auth/* и /healthz) + хендлеры API + /auth/login, /auth/callback, /auth/refresh, /auth/logout, /users/me, /connection-jwt/; события в Centrifugo
 ```
 
 ## Patterns
@@ -144,7 +145,11 @@ src/
 - **TraceStore шире трассировки:** в нём же живут `projects`, `agent_sets` и
   `agents` (набор агентов на проект). ChatStore — отдельный модуль с таблицами
   модели чата, БД одна (тот же файл).
-- **Проект = git-URL:** воркстейшн-под клонирует репозиторий; `compose_path` из старых БД мигрируется в `git_url` (см. `migrate_projects_git_url`).
+- **Проект = git-URL:** воркстейшн-под клонирует репозиторий; `compose_path` из старых БД мигрируется в `git_url` (см. `migrate_projects_git_url`). `POST /projects` проверяет `git_url` (`ws_ops::validate_git_url`: `https://`/`http://`/`ssh://`/`git://`/`file://`, `user@host:path` или абсолютный путь; без пробелов и не с `-`) — иначе 400.
+- **Значения в shell-командах — только через `shell::quote`:** git-URL, ветки,
+  пути проекта и папки агентов приходят из API и подставляются в `sh -c`
+  (exec в воркстейшн, песочница) только экранированными; `git clone -- <url>`
+  — чтобы URL не стал опцией git.
 - **Воркстейшн = под/контейнер:** в стенде `ws-<id>` — под в неймспейсе кластера,
   команды агента — `kubectl exec`; в dev (`AGA_WS_BACKEND=docker`) — контейнер
   `ws-<id>`, команды — `docker exec`. Pod-манифест рендерит `cluster.rs` из шаблона
@@ -191,7 +196,17 @@ src/
 - **Воркстейшнами из интерфейса не управляют:** создание/удаление — только суперпользователь (админ внешний, поднимает станции через k8s); участники видят список и состояние (`GET /workstations`), но `POST`/`DELETE` им запрещены (403). Сессию открывают на готовом свободном воркстейшне (`POST /workstations/:id/session` с `project_id`), один воркстейшн — одна активная сессия.
 - **Сессия (Session) — отдельная сущность (`sessions`):** связывает корневой чат (`chat_id`, 1:1), проект (`project_id`), воркстейшн (`workstation_id`) и владельца (`owner_id`); здесь же `result_id`, `continues_session_id`, `closed_at`. Станция обслуживает сессии и своего проекта не хранит — `workstations.project_id` удалён (миграция переносит привязки старых БД в `sessions`), в API `workstations.project_id` и `chats.project_id`/`workstation_id` — производные от активной сессии (read-модель через LEFT JOIN sessions, 0 = свободен/не сессия). Сессия открывается только на `ready`-воркстейшне без активной сессии (`open_workstation_session`); закрытие (`close_workstation_session`, только владелец или суперпользователь локального режима) освобождает станцию (`current_session_id = NULL`, `closed_at`). Проект чата — `project_id_for_chat` (корень → `sessions.project_id`, без транзита через станцию).
 - **Видимость открытая:** «все участники видят все проекты и сессии» — `list_chats_for_user` не фильтрует по участнику, `can_read` всегда true. Персональной видимости нет.
-- **SSO:** `JwtVerifier` проверяет подпись RS256 по JWKS; роли из realm-ролей Keycloak (`participant`/`admin`). Вход веб-клиента — `/auth/login` (редирект в Keycloak), `/auth/callback` (обмен code→token, веб-клиенту токены возвращаются фрагментом URL `#token=...&refresh=...`), молчаливое обновление токена — `/auth/refresh` (ядро меняет refresh-токен на свежую пару у Keycloak, без браузерных кук — см. `me.refresh()` на фронте), выход — `/auth/logout` (сброс cookie `aga_token`, при заданном `end_session_url` — редирект на end-session Keycloak). Имя учётки — `preferred_username` из JWT (логин), не UUID `sub`. Текущий пользователь — `GET /users/me`. API принимает токен из `Authorization: Bearer` или cookie `aga_token` (см. `auth.rs`). Без SSO — аноним-суперпользователь.
+- **Аутентификация — гейт роутера, роли — в хендлерах:** все роуты, кроме
+  `/auth/*` и `/healthz`, закрыты middleware `require_token` (при SSO без
+  действительного токена — 401 ещё до хендлера; неизвестный путь — 404);
+  хендлеры сами берут пользователя (`current_user`). Настройки платформы —
+  только админ (`require_admin`: realm-роль `admin` / аноним-супер без SSO,
+  иначе 403): создание/правка/удаление `/llms` и `/mcp-servers`,
+  `POST /settings/llm-default`, `DELETE /projects/:id`. Участник читает эти
+  списки, но ключи `api_key` LLM и MCP наружу не отдаются — только признак
+  `has_api_key` (`LlmConnectionView`/`McpServerView`); в PATCH поле `api_key`
+  без значения (`null`/нет поля) оставляет ключ, `""` — удаляет.
+- **SSO:** `JwtVerifier` проверяет подпись RS256 по JWKS; роли из realm-ролей Keycloak (`participant`/`admin`). Включённый SSO без `jwks_url` — ошибка запуска (`Config::sso_jwks_url`, fail-closed), а не анонимный доступ. Вход веб-клиента — `/auth/login` (редирект в Keycloak: authorization code + PKCE S256; случайный `state` и верификатор — в HttpOnly-cookie `aga_oauth` на путь колбэка, 10 мин), `/auth/callback` (нет cookie или `state` не совпал — 400, защита от login-CSRF; обмен code→token с `code_verifier`, `redirect_uri` — только из `Host`/`X-Forwarded-Proto`, допустимые адреса держит realm; веб-клиенту токены возвращаются фрагментом URL `#token=...&refresh=...`; silent-iframe режима нет; за https кукам добавляется `Secure`), молчаливое обновление токена — `/auth/refresh` (ядро меняет refresh-токен на свежую пару у Keycloak, без браузерных кук — см. `me.refresh()` на фронте), выход — `/auth/logout` (сброс cookie `aga_token`, при заданном `end_session_url` — редирект на end-session Keycloak). Имя учётки — `preferred_username` из JWT (логин), не UUID `sub`. Текущий пользователь — `GET /users/me`. API принимает токен из `Authorization: Bearer` или cookie `aga_token` (см. `auth.rs`). Без SSO — аноним-суперпользователь.
 - **События чата — каналы и подписчики:** каждое сообщение публикуется веером в `common`, `chat:<chat_id>` и `user:<author_id>` (payload: `type=message`, chat_id, message_id, author_id); жизненные события (`chat_created`, `session_opened`, `session_closed`) — в `common`. Вебу `GET /connection-jwt/` подписывает connection-JWT с `sub` = `chat_users.id` (не SSO-`sub`) и правом на `common` в claims (`channels`) — отдельного channel-токена нет, гейт — сам факт входа. Публикация best-effort: сбой центрифуго не ломает отправку, только логируется. Конфиг — блок `centrifuge:` в roles.yaml (api_url, api_key, secret, channel); не задан — клиент-заглушка (`disabled()`), `/connection-jwt/` отдаёт 404, чат без автообновления.
 - **Команды агента — `sh -c` как есть, без запрета спецсимволов:** пайпы,
   перенаправления, цепочки и heredoc разрешены (образ воркстейшна — alpine, bash
@@ -283,7 +298,12 @@ src/
   путь проекта, кроме корня дерева: у корня папки-родителя нет, его территория —
   корень проекта (папка `""`), а имя корня — метка слоя (например, `ui`
   библиотеки), папкой в репозитории оно не является (`scope::territory_for_list`).
-  Территория заканчивается перед папками ближайших наследников.
+  Территория заканчивается перед папками ближайших наследников. Имя агента
+  проверяется как путь (`scope::validate_agent_name`: относительный, без
+  пустых сегментов, `.`, `..`, `\` и управляющих символов) — иначе набор не
+  сохраняется (400), а агент из старой БД с таким именем не запускается
+  (`scope::territory_valid` в `runtime::resolve_agent`): bind-mount песочницы
+  с `..` вышел бы за пределы проекта.
   Читают все, пишет только владелец: граница — объявленное владение, без
   исключений. Enforcement — песочница владения (`scope::sandbox_command`,
   только при воркстейшне): каждая команда агента и его stdio MCP-сервер
@@ -308,7 +328,7 @@ src/
 - **LLM — выбранное подключение и дефолтная LLM, env-дефолта нет:** подключения
   к LLM (`llm_connections`: имя, url API, ключ доступа, модель, режим
   инструментов `native_tools`) живут в БД и
-  настраиваются через API (`/llms`). Агент набора ссылается на подключение
+  настраиваются через API (`/llms`, правка — только админ). Агент набора ссылается на подключение
   (`agents.llm_id`); своей модели и температуры у агента больше нет (старые
   столбцы model/temperature остаются в старых БД, но не используются) — модель
   живёт в подключении, температура 0.7. url, ключ и модель агента берутся из
@@ -321,7 +341,7 @@ src/
   сразу у всех агентов, что на него ссылаются; удаление не ломает агентов —
   они падают на дефолтную LLM (на новых БД каскад `ON DELETE SET NULL`, на
   старых ссылка просто не находится); удаление дефолтного сбрасывает дефолт.
-  Ключ наружу отдаётся как есть, маскировки нет. LLM из env не читается
+  Ключ наружу не отдаётся (`has_api_key`, write-only). LLM из env не читается
   вовсе (LLM_API_URL/LLM_API_KEY/LLM_MODEL и bootstrap нет): подключение в
   dev-стенде создаёт сид или админ вручную на странице «LLM».
 - **Агент-рантайм — отдельный процесс (`aga agent`), не HTTP-путь:** сервер чата

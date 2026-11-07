@@ -13,6 +13,7 @@ mod runtime;
 mod scope;
 mod seed;
 mod server;
+mod shell;
 mod ssh_key;
 mod trace;
 mod workstation;
@@ -127,50 +128,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chat_store = chat::ChatStore::new(&db_path).await?;
     tracing::info!("ChatStore ok");
 
-    // Верификатор JWT против JWKS. Включён только когда SSO включён и задан
-    // jwks_url; иначе запросы работают под аноним-суперпользователем. Обёрнут
-    // в RwLock — фоновая задача refresh_jwks_loop периодически подменяет его
-    // свежим JWKS (Keycloak меняет ключ подписи при переимпорте realm).
-    let (sso_verifier, sso_jwks_url) = match config.sso.as_ref().filter(|s| s.enabled) {
-        Some(sso) => match sso.jwks_url.as_deref() {
-            Some(url) => {
-                // Keycloak (стенд и dev-стенд) стартует дольше ядра — тянем JWKS
-                // с ретраями, чтобы ядро не поднялось без SSO и не открыло
-                // анонимный доступ. Без JWKS при включённом SSO запуск запрещён.
-                tracing::info!("Загрузка JWKS из {}", url);
-                const ATTEMPTS: u32 = 30;
-                let mut fetched: Option<String> = None;
-                for attempt in 1..=ATTEMPTS {
-                    match fetch_jwks(url).await {
-                        Ok(jwks) => {
-                            fetched = Some(jwks);
-                            break;
-                        }
-                        Err(e) => {
-                            if attempt == ATTEMPTS {
-                                tracing::error!("Не удалось загрузить JWKS из {url}: {e}");
-                            } else {
-                                tracing::warn!(
-                                    "JWKS из {url} пока недоступен: {e}; попытка {attempt}/{ATTEMPTS}"
-                                );
-                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            }
+    // Верификатор JWT против JWKS. SSO выключен — запросы идут под
+    // аноним-суперпользователем; включён без jwks_url — запуск запрещён
+    // (fail-closed, см. Config::sso_jwks_url). Обёрнут в RwLock — фоновая
+    // задача refresh_jwks_loop периодически подменяет его свежим JWKS
+    // (Keycloak меняет ключ подписи при переимпорте realm).
+    let jwks_url = config
+        .sso_jwks_url()
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+        .map(str::to_string);
+    let (sso_verifier, sso_jwks_url) = match jwks_url {
+        Some(url) => {
+            // Keycloak (стенд и dev-стенд) стартует дольше ядра — тянем JWKS
+            // с ретраями, чтобы ядро не поднялось без SSO и не открыло
+            // анонимный доступ. Без JWKS при включённом SSO запуск запрещён.
+            tracing::info!("Загрузка JWKS из {}", url);
+            const ATTEMPTS: u32 = 30;
+            let mut fetched: Option<String> = None;
+            for attempt in 1..=ATTEMPTS {
+                match fetch_jwks(&url).await {
+                    Ok(jwks) => {
+                        fetched = Some(jwks);
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt == ATTEMPTS {
+                            tracing::error!("Не удалось загрузить JWKS из {url}: {e}");
+                        } else {
+                            tracing::warn!(
+                                "JWKS из {url} пока недоступен: {e}; попытка {attempt}/{ATTEMPTS}"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                     }
                 }
-                let jwks = fetched.ok_or_else(|| -> Box<dyn std::error::Error> {
-                    format!("SSO включён, но JWKS из {url} недоступен — запуск без SSO недопустим")
-                        .into()
-                })?;
-                let verifier = auth::JwtVerifier::from_jwks_json(&jwks)
-                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-                (Some(verifier), Some(url.to_string()))
             }
-            None => {
-                tracing::warn!("SSO включён, но jwks_url не задан — работаем без SSO");
-                (None, None)
-            }
-        },
+            let jwks = fetched.ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("SSO включён, но JWKS из {url} недоступен — запуск без SSO недопустим")
+                    .into()
+            })?;
+            let verifier = auth::JwtVerifier::from_jwks_json(&jwks)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            (Some(verifier), Some(url))
+        }
         None => (None, None),
     };
     let sso_verifier = Arc::new(RwLock::new(sso_verifier));

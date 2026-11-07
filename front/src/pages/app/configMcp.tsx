@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Page } from '@/components/core/Page';
 import { McpList } from '@/components/project/McpList';
 import { McpServer } from '@/models/project';
+import me from '@/services/me';
 import { useQuery } from '@/utils/mobx';
 
 const ConfigMcpPage = observer(() => {
@@ -16,7 +17,11 @@ const ConfigMcpPage = observer(() => {
         <p className="mb-4 text-sm text-slate-500">
           {t('config.mcpDescription')}
         </p>
-        <McpList servers={servers.items} onChanged={() => servers.shadowLoad()} />
+        <McpList
+          servers={servers.items}
+          onChanged={() => servers.shadowLoad()}
+          canEdit={me.is_admin}
+        />
       </div>
     </Page>
   );

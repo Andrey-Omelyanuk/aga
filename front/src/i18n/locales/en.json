@@ -231,6 +231,10 @@
     "changesSaved": "Changes saved",
     "saveFailed": "Failed to save",
     "skillContentPlaceholder": "Skill content (markdown; agent always uses it)",
-    "shortcutContentPlaceholder": "Shortcut text (goes to hidden part of message by /name)"
+    "shortcutContentPlaceholder": "Shortcut text (goes to hidden part of message by /name)",
+    "keySet": "set (hidden)",
+    "keyKeepPlaceholder": "New key (empty — keep current)",
+    "clearKey": "Remove key",
+    "adminOnly": "Only an administrator can change these settings."
   }
 }

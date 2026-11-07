@@ -75,6 +75,13 @@ pub async fn resolve_agent(
     let Some(agent) = set.agents.iter().find(|a| a.name == name) else {
         return Ok(None);
     };
+    let territory = crate::scope::territory_for(set, agent);
+    if !crate::scope::territory_valid(&territory) {
+        // Старая БД могла сохранить имя-путь вроде `..` до проверки в API:
+        // песочница с таким путём вышла бы за пределы проекта — не запускаем.
+        tracing::error!("агент {name}: недопустимое имя-путь территории, запуск отклонён");
+        return Ok(None);
+    }
     let prompt = store.agent_prompt(agent).await?;
     let config = RoleConfig {
         prompt,
@@ -83,7 +90,7 @@ pub async fn resolve_agent(
         llm: store.llm_config_for(agent).await?,
         mcp_servers: store.mcp_servers_by_names(&agent.mcp).await?,
     };
-    Ok(Some((config, crate::scope::territory_for(set, agent))))
+    Ok(Some((config, territory)))
 }
 
 /// Сериализующий мьютекс запуска/станции, доступный из нескольких задач.
@@ -273,10 +280,17 @@ impl AgentRuntime {
     /// новее отметки идёт тем же путём, что и события Centrifugo.
     pub async fn catch_up(&self) {
         let after = self.state.watermark();
-        match self.chat_store.message_ids_after(after, CATCH_UP_LIMIT).await {
+        match self
+            .chat_store
+            .message_ids_after(after, CATCH_UP_LIMIT)
+            .await
+        {
             Ok(ids) => {
                 if !ids.is_empty() {
-                    tracing::info!("agent runtime: догрузка {} пропущенных сообщений", ids.len());
+                    tracing::info!(
+                        "agent runtime: догрузка {} пропущенных сообщений",
+                        ids.len()
+                    );
                 }
                 for id in ids {
                     self.accept(id);
@@ -1641,7 +1655,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         // Запоздалое событие того же сообщения и повторная догрузка — не дубли.
-        let data = serde_json::json!({"type": "message", "chat_id": chat_id, "message_id": missed.id});
+        let data =
+            serde_json::json!({"type": "message", "chat_id": chat_id, "message_id": missed.id});
         runtime.on_event(&data).await;
         runtime.catch_up().await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

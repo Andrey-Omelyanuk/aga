@@ -3,6 +3,7 @@ import { Page } from '@/components/core/Page';
 import { ProjectCreate } from '@/components/project/ProjectCreate';
 import { ProjectList } from '@/components/project/ProjectList';
 import { Project } from '@/models/project';
+import me from '@/services/me';
 import { useQuery } from '@/utils/mobx';
 
 const ProjectsPage = observer(() => {
@@ -12,7 +13,7 @@ const ProjectsPage = observer(() => {
   return (
     <Page queries={[projects]}>
       <ProjectCreate onCreated={reload} />
-      <ProjectList projects={projects.items} onDeleted={reload} />
+      <ProjectList projects={projects.items} onDeleted={reload} canDelete={me.is_admin} />
     </Page>
   );
 });
