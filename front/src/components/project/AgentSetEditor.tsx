@@ -6,9 +6,15 @@ import { Card, CardMeta } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
-import type { Agent, AgentCapability, CatalogItem, Llm, McpServer } from '@/models/project';
+import {
+  agentSetApi,
+  type Agent,
+  type AgentCapability,
+  type CatalogItem,
+  type Llm,
+  type McpServer,
+} from '@/models/project';
 import type { User } from '@/models/core';
 export interface AgentSetEditorProps {
   setId: number;
@@ -133,7 +139,7 @@ export const AgentSetEditor = observer((props: AgentSetEditorProps) => {
         listen_user_id: a.listen_user_id ?? null,
         mcp: a.mcp ?? [],
       }));
-      await http.patch(`/agent-sets/${setId}`, { name, agents: payloadAgents });
+      await agentSetApi.update(setId, name, payloadAgents);
       toaster.show({ message: t('agentSets.saved'), intent: 'success' });
       onSaved();
     } catch {

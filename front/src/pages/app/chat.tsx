@@ -14,6 +14,7 @@ import { useQuery } from '@/utils/mobx';
 import pub_sub from '@/services/pub-sub';
 import { cn } from '@/lib/utils';
 import { toaster } from '@/utils/toaster';
+import { throttle } from '@/utils/throttle';
 
 // Начало последнего слова в тексте: всё после последнего пробельного символа
 // (пробела или перевода строки). Сокращение подсказывается, когда текущее
@@ -87,16 +88,22 @@ const ChatPage = observer(() => {
         })
         .catch(() => {});
     void load();
+    // Всплеск событий (агент публикует шаги один за другим) — не по запросу на
+    // событие: первое перезагружает сразу, остальные в окне — одним повтором.
+    const reloadDetail = throttle(() => void load(), 500);
+    const reloadList = throttle(() => void chats.load(), 1000);
     const unsubscribe = pub_sub.on_message((data: any) => {
       // Событие приходит и для самих нитей (их id — тоже чаты): перезагружаем
       // открытый чат, если сообщение появилось в нём или в одной из его нитей.
       const open = currentChatRef.current;
       const threadIds = collectThreadIds(open?.threads ?? []);
-      if (data?.chat_id === chatId || threadIds.includes(data?.chat_id)) void load();
-      void chats.load();
+      if (data?.chat_id === chatId || threadIds.includes(data?.chat_id)) reloadDetail();
+      reloadList();
     });
     return () => {
       cancelled = true;
+      reloadDetail.cancel();
+      reloadList.cancel();
       unsubscribe();
     };
   }, [chatId]);

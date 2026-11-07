@@ -1,4 +1,4 @@
-import { makeAutoObservable } from 'mobx';
+import { makeAutoObservable, runInAction } from 'mobx';
 import http from '@/services/http';
 
 export interface TreeEntry {
@@ -62,6 +62,9 @@ export class FileBrowser {
   content: FileContent | null = null;
   loading = false;
   private revokeUrl: string | null = null;
+  // Номер последнего запроса файла: ответ устаревшего (пользователь уже
+  // открыл другой файл или станцию) отбрасывается, его blob-URL освобождается.
+  private fileRequest = 0;
 
   constructor() {
     makeAutoObservable(this);
@@ -81,17 +84,22 @@ export class FileBrowser {
     await this.loadDir('');
   }
 
-  async loadDir(relPath: string): Promise<void> {
-    if (this.workstationId === null) return;
+  /** Содержимое папки проекта станции (`''` — корень). */
+  async listDir(relPath: string): Promise<TreeEntry[]> {
+    if (this.workstationId === null) return [];
     const qs = relPath ? `?path=${encodeURIComponent(relPath)}` : '';
     const response = await http.get<{ entries: TreeEntry[] }>(
       `/workstations/${this.workstationId}/tree${qs}`,
     );
-    this.entries = response.data.entries;
+    return response.data.entries;
   }
 
-  async toggleDir(relPath: string, expanded: boolean): Promise<void> {
-    if (expanded) await this.loadDir(relPath);
+  async loadDir(relPath: string): Promise<void> {
+    const ws = this.workstationId;
+    const entries = await this.listDir(relPath);
+    runInAction(() => {
+      if (this.workstationId === ws) this.entries = entries;
+    });
   }
 
   async openFile(entry: TreeEntry): Promise<void> {
@@ -100,6 +108,9 @@ export class FileBrowser {
     this.currentPath = entry.path;
     this.content = null;
     this.loading = true;
+    const request = ++this.fileRequest;
+    const current = () => request === this.fileRequest;
+    let content: FileContent;
     try {
       const response = await http.get(
         `/workstations/${this.workstationId}/file?path=${encodeURIComponent(entry.path)}`,
@@ -112,17 +123,23 @@ export class FileBrowser {
         contentType.startsWith('video/') ||
         contentType.startsWith('audio/')
       ) {
-        const url = URL.createObjectURL(blob);
-        this.revokeUrl = url;
-        this.content = { contentType, objectUrl: url };
+        if (!current()) return;
+        content = { contentType, objectUrl: URL.createObjectURL(blob) };
       } else {
-        this.content = { contentType, text: await blob.text() };
+        content = { contentType, text: await blob.text() };
       }
-    } catch (e) {
-      this.content = { contentType: 'text/plain', text: undefined };
-    } finally {
-      this.loading = false;
+    } catch {
+      content = { contentType: 'text/plain', text: undefined };
     }
+    runInAction(() => {
+      if (!current()) {
+        if (content.objectUrl) URL.revokeObjectURL(content.objectUrl);
+        return;
+      }
+      this.revokeUrl = content.objectUrl ?? null;
+      this.content = content;
+      this.loading = false;
+    });
   }
 
   private revoke(): void {

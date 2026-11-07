@@ -39,7 +39,9 @@ vi.mock('@/services/me', () => ({
   default: { user: { id: 1, name: 'alice', kind: 'human', is_super_user: false } },
 }));
 
-vi.mock('@/models/chat', () => ({
+vi.mock('@/models/chat', async (importOriginal) => ({
+  // Настоящие messageApi/collectThreadIds — поверх замоканного http.
+  ...(await importOriginal<typeof import('@/models/chat')>()),
   Chat: class Chat {
     id = 0;
     title = '';
@@ -52,10 +54,6 @@ vi.mock('@/models/chat', () => ({
     participantName = (id: number) => this.participants.find((p: any) => p.id === id)?.name ?? `#${id}`;
   },
   loadChatDetail: vi.fn(),
-  collectThreadIds: (threads: any[]): number[] => {
-    const walk = (ts: any[]): number[] => ts.flatMap((t) => [t.id, ...walk(t.threads ?? [])]);
-    return walk(threads);
-  },
 }));
 vi.mock('@/utils/toaster', () => ({ toaster: { show: vi.fn() } }));
 

@@ -80,7 +80,7 @@ aga/
   (каталог `/mcp-servers`, http или stdio в воркстейшне) дают агенту свои
   инструменты — только в нативном режиме (`main/src/mcp.rs`).
 - Модель чата отделена от трассировки: `main/src/chat/` (ChatStore) рядом с
-  `main/src/trace.rs` (TraceStore), БД одна.
+  `main/src/trace/` (TraceStore), БД одна.
 
 ## Development
 - Все команды — через `make` в корне.

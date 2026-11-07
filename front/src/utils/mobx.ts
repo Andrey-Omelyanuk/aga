@@ -19,25 +19,30 @@ enum QueryType {
   QUERY_CACHE_SYNC = 'getQueryCacheSync',
 }
 
-const makeQuery = <M extends typeof Model>(
+// Query создаётся один раз на жизнь компонента (как useRef): смена аргументов
+// между рендерами намеренно не пересоздаёт его — отсюда пустые зависимости.
+const useModelQuery = <M extends typeof Model>(
   model: M,
   queryType: QueryType,
   options?: QueryProps<InstanceType<M>>,
 ): [Query<InstanceType<M>>, Promise<boolean>] => {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const query = useMemo(() => (model as any)[queryType](options) as Query<InstanceType<M>>, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const ready = useMemo<Promise<boolean>>(() => query.ready() as Promise<boolean>, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => () => query.destroy(), []);
   return [query, ready];
 };
 
 export const useQuery = <M extends typeof Model>(model: M, options?: QueryProps<InstanceType<M>>) =>
-  makeQuery(model, QueryType.QUERY, options);
+  useModelQuery(model, QueryType.QUERY, options);
 
 export const useQueryPage = <M extends typeof Model>(model: M, options?: QueryProps<InstanceType<M>>) =>
-  makeQuery(model, QueryType.QUERY_PAGE, options);
+  useModelQuery(model, QueryType.QUERY_PAGE, options);
 
 export const useQueryCacheSync = <M extends typeof Model>(model: M, options?: QueryProps<InstanceType<M>>) =>
-  makeQuery(model, QueryType.QUERY_CACHE_SYNC, options);
+  useModelQuery(model, QueryType.QUERY_CACHE_SYNC, options);
 
 export const useInput = <T>(createInput: () => Variable<T>, reset?: boolean) => {
   const input = useMemo(() => createInput(), []);

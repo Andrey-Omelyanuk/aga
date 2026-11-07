@@ -102,3 +102,18 @@ export async function loadChatDetail(id: number): Promise<Chat> {
   };
   return Chat.getModelDescriptor().updateCachedObject(flat) as Chat;
 }
+/** Операции с сообщениями, которых нет в CRUD модели `Chat`: компоненты ходят
+ *  сюда, а не в `http` напрямую. */
+export const messageApi = {
+  /** Сообщение в чат (или нить); `parentId` — ответ на сообщение (так человек
+   *  отвечает на вопрос агента `ask_human`). */
+  send: (chatId: number, body: string, parentId?: number) =>
+    http.post(`/chats/${chatId}/messages`, parentId != null ? { body, parent_id: parentId } : { body }),
+  /** Новая нить от сообщения: заголовок и первое сообщение. */
+  startThread: (messageId: number, title: string, body: string) =>
+    http.post(`/messages/${messageId}/thread`, { title, body }),
+  /** Копия сообщения нити в родительский чат (со ссылкой на источник). */
+  toParent: (messageId: number) => http.post(`/messages/${messageId}/to-parent`, {}),
+  artifacts: async (messageId: number) =>
+    (await http.get<ChatArtifact[]>(`/messages/${messageId}/artifacts`)).data ?? [],
+};

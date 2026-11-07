@@ -4,14 +4,10 @@ import { Link, useParams } from 'react-router-dom';
 import { Card, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/tabs';
-import http from '@/services/http';
+import { loadChanges, type ChangesSummary } from '@/models/workstation';
 import { cn } from '@/lib/utils';
 
-export interface ChangesSummary {
-  base: string | null;
-  changed: boolean;
-  diff: string;
-}
+export type { ChangesSummary };
 
 /** Строчный рендер unified-диффа git: мета (заголовки файлов) серым,
  * `@@`-хунки заголовками, добавленное зелёным, удалённое красным. */
@@ -58,10 +54,18 @@ const ChangesPage = observer(() => {
     if (wsId === null) return;
     setSummary(null);
     setError(false);
-    http
-      .get<ChangesSummary>(`/workstations/${wsId}/changes`)
-      .then((res) => setSummary(res.data))
-      .catch(() => setError(true));
+    // Ответ по прежней станции (переключились во время загрузки) не показываем.
+    let cancelled = false;
+    loadChanges(wsId)
+      .then((data) => {
+        if (!cancelled) setSummary(data);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [wsId]);
 
   return (

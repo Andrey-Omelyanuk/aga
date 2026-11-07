@@ -101,7 +101,7 @@ impl ChatStore {
         // Сессии воркстейшнов: корневой чат воркстейшна + привязка к проекту
         // напрямую. Сессионные поля (result_id, workstation_id,
         // continues_session_id) живут здесь, а не в chats. Проекты объявляются
-        // в trace.rs (TraceStore) — БД одна, и trace_store создаётся раньше
+        // в trace/ (TraceStore) — БД одна, и trace_store создаётся раньше
         // chat_store, поэтому FK на projects валиден.
         sqlx::query(
             r#"

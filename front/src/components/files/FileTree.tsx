@@ -2,7 +2,6 @@ import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { fileBrowser, TreeEntry } from '@/models/files';
-import http from '@/services/http';
 import { EmptyState } from '@/components/ui/tabs';
 
 function TreeEntryView({ entry, onOpen }: { entry: TreeEntry; onOpen: (e: TreeEntry) => void }) {
@@ -12,10 +11,7 @@ function TreeEntryView({ entry, onOpen }: { entry: TreeEntry; onOpen: (e: TreeEn
 
   const toggle = async () => {
     if (!expanded && children.length === 0 && fileBrowser.workstationId !== null) {
-      const response = await http.get<{ entries: TreeEntry[] }>(
-        `/workstations/${fileBrowser.workstationId}/tree?path=${encodeURIComponent(entry.path)}`,
-      );
-      setChildren(response.data.entries);
+      setChildren(await fileBrowser.listDir(entry.path));
     }
     setExpanded(!expanded);
   };

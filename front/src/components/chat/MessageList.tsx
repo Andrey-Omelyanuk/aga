@@ -1,11 +1,11 @@
 import { observer } from 'mobx-react-lite';
 import { createContext, useContext, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Chat, ChatMessage, ChatParticipant, ChatThread } from '@/models/chat';
+import { Chat, ChatMessage, ChatParticipant, ChatThread, messageApi } from '@/models/chat';
 import { formatTime } from '@/utils/dates';
 import { Artifacts } from './Artifacts';
 import { Button } from '@/components/ui/button';
-import http from '@/services/http';
+import { toaster } from '@/utils/toaster';
 import me from '@/services/me';
 
 export interface MessageListProps {
@@ -214,11 +214,10 @@ const StartThreadForm = observer(({ messageId, onDone, onCancel }: StartThreadFo
     if (!title.trim() || busy) return;
     setBusy(true);
     try {
-      await http.post(`/messages/${messageId}/thread`, {
-        title: title.trim(),
-        body,
-      });
+      await messageApi.startThread(messageId, title.trim(), body);
       onDone();
+    } catch {
+      toaster.show({ message: t('chat.sendFailed'), intent: 'danger' });
     } finally {
       setBusy(false);
     }
@@ -279,8 +278,10 @@ const ReplyForm = observer(({ chatId, message, onDone, onCancel }: ReplyFormProp
     if (!text || busy) return;
     setBusy(true);
     try {
-      await http.post(`/chats/${chatId}/messages`, { body: text, parent_id: message.id });
+      await messageApi.send(chatId, text, message.id);
       onDone();
+    } catch {
+      toaster.show({ message: t('chat.sendFailed'), intent: 'danger' });
     } finally {
       setBusy(false);
     }
@@ -366,18 +367,36 @@ const ThreadBody = observer(({ thread, onChanged }: ThreadBodyProps) => {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [startFor, setStartFor] = useState<number | null>(null);
   const [replyFor, setReplyFor] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
 
+  // Черновик очищается только после успешной отправки; повторный клик во
+  // время запроса (отправка, «в родителя») дубль не создаёт.
   const send = async () => {
     const body = draft.trim();
-    if (!body) return;
-    setDraft('');
-    await http.post(`/chats/${thread.id}/messages`, { body });
-    onChanged();
+    if (!body || busy) return;
+    setBusy(true);
+    try {
+      await messageApi.send(thread.id, body);
+      setDraft('');
+      onChanged();
+    } catch {
+      toaster.show({ message: t('chat.sendFailed'), intent: 'danger' });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const toParent = async (messageId: number) => {
-    await http.post(`/messages/${messageId}/to-parent`, {});
-    onChanged();
+    if (busy) return;
+    setBusy(true);
+    try {
+      await messageApi.toParent(messageId);
+      onChanged();
+    } catch {
+      toaster.show({ message: t('chat.sendFailed'), intent: 'danger' });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const toggle = (id: number) => {

@@ -7,9 +7,8 @@ import { Card, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
-import type { AgentSet } from '@/models/project';
+import { agentSetApi, type AgentSet } from '@/models/project';
 
 export interface AgentSetListProps {
   sets: AgentSet[];
@@ -27,7 +26,7 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      await http.post('/agent-sets', { name: trimmed, agents: [] });
+      await agentSetApi.create(trimmed);
       toaster.show({ message: t('agentSets.created'), intent: 'success' });
       setName('');
       onChanged();
@@ -38,7 +37,7 @@ export const AgentSetList = observer((props: AgentSetListProps) => {
 
   const remove = async (set: AgentSet) => {
     try {
-      await http.delete(`/agent-sets/${set.id}`);
+      await agentSetApi.remove(set);
       toaster.show({ message: t('agentSets.deleted'), intent: 'success' });
       onChanged();
     } catch {

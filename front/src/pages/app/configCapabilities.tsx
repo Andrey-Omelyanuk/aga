@@ -6,10 +6,9 @@ import {
   CapabilityEditor,
   type CapabilityKind,
 } from '@/components/project/CapabilityEditor';
-import { Shortcut, Skill } from '@/models/project';
+import { catalogApi, Shortcut, Skill } from '@/models/project';
 import type { CatalogItem } from '@/models/project';
 import { useQuery } from '@/utils/mobx';
-import http from '@/services/http';
 
 /** Страницы каталога под Config: вид записи (skills/shortcuts) — из
  * пути (/config/skills, /config/shortcuts), как в capabilityHistory. */
@@ -21,8 +20,7 @@ const ConfigCapabilitiesPage = observer(() => {
 
   const reloadDeleted = async () => {
     try {
-      const res = await http.get(`/${kind}?deleted=1`);
-      setDeleted(res.data);
+      setDeleted(await catalogApi.deleted<CatalogItem>(kind));
     } catch {
       // список «Удалённых» не критичен для основной работы
     }

@@ -4,8 +4,7 @@ import { Card, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/tabs';
-import type { McpServer } from '@/models/project';
-import http from '@/services/http';
+import { mcpApi, type McpServer, type McpToolInfo } from '@/models/project';
 import { toaster } from '@/utils/toaster';
 import { keyPatch } from './LlmList';
 import { observer } from 'mobx-react-lite';
@@ -30,11 +29,6 @@ interface McpDraft {
   clear_key: boolean;
   /** У сервера уже есть ключ (подсказка в поле и флажок удаления). */
   has_key: boolean;
-}
-
-interface McpToolInfo {
-  name: string;
-  description: string;
 }
 
 const emptyDraft = (): McpDraft => ({
@@ -144,7 +138,7 @@ export const McpList = observer((props: McpListProps) => {
   const create = async () => {
     if (!isComplete(draft)) return;
     try {
-      await http.post('/mcp-servers', payload(draft));
+      await mcpApi.create(payload(draft));
       toaster.show({ message: t('config.mcpServerAdded'), intent: 'success' });
       setDraft(emptyDraft());
       onChanged();
@@ -156,7 +150,7 @@ export const McpList = observer((props: McpListProps) => {
   const save = async (id: number) => {
     if (!isComplete(edit)) return;
     try {
-      await http.patch(`/mcp-servers/${id}`, payload(edit));
+      await mcpApi.update(id, payload(edit));
       toaster.show({ message: t('config.mcpServerSaved'), intent: 'success' });
       setEditingId(null);
       onChanged();
@@ -167,7 +161,7 @@ export const McpList = observer((props: McpListProps) => {
 
   const remove = async (id: number) => {
     try {
-      await http.delete(`/mcp-servers/${id}`);
+      await mcpApi.remove(id);
       toaster.show({ message: t('config.mcpServerDeleted'), intent: 'success' });
       onChanged();
     } catch {
@@ -177,8 +171,8 @@ export const McpList = observer((props: McpListProps) => {
 
   const check = async (id: number) => {
     try {
-      const resp = await http.get(`/mcp-servers/${id}/tools`);
-      setChecked((c) => ({ ...c, [id]: resp.data as McpToolInfo[] }));
+      const tools = await mcpApi.tools(id);
+      setChecked((c) => ({ ...c, [id]: tools }));
     } catch (e) {
       const data = (e as { response?: { data?: unknown } }).response?.data;
       setChecked((c) => ({

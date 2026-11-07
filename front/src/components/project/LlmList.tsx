@@ -4,8 +4,7 @@ import { Card, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/tabs';
-import type { Llm } from '@/models/project';
-import http from '@/services/http';
+import { llmApi, type Llm } from '@/models/project';
 import { toaster } from '@/utils/toaster';
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
@@ -88,7 +87,7 @@ export const LlmList = observer((props: LlmListProps) => {
   const create = async () => {
     if (!draft.name.trim() || !draft.api_url.trim() || !draft.model_name.trim()) return;
     try {
-      await http.post('/llms', {
+      await llmApi.create({
         name: draft.name.trim(),
         api_url: draft.api_url.trim(),
         api_key: draft.api_key.trim() || null,
@@ -106,7 +105,7 @@ export const LlmList = observer((props: LlmListProps) => {
   const save = async (id: number) => {
     if (!edit.name.trim() || !edit.api_url.trim() || !edit.model_name.trim()) return;
     try {
-      await http.patch(`/llms/${id}`, {
+      await llmApi.update(id, {
         name: edit.name.trim(),
         api_url: edit.api_url.trim(),
         ...keyPatch(edit),
@@ -123,7 +122,7 @@ export const LlmList = observer((props: LlmListProps) => {
 
   const setDefault = async (llm_id: number | null) => {
     try {
-      await http.post('/settings/llm-default', { llm_id });
+      await llmApi.setDefault(llm_id);
       toaster.show({ message: t('config.defaultLlmUpdated'), intent: 'success' });
       onChanged();
     } catch {
@@ -133,7 +132,7 @@ export const LlmList = observer((props: LlmListProps) => {
 
   const remove = async (id: number) => {
     try {
-      await http.delete(`/llms/${id}`);
+      await llmApi.remove(id);
       toaster.show({ message: t('config.connectionDeleted'), intent: 'success' });
       onChanged();
     } catch {

@@ -7,11 +7,10 @@ import { Input } from '@/components/ui/input';
 import { EmptyState, Tabs } from '@/components/ui/tabs';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Link } from 'react-router-dom';
-import http from '@/services/http';
 import { toaster } from '@/utils/toaster';
 import { Markdown } from '@/components/core/Markdown';
 import { cn } from '@/lib/utils';
-import type { CatalogItem } from '@/models/project';
+import { catalogApi, type CatalogItem } from '@/models/project';
 
 export type CapabilityKind = 'skills' | 'shortcuts';
 
@@ -70,7 +69,7 @@ const CapabilityList = observer(
       if (!trimmed) return;
       setBusy(true);
       try {
-        await http.post(`/${kind}`, { name: trimmed, content: '' });
+        await catalogApi.create(kind, trimmed);
         toaster.show({ message: texts.created, intent: 'success' });
         setName('');
         onChanged();
@@ -85,7 +84,7 @@ const CapabilityList = observer(
       setConfirming(null);
       setBusy(true);
       try {
-        await http.delete(`/${kind}/${item.id}`);
+        await catalogApi.remove(kind, item.id);
         toaster.show({ message: texts.deleted, intent: 'success' });
         onChanged();
       } catch {
@@ -199,7 +198,7 @@ const CapabilityDetail = observer(
       if (!trimmedName) return;
       setBusy(true);
       try {
-        await http.patch(`/${kind}/${item.id}`, { name: trimmedName, content });
+        await catalogApi.update(kind, item.id, trimmedName, content);
         toaster.show({ message: t('config.changesSaved'), intent: 'success' });
         onChanged();
       } catch {

@@ -6,9 +6,8 @@ import { Card, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/tabs';
 import { Diff } from '@/components/core/Diff';
-import http from '@/services/http';
 import { formatTime } from '@/utils/dates';
-import type { CapabilityHistoryEntry } from '@/models/project';
+import { catalogApi, type CapabilityHistoryEntry } from '@/models/project';
 
 type RouteKind = 'skills' | 'shortcuts';
 
@@ -45,10 +44,18 @@ const CapabilityHistoryPage = observer(() => {
     if (!kind || !id) return;
     setHistory(null);
     setError(false);
-    http
-      .get(`/${kind}/${id}/history`)
-      .then((res) => setHistory(res.data))
-      .catch(() => setError(true));
+    let cancelled = false;
+    catalogApi
+      .history(kind, Number(id))
+      .then((data) => {
+        if (!cancelled) setHistory(data);
+      })
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [kind, id]);
 
   return (

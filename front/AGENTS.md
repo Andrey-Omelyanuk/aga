@@ -145,6 +145,13 @@ front/
 - **Модели:** класс + `@api('endpoint')` + `@model`; поля через `@id`/`@field`.
   `@api` назначает `defaultRepository.adapter = new HttpAdapter(endpoint)`
   (декоратор снизу-вверх: сначала `@model`, потом `@api`). Ручных registry нет.
+- **Запросы к API — только через модели:** компоненты и страницы не импортируют
+  `services/http`. CRUD — `@api`-модели; остальное — функции домена рядом с
+  моделями: `models/project/api.ts` (`llmApi`, `mcpApi`, `agentSetApi`,
+  `catalogApi`), `models/chat` (`messageApi`, `loadChatDetail`),
+  `models/workstation/api.ts` (`loadChanges`), `models/files`
+  (`fileBrowser.listDir`/`openFile` — устаревший ответ отбрасывается). Тесты
+  мокают `@/services/http` — функции моделей ходят через него же.
 - **HttpAdapter** (`services/http-adapter.ts`): JSON (не multipart — ядро Rust),
   методы `create/update/delete/get/action/modelAction/find/load/getTotalCount/
   getDistinct` + `getURLSearchParams`. URL строится как `endpoint/{id}/{action}/`.
@@ -166,6 +173,8 @@ front/
   рекурсивно своими сообщениями и вложенными нитями). Обновления — по
   websocket: `pub_sub.on_message` на общем канале `common` перезагружает деталь
   открытого чата (и когда сообщение появилось в одной из его нитей) и список;
+  перезагрузки идут через `utils/throttle` (первое событие — сразу, всплеск в
+  окне 0,5 с / 1 с — одним повтором), а не по запросу на событие;
   polling'а нет (см. историю chat-websocket-centrifuge).
 - **Вход:** `me.init()` читает токены из фрагмента URL (`#token=...&refresh=...`);
   после входа —
@@ -293,6 +302,11 @@ front/
   первом открытии, переключатель en/ru с сохранением выбора, страница не ждёт
   данных). Запуск: `npm test`.
 - Сборка: `npm run build` (tsc --noEmit + vite build) без ошибок.
+- Линт: `npm run lint` / `make front-lint` (ESLint 10, `eslint.config.js`:
+  рекомендованные JS/TS, `react-hooks/rules-of-hooks` — ошибка,
+  `exhaustive-deps` и `any` — предупреждения) без ошибок; типы —
+  `npm run typecheck` / `make front-typecheck`. i18n: `i18n/keys.test.ts`
+  проверяет, что каждый `t('…')` есть в en и ru.
 - Компоненты: `stories/` — у каждого экранного/переиспользуемого компонента
   есть `*.stories.tsx`; Storybook строится без ошибок (`npm run build-storybook`).
 - Стенд: `curl http://dev.localhost/` возвращает собранный `dist/index.html`;

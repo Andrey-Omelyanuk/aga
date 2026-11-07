@@ -1,6 +1,5 @@
 # Rust
 main/target/
-main/Cargo.lock
 
 # Logs and temp files
 *.log

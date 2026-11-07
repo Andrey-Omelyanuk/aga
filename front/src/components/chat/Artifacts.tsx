@@ -1,17 +1,16 @@
 import { observer } from 'mobx-react-lite';
 import { useEffect, useState } from 'react';
-import { ChatArtifact } from '@/models/chat';
-import http from '@/services/http';
+import { ChatArtifact, messageApi } from '@/models/chat';
 
 export const Artifacts = observer(({ messageId }: { messageId: number }) => {
   const [items, setItems] = useState<ChatArtifact[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    void http
-      .get<ChatArtifact[]>(`/messages/${messageId}/artifacts`)
-      .then((r) => {
-        if (!cancelled) setItems(r.data ?? []);
+    void messageApi
+      .artifacts(messageId)
+      .then((list) => {
+        if (!cancelled) setItems(list);
       })
       .catch(() => {});
     return () => {
