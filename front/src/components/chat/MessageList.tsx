@@ -191,7 +191,7 @@ const MessageRow = observer(
               )}
             </div>
           ) : null}
-          <Artifacts messageId={message.id} />
+          <Artifacts items={message.artifacts} />
         </div>
       </div>
     );

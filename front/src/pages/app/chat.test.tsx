@@ -311,6 +311,35 @@ describe('ChatPage', () => {
     act(() => root.unmount());
   });
 
+  it('артефакты сообщения приходят в детали чата — без запроса на каждое сообщение', async () => {
+    const chat = makeChat({
+      ...openChat(),
+      participants: [{ id: 1, name: 'alice' }],
+      messages: [
+        {
+          id: 7,
+          body: 'готово',
+          author_id: 1,
+          created_at: '2026-09-06T10:00:00Z',
+          share_of_id: null,
+          artifacts: [{ kind: 'result', title: 'Ответ агента', content: 'итог' }],
+        },
+        { id: 8, body: 'без артефактов', author_id: 1, created_at: '2026-09-06T10:00:01Z', share_of_id: null },
+      ],
+    });
+    vi.mocked(loadChatDetail).mockResolvedValue(chat);
+    const { container, root } = await renderChat('42');
+    await act(async () => {});
+    const arts = container.querySelectorAll('[data-testid="artifact"]');
+    expect(arts).toHaveLength(1);
+    expect(arts[0].textContent).toContain('Ответ агента: итог');
+    const artifactCalls = vi
+      .mocked(http.get)
+      .mock.calls.filter(([url]) => String(url).includes('/artifacts'));
+    expect(artifactCalls).toHaveLength(0);
+    act(() => root.unmount());
+  });
+
   it('страница чата не опрашивает сервер по таймеру', async () => {
     const source = readFileSync('src/pages/app/chat.tsx', 'utf-8');
     expect(source).not.toMatch(/setInterval/);

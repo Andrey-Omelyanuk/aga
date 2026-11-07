@@ -411,4 +411,18 @@ impl ChatStore {
         .await?;
         Ok(rows.iter().map(artifact_from_row).collect())
     }
+
+    /// Артефакты всех сообщений чата одним запросом (деталь чата вкладывает их
+    /// в сообщения — без запроса на каждое сообщение).
+    pub async fn list_chat_artifacts(&self, chat_id: i64) -> Result<Vec<Artifact>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT a.id, a.message_id, a.kind, a.title, a.content, a.created_at
+             FROM artifacts a JOIN messages m ON m.id = a.message_id
+             WHERE m.chat_id = ? ORDER BY a.id",
+        )
+        .bind(chat_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(artifact_from_row).collect())
+    }
 }

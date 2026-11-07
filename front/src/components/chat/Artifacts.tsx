@@ -1,24 +1,9 @@
-import { observer } from 'mobx-react-lite';
-import { useEffect, useState } from 'react';
-import { ChatArtifact, messageApi } from '@/models/chat';
+import { ChatArtifact } from '@/models/chat';
 
-export const Artifacts = observer(({ messageId }: { messageId: number }) => {
-  const [items, setItems] = useState<ChatArtifact[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void messageApi
-      .artifacts(messageId)
-      .then((list) => {
-        if (!cancelled) setItems(list);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [messageId]);
-
-  if (items.length === 0) return null;
+/** Артефакты сообщения из детали чата (`message.artifacts`): раньше каждый
+ *  ряд сам запрашивал `/messages/:id/artifacts` (N+1) и не обновлялся. */
+export const Artifacts = ({ items }: { items?: ChatArtifact[] }) => {
+  if (!items || items.length === 0) return null;
   return (
     <>
       {items.map((art, i) => (
@@ -32,4 +17,4 @@ export const Artifacts = observer(({ messageId }: { messageId: number }) => {
       ))}
     </>
   );
-});
+};

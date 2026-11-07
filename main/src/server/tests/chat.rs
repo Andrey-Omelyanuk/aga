@@ -540,3 +540,28 @@ async fn chat_lifecycle_events_reach_common_channel() {
     server.abort();
     cleanup(&file).await;
 }
+
+/// Артефакты сообщений приходят в детали чата (`messages[].artifacts`):
+/// веб-клиенту не нужен запрос на каждое сообщение.
+#[tokio::test]
+async fn chat_detail_embeds_message_artifacts() {
+    let (state, file) = test_state(true).await;
+    let alice = auth_headers("alice", &["participant"]);
+    let chat_id = create_chat(&alice, &state).await;
+    send_chat_message(chat_id, "с артефактом", &alice, &state).await;
+    send_chat_message(chat_id, "без артефакта", &alice, &state).await;
+    let messages = state.chat_store.list_messages(chat_id).await.unwrap();
+    state
+        .chat_store
+        .add_artifact(messages[0].id, "result", Some("Ответ агента"), "итог")
+        .await
+        .unwrap();
+    let (status, body) = get(&format!("/chats/{chat_id}"), &alice, state.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let msgs = detail["messages"].as_array().unwrap();
+    assert_eq!(msgs[0]["artifacts"][0]["content"], "итог");
+    assert_eq!(msgs[0]["artifacts"][0]["title"], "Ответ агента");
+    assert!(msgs[1].get("artifacts").is_none());
+    cleanup(&file).await;
+}

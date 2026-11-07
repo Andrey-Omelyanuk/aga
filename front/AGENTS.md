@@ -149,7 +149,8 @@ front/
   `services/http`. CRUD — `@api`-модели; остальное — функции домена рядом с
   моделями: `models/project/api.ts` (`llmApi`, `mcpApi`, `agentSetApi`,
   `catalogApi`), `models/chat` (`messageApi`, `loadChatDetail`),
-  `models/workstation/api.ts` (`loadChanges`), `models/files`
+  `models/workstation/api.ts` (`loadChanges`), артефакты сообщений — из
+  детали чата (`message.artifacts`, без запроса на сообщение), `models/files`
   (`fileBrowser.listDir`/`openFile` — устаревший ответ отбрасывается). Тесты
   мокают `@/services/http` — функции моделей ходят через него же.
 - **HttpAdapter** (`services/http-adapter.ts`): JSON (не multipart — ядро Rust),

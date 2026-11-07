@@ -77,7 +77,14 @@ src/
 ├── seed.rs       # Тестовый набор (aga seed): очистка БД + детерминированная фикстура
 ├── auth.rs       # JwtVerifier (JWKS, RS256) + resolve_user: участник/админ из Keycloak или аноним-супер
 ├── shell.rs      # quote — единственный способ подставить значение в команду `sh -c` (пути, ветки, git-URL)
-└── server.rs     # Axum Router (гейт токена на всех роутах, кроме /auth/* и /healthz) + хендлеры API + /auth/login, /auth/callback, /auth/refresh, /auth/logout, /users/me, /connection-jwt/; события в Centrifugo
+└── server/       # HTTP API (Axum); события в Centrifugo
+    ├── mod.rs    #   AppState, таблица маршрутов (гейт токена на всех роутах, кроме /auth/* и /healthz), общие помощники (current_user, require_admin, can_write…)
+    ├── error.rs  #   AppError — ошибка хендлеров (код как есть; внутренний сбой — 500 без деталей, причина в лог)
+    ├── projects.rs, agent_sets.rs, llm.rs, mcp.rs, capabilities.rs # хендлеры по доменам
+    ├── sso.rs    #   /auth/login, /auth/callback (state + PKCE), /auth/refresh, /auth/logout
+    ├── chat.rs   #   users, /users/me, chats (деталь с нитями и артефактами), messages, нити, share, /connection-jwt/
+    ├── workstations.rs # станции, сессии, tree/file/changes, ssh-key, trace
+    └── tests/    #   тесты роутера по тем же доменам (mod.rs — общие помощники)
 ```
 
 ## Patterns
@@ -259,7 +266,7 @@ src/
   сообщения чата опущены)». Скрытая часть сообщений (сокращения) агентам не
   уходит — это заметка людям.
 - **Модель параллелизма рантайма:** события Centrifugo диспатчатся асинхронно (`tokio::spawn`), SSE-стрим не блокируется запусками. Слои сериализации: FIFO-мьютекс на пару «станция+агент», затем семафор общего параллелизма (`MAX_CONCURRENT_AGENT_RUNS` = 4) — порядок важен: запуск, ждущий занятого агента, слот не держит (иначе сообщения одному занятому агенту занимали бы все слоты); мьютекс пары «станция+агент» — один агент никогда не работает в двух экземплярах, сколько бы раз его ни вызвали в сессии; разные агенты одной станции работают параллельно — и LLM-шаги, и команды: каждая команда идёт в песочнице владения агента, пишет только в свою зону, а чужие изменения видит сразу (общих мьютексов станции нет). Дедуп: повторная доставка того же `message_id` не запускает агента (`RuntimeState::seen`; помнит id не старше 10 000 от отметки — память не растёт). Живость процесса — heartbeat-файл (env `AGA_HEARTBEAT_FILE`, `/tmp/aga-agent.alive`, обновляется раз в 10 с; liveness-проба k8s смотрит на его mtime); у HTTP-сервера — `GET /healthz`. Worktree-изоляции нет намеренно: другая работа — отдельная сессия и отдельный workspace.
-- **Команды чата** (`#invite`/`#kick`/`#end`) — это обычные сообщения с дополнительной реакцией; разбираются в `chat::parse_command`, исполняются в server.rs; шаринг — отдельный `POST /messages/:id/share`. `#start` командой не является: нити начинаются только действием у сообщения (`POST /messages/:id/thread`).
+- **Команды чата** (`#invite`/`#kick`/`#end`) — это обычные сообщения с дополнительной реакцией; разбираются в `chat::parse_command`, исполняются в `server/chat.rs`; шаринг — отдельный `POST /messages/:id/share`. `#start` командой не является: нити начинаются только действием у сообщения (`POST /messages/:id/thread`).
 - **Нити — дочерние чаты от сообщения:** `start_thread` создаёт чат-нить с
   `start_message_id` (сообщение, от которого началась нить) и первым
   сообщением с `title` — заголовком нити (у самого чата-нити `title` не
@@ -415,7 +422,18 @@ src/
   отрабатывает до загрузки конфига. Участники `alice`/`bob` — учётки Keycloak
   (фиксированные `sso_subject` из `infra/k8s/core/keycloak-realm.json`, пароли
   `alice-pass`/`bob-pass`) — вход через SSO после сида находит именно их.
-- **Error handling в API:** большинство хендлеров при ошибке возвращают `500 INTERNAL_SERVER_ERROR` без деталей. Детали — в логах (tracing) и в БД (trace_entries с entry_type = "error").
+- **Error handling в API:** хендлеры возвращают `Result<_, AppError>`
+  (`server/error.rs`) и пробрасывают ошибки через `?`. Код ответа
+  (`StatusCode`) уходит как есть с пустым телом. Сбой хранилища или exec
+  (`sqlx::Error`, git/Centrifugo/заголовки, `FileError::Exec`) — 500 без
+  деталей наружу; причина и место `?` (`#[track_caller]`) пишутся в лог
+  `tracing::error!`. Текстом ошибки отвечает только
+  `GET /mcp-servers/:id/tools` (400/502). Ошибки прогонов агентов — ещё и в БД
+  (trace_entries с entry_type = "error").
+- **Деталь чата несёт артефакты:** `GET /chats/:id` вкладывает в каждое
+  сообщение (и в нитях) `artifacts` — одним запросом на чат
+  (`ChatStore::list_chat_artifacts`); у сообщения без артефактов поля нет.
+  `GET /messages/:id/artifacts` остаётся для API-клиентов.
 - **Просмотр содержимого проекта — только чтение:** `GET /workstations/:id/tree` и
   `GET /workstations/:id/file` читают ФС воркстейшна напрямую (exec `find`/`base64`
   через `executor_for_workstation`). Путь — относительный от `/work/project`;

@@ -18,6 +18,9 @@ export interface ChatMessage {
   hidden?: string | null;
   /** Источник: 'user' — набрано человеком, 'agent' — ответ агента от имени автора. */
   origin?: string;
+  /** Артефакты сообщения (итог агента и т.п.) — приходят в детали чата
+   *  (`GET /chats/:id`), отдельного запроса на сообщение нет. */
+  artifacts?: ChatArtifact[];
 }
 
 export interface ChatParticipant {
@@ -114,6 +117,4 @@ export const messageApi = {
     http.post(`/messages/${messageId}/thread`, { title, body }),
   /** Копия сообщения нити в родительский чат (со ссылкой на источник). */
   toParent: (messageId: number) => http.post(`/messages/${messageId}/to-parent`, {}),
-  artifacts: async (messageId: number) =>
-    (await http.get<ChatArtifact[]>(`/messages/${messageId}/artifacts`)).data ?? [],
 };

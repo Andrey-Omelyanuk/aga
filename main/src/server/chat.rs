@@ -119,6 +119,28 @@ pub(super) async fn get_chat(
 async fn chat_detail(state: &AppState, chat_id: i64) -> Option<serde_json::Value> {
     let chat = state.chat_store.get_chat(chat_id).await.ok()?;
     let messages = state.chat_store.list_messages(chat_id).await.ok()?;
+    // Артефакты — в сообщения детали (`messages[].artifacts`), одним запросом
+    // на чат: веб-клиент не запрашивает их по сообщению.
+    let mut artifacts: std::collections::HashMap<i64, Vec<crate::chat::Artifact>> =
+        std::collections::HashMap::new();
+    for art in state
+        .chat_store
+        .list_chat_artifacts(chat_id)
+        .await
+        .unwrap_or_default()
+    {
+        artifacts.entry(art.message_id).or_default().push(art);
+    }
+    let messages: Vec<serde_json::Value> = messages
+        .into_iter()
+        .map(|m| {
+            let mut v = serde_json::to_value(&m).unwrap_or_default();
+            if let Some(list) = artifacts.remove(&m.id) {
+                v["artifacts"] = serde_json::to_value(list).unwrap_or_default();
+            }
+            v
+        })
+        .collect();
     let participants = state
         .chat_store
         .list_participants(chat_id)
